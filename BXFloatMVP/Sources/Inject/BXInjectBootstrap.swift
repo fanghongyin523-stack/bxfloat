@@ -1,11 +1,12 @@
 import UIKit
 
-/// 注入入口：当前仅允许在 Safari 宿主中启动（目标2 试验靶）。
+/// 注入入口：白名单宿主（系统 Safari 常不在注入器列表，优先用 BXFloat壳）。
 @objc(BXInjectBootstrap)
 final class BXInjectBootstrap: NSObject {
     private static var observersReady = false
 
     private static let allowedBundleIds: Set<String> = [
+        "com.baixiang.bxfloat.host", // 巨魔安装的注入试验壳（推荐）
         "com.apple.mobilesafari",
         "com.apple.SafariViewService",
     ]

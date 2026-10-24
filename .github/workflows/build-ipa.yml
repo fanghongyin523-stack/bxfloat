@@ -21,66 +21,75 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Build App + Inject dylib
+      - name: Build App + Host + Inject
         run: |
           set -euo pipefail
-          xcodebuild \
-            -project BXFloatMVP.xcodeproj \
-            -scheme BXFloatMVP \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ONLY_ACTIVE_ARCH=NO \
-            build
-
-          xcodebuild \
-            -project BXFloatMVP.xcodeproj \
-            -scheme BXFloatInject \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ONLY_ACTIVE_ARCH=NO \
-            build
+          for scheme in BXFloatMVP BXFloatHost BXFloatInject; do
+            xcodebuild \
+              -project BXFloatMVP.xcodeproj \
+              -scheme "$scheme" \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath build \
+              -destination "generic/platform=iOS" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              ONLY_ACTIVE_ARCH=NO \
+              build
+          done
 
       - name: Install ldid
         run: brew install ldid
 
-      - name: Package IPA + dylib
+      - name: Package artifacts
         run: |
           set -euo pipefail
-          APP="build/Build/Products/Release-iphoneos/BXFloatMVP.app"
-          DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
-          test -d "$APP"
-          test -f "$DYLIB"
-          ldid -S"Resources/TrollStore.entitlements" "$APP/BXFloatMVP"
-          ldid -S "$DYLIB"
-          rm -rf Payload BXFloatMVP.ipa
-          mkdir Payload
-          cp -R "$APP" Payload/
-          zip -qr BXFloatMVP.ipa Payload
-          ls -lh BXFloatMVP.ipa "$DYLIB"
           mkdir -p ../dist
-          cp BXFloatMVP.ipa ../dist/BXFloatMVP.ipa
-          cp "$DYLIB" ../dist/BXFloatInject.dylib
 
-      - name: Upload IPA
+          package_ipa () {
+            local app_path="$1"
+            local exe_name="$2"
+            local out_ipa="$3"
+            test -d "$app_path"
+            ldid -S"Resources/TrollStore.entitlements" "$app_path/$exe_name"
+            rm -rf Payload
+            mkdir Payload
+            cp -R "$app_path" Payload/
+            zip -qr "$out_ipa" Payload
+            cp "$out_ipa" ../dist/
+          }
+
+          package_ipa \
+            "build/Build/Products/Release-iphoneos/BXFloatMVP.app" \
+            "BXFloatMVP" \
+            "BXFloatMVP.ipa"
+
+          package_ipa \
+            "build/Build/Products/Release-iphoneos/BXFloatHost.app" \
+            "BXFloatHost" \
+            "BXFloatHost.ipa"
+
+          DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
+          test -f "$DYLIB"
+          ldid -S "$DYLIB"
+          cp "$DYLIB" ../dist/BXFloatInject.dylib
+          ls -lh ../dist
+
+      - name: Upload MVP IPA
         uses: actions/upload-artifact@v4
         with:
           name: BXFloatMVP-ipa
           path: dist/BXFloatMVP.ipa
-          if-no-files-found: error
+
+      - name: Upload Host IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BXFloatHost-ipa
+          path: dist/BXFloatHost.ipa
 
       - name: Upload Inject dylib
         uses: actions/upload-artifact@v4
         with:
           name: BXFloatInject-dylib
           path: dist/BXFloatInject.dylib
-          if-no-files-found: error

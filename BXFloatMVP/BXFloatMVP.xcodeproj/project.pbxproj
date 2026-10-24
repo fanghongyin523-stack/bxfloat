@@ -26,6 +26,10 @@
 		B10000000000000000000008 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* UIKit.framework */; };
 		B10000000000000000000009 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Foundation.framework */; };
 		B1000000000000000000000A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* AVFoundation.framework */; };
+		C10000000000000000000001 /* HostAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* HostAppDelegate.swift */; };
+		C10000000000000000000002 /* HostSceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* HostSceneDelegate.swift */; };
+		C10000000000000000000003 /* HostViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* HostViewController.swift */; };
+		C10000000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -46,6 +50,11 @@
 		A2000000000000000000000F /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 		A20000000000000000000010 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		A20000000000000000000011 /* BXFloatInject.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = BXFloatInject.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000012 /* HostAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAppDelegate.swift; sourceTree = "<group>"; };
+		A20000000000000000000013 /* HostSceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSceneDelegate.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* HostViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostViewController.swift; sourceTree = "<group>"; };
+		A20000000000000000000015 /* Host-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Host-Info.plist"; sourceTree = "<group>"; };
+		A20000000000000000000016 /* BXFloatHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BXFloatHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -63,6 +72,13 @@
 				B10000000000000000000008 /* UIKit.framework in Frameworks */,
 				B10000000000000000000009 /* Foundation.framework in Frameworks */,
 				B1000000000000000000000A /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,6 +104,7 @@
 				A40000000000000000000008 /* Overlay */,
 				A40000000000000000000009 /* Home */,
 				A4000000000000000000000B /* Inject */,
+				A4000000000000000000000C /* Host */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -123,6 +140,7 @@
 			children = (
 				A20000000000000000000009 /* Assets.xcassets */,
 				A2000000000000000000000A /* Info.plist */,
+				A20000000000000000000015 /* Host-Info.plist */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -132,6 +150,7 @@
 			children = (
 				A2000000000000000000000B /* BXFloatMVP.app */,
 				A20000000000000000000011 /* BXFloatInject.dylib */,
+				A20000000000000000000016 /* BXFloatHost.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -172,6 +191,16 @@
 			path = Inject;
 			sourceTree = "<group>";
 		};
+		A4000000000000000000000C /* Host */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000012 /* HostAppDelegate.swift */,
+				A20000000000000000000013 /* HostSceneDelegate.swift */,
+				A20000000000000000000014 /* HostViewController.swift */,
+			);
+			path = Host;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -208,6 +237,23 @@
 			productReference = A20000000000000000000011 /* BXFloatInject.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
+		C50000000000000000000001 /* BXFloatHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C70000000000000000000001 /* Build configuration list for PBXNativeTarget "BXFloatHost" */;
+			buildPhases = (
+				C60000000000000000000001 /* Sources */,
+				C30000000000000000000001 /* Frameworks */,
+				C60000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BXFloatHost;
+			productName = BXFloatHost;
+			productReference = A20000000000000000000016 /* BXFloatHost.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -217,14 +263,6 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1500;
 				LastUpgradeCheck = 1500;
-				TargetAttributes = {
-					A50000000000000000000001 = {
-						CreatedOnToolsVersion = 15.0;
-					};
-					B50000000000000000000001 = {
-						CreatedOnToolsVersion = 15.0;
-					};
-				};
 			};
 			buildConfigurationList = A70000000000000000000001 /* Build configuration list for PBXProject "BXFloatMVP" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -242,6 +280,7 @@
 			targets = (
 				A50000000000000000000001 /* BXFloatMVP */,
 				B50000000000000000000001 /* BXFloatInject */,
+				C50000000000000000000001 /* BXFloatHost */,
 			);
 		};
 /* End PBXProject section */
@@ -252,6 +291,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000009 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C60000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000000000000000000004 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -284,6 +331,16 @@
 				B10000000000000000000005 /* FloatingOverlayController.swift in Sources */,
 				B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */,
 				B10000000000000000000007 /* BXInjectConstructor.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000000000000000000001 /* HostAppDelegate.swift in Sources */,
+				C10000000000000000000002 /* HostSceneDelegate.swift in Sources */,
+				C10000000000000000000003 /* HostViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -412,6 +469,55 @@
 			};
 			name = Release;
 		};
+		C90000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Resources/Host-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.host;
+				PRODUCT_NAME = BXFloatHost;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C90000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Resources/Host-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.host;
+				PRODUCT_NAME = BXFloatHost;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -438,6 +544,15 @@
 			buildConfigurations = (
 				B90000000000000000000001 /* Debug */,
 				B90000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C70000000000000000000001 /* Build configuration list for PBXNativeTarget "BXFloatHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C90000000000000000000001 /* Debug */,
+				C90000000000000000000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
