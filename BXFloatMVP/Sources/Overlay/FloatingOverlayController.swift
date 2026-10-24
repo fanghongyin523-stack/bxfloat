@@ -1,13 +1,12 @@
 import UIKit
 
-/// 在当前 App 的 WindowScene 上叠一层高 level 窗口（目标1：不注入别的 App）。
+/// 目标1：悬浮窗挂在主窗口上（不再另开全屏高层 Window，避免挡主界面按钮）。
 final class FloatingOverlayController: FloatingOverlayViewDelegate {
     static let shared = FloatingOverlayController()
 
-    private var overlayWindow: PassthroughWindow?
+    private weak var hostWindow: UIWindow?
     private var overlayView: FloatingOverlayView?
     private var player: StreamPlayer?
-    private var windowScene: UIWindowScene?
     private var loadedURL: String?
 
     private init() {
@@ -19,16 +18,17 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         )
     }
 
-    func attach(to scene: UIWindowScene) {
-        windowScene = scene
-        ensureWindow()
+    func attach(to window: UIWindow) {
+        hostWindow = window
         apply(MediaConfigStore.shared.config)
     }
 
     func refreshSceneIfNeeded(_ scene: UIWindowScene?) {
         guard let scene else { return }
-        windowScene = scene
-        overlayWindow?.windowScene = scene
+        if let existing = hostWindow, existing.windowScene === scene { return }
+        if let win = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
+            hostWindow = win
+        }
     }
 
     func show() {
@@ -39,7 +39,6 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         MediaConfigStore.shared.update { $0.overlayEnabled = false }
     }
 
-    /// 滑动透明度时即时生效，不重载播放。
     func applyOpacityLive(_ opacity: Float) {
         let clamped = max(0.2, min(opacity, 1))
         overlayView?.alpha = CGFloat(clamped)
@@ -50,28 +49,8 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         apply(MediaConfigStore.shared.config)
     }
 
-    private func ensureWindow() {
-        guard let windowScene else { return }
-        if overlayWindow == nil {
-            let window = PassthroughWindow(windowScene: windowScene)
-            window.windowLevel = .alert + 1
-            window.backgroundColor = .clear
-            window.isHidden = true
-
-            let root = UIViewController()
-            let rootView = PassthroughRootView(frame: .zero)
-            rootView.backgroundColor = .clear
-            root.view = rootView
-            window.rootViewController = root
-            overlayWindow = window
-        } else {
-            overlayWindow?.windowScene = windowScene
-        }
-    }
-
     private func apply(_ config: MediaConfig) {
-        ensureWindow()
-        guard let overlayWindow, let root = overlayWindow.rootViewController?.view else { return }
+        guard let hostWindow else { return }
 
         if !config.overlayEnabled {
             player?.stop()
@@ -79,22 +58,21 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
             loadedURL = nil
             overlayView?.removeFromSuperview()
             overlayView = nil
-            overlayWindow.isHidden = true
             return
         }
-
-        overlayWindow.isHidden = false
 
         let overlay: FloatingOverlayView
         if let existing = overlayView {
             overlay = existing
+            hostWindow.bringSubviewToFront(existing)
         } else {
-            let shortSide = min(max(root.bounds.width, 1), max(root.bounds.height, 1))
+            let bounds = hostWindow.bounds
+            let shortSide = min(max(bounds.width, 1), max(bounds.height, 1))
             let width = max(shortSide * CGFloat(config.windowScale), 160)
             let frame = CGRect(x: 24, y: 120, width: width, height: width * 0.75)
             let created = FloatingOverlayView(frame: frame)
             created.delegate = self
-            root.addSubview(created)
+            hostWindow.addSubview(created)
             overlayView = created
             overlay = created
         }
@@ -135,12 +113,15 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
 
     private func presentError(_ message: String) {
         NSLog("BXFloat overlay error: \(message)")
-        guard let root = overlayWindow?.rootViewController else { return }
-
+        guard let root = hostWindow?.rootViewController else { return }
+        var presenter = root
+        while let shown = presenter.presentedViewController {
+            presenter = shown
+        }
         let alert = UIAlertController(title: "无法播放", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
-        if root.presentedViewController == nil {
-            root.present(alert, animated: true)
+        if presenter.presentedViewController == nil {
+            presenter.present(alert, animated: true)
         }
     }
 

@@ -14,10 +14,13 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
         self.window = window
 
-        FloatingOverlayController.shared.attach(to: windowScene)
+        FloatingOverlayController.shared.attach(to: window)
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         FloatingOverlayController.shared.refreshSceneIfNeeded(scene as? UIWindowScene)
+        if let window {
+            FloatingOverlayController.shared.attach(to: window)
+        }
     }
 }
