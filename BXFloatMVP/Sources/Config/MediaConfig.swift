@@ -40,18 +40,20 @@ final class MediaConfigStore {
         config = decoded
     }
 
-    func save(_ config: MediaConfig) {
+    func save(_ config: MediaConfig, postNotification: Bool = true) {
         self.config = config
         if let data = try? JSONEncoder().encode(config) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
         }
-        NotificationCenter.default.post(name: .bxMediaConfigDidChange, object: nil)
+        if postNotification {
+            NotificationCenter.default.post(name: .bxMediaConfigDidChange, object: nil)
+        }
     }
 
-    func update(_ mutate: (inout MediaConfig) -> Void) {
+    func update(postNotification: Bool = true, _ mutate: (inout MediaConfig) -> Void) {
         var next = config
         mutate(&next)
-        save(next)
+        save(next, postNotification: postNotification)
     }
 }
 

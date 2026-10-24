@@ -34,6 +34,7 @@ final class HomeViewController: UIViewController {
         opacitySlider.minimumValue = 0.2
         opacitySlider.maximumValue = 1.0
         opacitySlider.addTarget(self, action: #selector(opacityChanged), for: .valueChanged)
+        opacitySlider.addTarget(self, action: #selector(opacityEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         opacityValueLabel.textColor = .secondaryLabel
         opacityValueLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
 
@@ -132,6 +133,15 @@ final class HomeViewController: UIViewController {
 
     @objc private func opacityChanged() {
         opacityValueLabel.text = String(format: "%.0f%%", opacitySlider.value * 100)
+        FloatingOverlayController.shared.applyOpacityLive(opacitySlider.value)
+    }
+
+    @objc private func opacityEnded() {
+        // 松手时再写盘并同步状态文案
+        MediaConfigStore.shared.update(postNotification: false) { config in
+            config.opacity = opacitySlider.value
+        }
+        reloadFromStore()
     }
 
     @objc private func muteChanged() {

@@ -16,6 +16,7 @@
 		A10000000000000000000007 /* FloatingOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* FloatingOverlayController.swift */; };
 		A10000000000000000000008 /* HomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* HomeViewController.swift */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* Assets.xcassets */; };
+		A1000000000000000000000A /* PassthroughWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* PassthroughWindow.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 		A20000000000000000000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000000000000000000000A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BXFloatMVP.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BXFloatMVP.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000C /* PassthroughWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassthroughWindow.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -112,6 +114,7 @@
 			children = (
 				A20000000000000000000006 /* FloatingOverlayView.swift */,
 				A20000000000000000000007 /* FloatingOverlayController.swift */,
+				A2000000000000000000000C /* PassthroughWindow.swift */,
 			);
 			path = Overlay;
 			sourceTree = "<group>";
@@ -201,6 +204,7 @@
 				A10000000000000000000005 /* AVStreamPlayer.swift in Sources */,
 				A10000000000000000000006 /* FloatingOverlayView.swift in Sources */,
 				A10000000000000000000007 /* FloatingOverlayController.swift in Sources */,
+				A1000000000000000000000A /* PassthroughWindow.swift in Sources */,
 				A10000000000000000000008 /* HomeViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
