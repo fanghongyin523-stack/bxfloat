@@ -36,7 +36,22 @@ final class HostViewController: UIViewController {
         bid.numberOfLines = 0
         bid.textAlignment = .center
 
-        let stack = UIStackView(arrangedSubviews: [title, body, bid])
+        let testButton = UIButton(type: .system)
+        testButton.setTitle("点我测试：宿主还能不能点", for: .normal)
+        testButton.setTitleColor(.white, for: .normal)
+        testButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        testButton.backgroundColor = UIColor(red: 0.2, green: 0.55, blue: 0.95, alpha: 1)
+        testButton.layer.cornerRadius = 10
+        testButton.contentEdgeInsets = UIEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        testButton.addTarget(self, action: #selector(testHostTap), for: .touchUpInside)
+
+        let tip = UILabel()
+        tip.text = "上面这段是说明文字，本身不可点。请点蓝色按钮测穿透。"
+        tip.textColor = .tertiaryLabel
+        tip.font = .systemFont(ofSize: 13)
+        tip.numberOfLines = 0
+
+        let stack = UIStackView(arrangedSubviews: [title, body, testButton, tip, bid])
         stack.axis = .vertical
         stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -47,5 +62,15 @@ final class HostViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
+    }
+
+    @objc private func testHostTap() {
+        let alert = UIAlertController(
+            title: "穿透正常",
+            message: "能弹出这个提示，说明悬浮窗没有挡住宿主按钮。",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "好", style: .default))
+        present(alert, animated: true)
     }
 }
