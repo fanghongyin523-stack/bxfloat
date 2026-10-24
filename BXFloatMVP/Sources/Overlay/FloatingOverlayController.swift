@@ -139,4 +139,29 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
             view.setPlaying(true)
         }
     }
+
+    func floatingOverlayDidRequestEditURL(_ view: FloatingOverlayView) {
+        guard let root = hostWindow?.rootViewController else { return }
+        var presenter = root
+        while let shown = presenter.presentedViewController {
+            presenter = shown
+        }
+
+        let alert = UIAlertController(title: "播放地址", message: "支持 http(s) / 本地路径", preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = MediaConfigStore.shared.config.streamURL
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            let text = alert.textFields?.first?.text ?? ""
+            MediaConfigStore.shared.update { config in
+                config.streamURL = text
+                config.overlayEnabled = true
+            }
+        })
+        presenter.present(alert, animated: true)
+    }
 }

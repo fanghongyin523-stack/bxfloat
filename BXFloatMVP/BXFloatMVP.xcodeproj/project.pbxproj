@@ -16,6 +16,16 @@
 		A10000000000000000000007 /* FloatingOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* FloatingOverlayController.swift */; };
 		A10000000000000000000008 /* HomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* HomeViewController.swift */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* Assets.xcassets */; };
+		B10000000000000000000001 /* MediaConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* MediaConfig.swift */; };
+		B10000000000000000000002 /* StreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* StreamPlayer.swift */; };
+		B10000000000000000000003 /* AVStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* AVStreamPlayer.swift */; };
+		B10000000000000000000004 /* FloatingOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* FloatingOverlayView.swift */; };
+		B10000000000000000000005 /* FloatingOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* FloatingOverlayController.swift */; };
+		B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BXInjectBootstrap.swift */; };
+		B10000000000000000000007 /* BXInjectConstructor.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* BXInjectConstructor.m */; };
+		B10000000000000000000008 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* UIKit.framework */; };
+		B10000000000000000000009 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Foundation.framework */; };
+		B1000000000000000000000A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* AVFoundation.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +40,12 @@
 		A20000000000000000000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000000000000000000000A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BXFloatMVP.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BXFloatMVP.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000C /* BXInjectBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BXInjectBootstrap.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* BXInjectConstructor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = BXInjectConstructor.m; sourceTree = "<group>"; };
+		A2000000000000000000000E /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		A2000000000000000000000F /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		A20000000000000000000010 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		A20000000000000000000011 /* BXFloatInject.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = BXFloatInject.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -37,6 +53,16 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000008 /* UIKit.framework in Frameworks */,
+				B10000000000000000000009 /* Foundation.framework in Frameworks */,
+				B1000000000000000000000A /* AVFoundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -48,6 +74,7 @@
 			children = (
 				A40000000000000000000002 /* Sources */,
 				A40000000000000000000006 /* Resources */,
+				A4000000000000000000000A /* Frameworks */,
 				A40000000000000000000007 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -60,6 +87,7 @@
 				A40000000000000000000005 /* Player */,
 				A40000000000000000000008 /* Overlay */,
 				A40000000000000000000009 /* Home */,
+				A4000000000000000000000B /* Inject */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -103,6 +131,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000000000000000000000B /* BXFloatMVP.app */,
+				A20000000000000000000011 /* BXFloatInject.dylib */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -122,6 +151,25 @@
 				A20000000000000000000008 /* HomeViewController.swift */,
 			);
 			path = Home;
+			sourceTree = "<group>";
+		};
+		A4000000000000000000000A /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000000E /* UIKit.framework */,
+				A2000000000000000000000F /* Foundation.framework */,
+				A20000000000000000000010 /* AVFoundation.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A4000000000000000000000B /* Inject */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000000C /* BXInjectBootstrap.swift */,
+				A2000000000000000000000D /* BXInjectConstructor.m */,
+			);
+			path = Inject;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -144,6 +192,22 @@
 			productReference = A2000000000000000000000B /* BXFloatMVP.app */;
 			productType = "com.apple.product-type.application";
 		};
+		B50000000000000000000001 /* BXFloatInject */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B70000000000000000000001 /* Build configuration list for PBXNativeTarget "BXFloatInject" */;
+			buildPhases = (
+				B60000000000000000000001 /* Sources */,
+				B30000000000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BXFloatInject;
+			productName = BXFloatInject;
+			productReference = A20000000000000000000011 /* BXFloatInject.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -155,6 +219,9 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					A50000000000000000000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					B50000000000000000000001 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -174,6 +241,7 @@
 			projectRoot = "";
 			targets = (
 				A50000000000000000000001 /* BXFloatMVP */,
+				B50000000000000000000001 /* BXFloatInject */,
 			);
 		};
 /* End PBXProject section */
@@ -202,6 +270,20 @@
 				A10000000000000000000006 /* FloatingOverlayView.swift in Sources */,
 				A10000000000000000000007 /* FloatingOverlayController.swift in Sources */,
 				A10000000000000000000008 /* HomeViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* MediaConfig.swift in Sources */,
+				B10000000000000000000002 /* StreamPlayer.swift in Sources */,
+				B10000000000000000000003 /* AVStreamPlayer.swift in Sources */,
+				B10000000000000000000004 /* FloatingOverlayView.swift in Sources */,
+				B10000000000000000000005 /* FloatingOverlayController.swift in Sources */,
+				B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */,
+				B10000000000000000000007 /* BXInjectConstructor.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -290,6 +372,46 @@
 			};
 			name = Release;
 		};
+		B90000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_PREFIX = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACH_O_TYPE = mh_dylib;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.inject;
+				PRODUCT_NAME = BXFloatInject;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B90000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_PREFIX = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACH_O_TYPE = mh_dylib;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.inject;
+				PRODUCT_NAME = BXFloatInject;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -307,6 +429,15 @@
 			buildConfigurations = (
 				A90000000000000000000003 /* Debug */,
 				A90000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B70000000000000000000001 /* Build configuration list for PBXNativeTarget "BXFloatInject" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B90000000000000000000001 /* Debug */,
+				B90000000000000000000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

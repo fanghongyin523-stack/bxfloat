@@ -3,6 +3,7 @@ import UIKit
 protocol FloatingOverlayViewDelegate: AnyObject {
     func floatingOverlayDidRequestClose(_ view: FloatingOverlayView)
     func floatingOverlayDidRequestTogglePlay(_ view: FloatingOverlayView)
+    func floatingOverlayDidRequestEditURL(_ view: FloatingOverlayView)
 }
 
 /// 对标 BXPreviewPassthroughView：可拖拽悬浮预览壳，内容区交给播放器 view。
@@ -14,6 +15,7 @@ final class FloatingOverlayView: UIView {
     private let titleLabel = UILabel()
     private let closeButton = UIButton(type: .system)
     private let playButton = UIButton(type: .system)
+    private let urlButton = UIButton(type: .system)
     private let resizeHandle = UIView()
 
     private var playerView: UIView?
@@ -69,12 +71,18 @@ final class FloatingOverlayView: UIView {
         playButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
 
+        urlButton.setTitle("地址", for: .normal)
+        urlButton.setTitleColor(.white, for: .normal)
+        urlButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        urlButton.addTarget(self, action: #selector(urlTapped), for: .touchUpInside)
+
         resizeHandle.backgroundColor = UIColor.white.withAlphaComponent(0.55)
         resizeHandle.layer.cornerRadius = 2
 
         addSubview(contentHost)
         addSubview(chrome)
         chrome.addSubview(titleLabel)
+        chrome.addSubview(urlButton)
         chrome.addSubview(playButton)
         chrome.addSubview(closeButton)
         addSubview(resizeHandle)
@@ -82,6 +90,7 @@ final class FloatingOverlayView: UIView {
         contentHost.translatesAutoresizingMaskIntoConstraints = false
         chrome.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        urlButton.translatesAutoresizingMaskIntoConstraints = false
         playButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
@@ -103,8 +112,11 @@ final class FloatingOverlayView: UIView {
             closeButton.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -8),
             closeButton.centerYAnchor.constraint(equalTo: chrome.centerYAnchor),
 
-            playButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -12),
+            playButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -10),
             playButton.centerYAnchor.constraint(equalTo: chrome.centerYAnchor),
+
+            urlButton.trailingAnchor.constraint(equalTo: playButton.leadingAnchor, constant: -10),
+            urlButton.centerYAnchor.constraint(equalTo: chrome.centerYAnchor),
 
             resizeHandle.widthAnchor.constraint(equalToConstant: 28),
             resizeHandle.heightAnchor.constraint(equalToConstant: 4),
@@ -125,6 +137,10 @@ final class FloatingOverlayView: UIView {
 
     @objc private func playTapped() {
         delegate?.floatingOverlayDidRequestTogglePlay(self)
+    }
+
+    @objc private func urlTapped() {
+        delegate?.floatingOverlayDidRequestEditURL(self)
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {

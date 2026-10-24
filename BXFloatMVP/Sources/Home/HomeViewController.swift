@@ -19,7 +19,7 @@ final class HomeViewController: UIViewController {
     }
 
     private func setupUI() {
-        let tip = makeCaption("目标1：本 App 内悬浮预览。不注入其他 App。")
+        let tip = makeCaption("路线 A：本 App 内预览。目标2 另用 BXFloatInject.dylib 注入 Safari。")
         let urlCaption = makeCaption("播放地址（本地路径 / http / https）")
         urlField.borderStyle = .roundedRect
         urlField.autocapitalizationType = .none

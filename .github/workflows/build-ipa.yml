@@ -21,7 +21,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Build (no Apple Developer cert)
+      - name: Build App + Inject dylib
         run: |
           set -euo pipefail
           xcodebuild \
@@ -37,26 +37,50 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             build
 
+          xcodebuild \
+            -project BXFloatMVP.xcodeproj \
+            -scheme BXFloatInject \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
       - name: Install ldid
         run: brew install ldid
 
-      - name: Package IPA
+      - name: Package IPA + dylib
         run: |
           set -euo pipefail
           APP="build/Build/Products/Release-iphoneos/BXFloatMVP.app"
+          DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
           test -d "$APP"
+          test -f "$DYLIB"
           ldid -S"Resources/TrollStore.entitlements" "$APP/BXFloatMVP"
+          ldid -S "$DYLIB"
           rm -rf Payload BXFloatMVP.ipa
           mkdir Payload
           cp -R "$APP" Payload/
           zip -qr BXFloatMVP.ipa Payload
-          ls -lh BXFloatMVP.ipa
+          ls -lh BXFloatMVP.ipa "$DYLIB"
           mkdir -p ../dist
           cp BXFloatMVP.ipa ../dist/BXFloatMVP.ipa
+          cp "$DYLIB" ../dist/BXFloatInject.dylib
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: BXFloatMVP-ipa
           path: dist/BXFloatMVP.ipa
+          if-no-files-found: error
+
+      - name: Upload Inject dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: BXFloatInject-dylib
+          path: dist/BXFloatInject.dylib
           if-no-files-found: error
