@@ -97,10 +97,22 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
     private func startPlayback(urlString: String, muted: Bool, into overlay: FloatingOverlayView) throws {
         guard !urlString.isEmpty else { throw StreamPlayerError.emptyURL }
 
+        let kind = StreamURLAnalyzer.kind(of: urlString)
+        let needNewPlayer: Bool
         if player == nil {
+            needNewPlayer = true
+        } else {
+            #if canImport(MobileVLCKit)
+            let isVLC = String(describing: type(of: player!)).contains("VLC")
+            needNewPlayer = (kind == .rtsp) != isVLC
+            #else
+            needNewPlayer = (kind == .rtsp)
+            #endif
+        }
+
+        if needNewPlayer {
+            player?.stop()
             player = try StreamPlayerFactory.makePlayer(for: urlString)
-        } else if StreamURLAnalyzer.kind(of: urlString) == .rtsp {
-            throw StreamPlayerError.rtspNotLinkedYet
         }
 
         guard let player else { return }

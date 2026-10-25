@@ -6,4 +6,7 @@ dist/
 *.ipa
 *.xcuserstate
 BXFloatMVP/build/
+BXFloatMVP/Pods/
+BXFloatMVP/*.xcworkspace
+!BXFloatMVP/BXFloatMVP.xcodeproj/**
 **/.swiftpm/

@@ -19,14 +19,14 @@ final class HomeViewController: UIViewController {
     }
 
     private func setupUI() {
-        let tip = makeCaption("路线 A：本 App 内预览。目标2 另用 BXFloatInject.dylib 注入 Safari。")
-        let urlCaption = makeCaption("播放地址（本地路径 / http / https）")
+        let tip = makeCaption("本 App：http / 本地 / RTSP（局域网）。注入版 dylib 暂仍以 http 为主。")
+        let urlCaption = makeCaption("播放地址（http / https / rtsp / 本地路径）")
         urlField.borderStyle = .roundedRect
         urlField.autocapitalizationType = .none
         urlField.autocorrectionType = .no
         urlField.keyboardType = .URL
         urlField.returnKeyType = .done
-        urlField.placeholder = "例如 https://... 或文件路径"
+        urlField.placeholder = "例如 rtsp://192.168.1.100:554/stream"
         urlField.textColor = .label
         urlField.delegate = self
 
@@ -44,7 +44,8 @@ final class HomeViewController: UIViewController {
         muteRow.distribution = .equalSpacing
         muteSwitch.addTarget(self, action: #selector(muteChanged), for: .valueChanged)
 
-        let demoButton = makeButton(title: "填入测试视频地址", color: UIColor(red: 0.55, green: 0.35, blue: 0.85, alpha: 1), action: #selector(fillDemoURL))
+        let demoButton = makeButton(title: "填入公网测试视频", color: UIColor(red: 0.55, green: 0.35, blue: 0.85, alpha: 1), action: #selector(fillDemoURL))
+        let rtspButton = makeButton(title: "填入局域网 RTSP 模板", color: UIColor(red: 0.85, green: 0.45, blue: 0.2, alpha: 1), action: #selector(fillRTSPTemplate))
         let startButton = makeButton(title: "打开悬浮窗", color: UIColor(red: 0.2, green: 0.55, blue: 0.95, alpha: 1), action: #selector(startOverlay))
         let stopButton = makeButton(title: "关闭悬浮窗", color: UIColor(white: 0.25, alpha: 1), action: #selector(stopOverlay))
         let pickButton = makeButton(title: "选本地视频", color: UIColor(red: 0.15, green: 0.65, blue: 0.45, alpha: 1), action: #selector(pickVideo))
@@ -59,6 +60,7 @@ final class HomeViewController: UIViewController {
             urlCaption,
             urlField,
             demoButton,
+            rtspButton,
             pickButton,
             opacityCaption,
             opacitySlider,
@@ -158,6 +160,13 @@ final class HomeViewController: UIViewController {
         urlField.text = "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8"
         persistFields()
         statusLabel.text = "已填入苹果公开测试视频，点「打开悬浮窗」即可"
+    }
+
+    @objc private func fillRTSPTemplate() {
+        // 模板：请改成你电脑/摄像头的局域网 IP 与路径
+        urlField.text = "rtsp://192.168.1.100:554/stream1"
+        persistFields()
+        statusLabel.text = "已填入 RTSP 模板：请把 IP/路径改成你的设备，手机与设备同一 Wi‑Fi"
     }
 
     @objc private func startOverlay() {

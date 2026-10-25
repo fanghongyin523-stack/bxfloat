@@ -19,7 +19,7 @@ enum StreamPlayerError: LocalizedError {
         case .invalidURL:
             return "地址格式无效"
         case .rtspNotLinkedYet:
-            return "RTSP 需要下一阶段接入 VLC/FFmpeg（当前可先用本地或 http/https）"
+            return "当前包未打入 RTSP 引擎（请用带 VLC 的 BXFloatMVP.ipa 测试局域网/RTSP）"
         }
     }
 }
@@ -52,14 +52,17 @@ enum StreamURLAnalyzer {
     }
 }
 
-/// 工厂：一期用 AVPlayer；RTSP 后续换成 VLC/FFmpeg 实现同一协议即可。
 enum StreamPlayerFactory {
     static func makePlayer(for urlString: String) throws -> StreamPlayer {
         switch StreamURLAnalyzer.kind(of: urlString) {
         case .localOrHTTP:
             return AVStreamPlayer()
         case .rtsp:
+            #if canImport(MobileVLCKit)
+            return VLCStreamPlayer()
+            #else
             throw StreamPlayerError.rtspNotLinkedYet
+            #endif
         case .unsupported:
             throw StreamPlayerError.invalidURL
         }

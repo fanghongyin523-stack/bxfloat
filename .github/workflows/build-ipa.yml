@@ -21,10 +21,30 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Build App + Host + Inject
+      - name: Setup CocoaPods
+        run: |
+          gem install cocoapods -N
+          pod install --repo-update
+
+      - name: Build App (with VLC) + Host + Inject
         run: |
           set -euo pipefail
-          for scheme in BXFloatMVP BXFloatHost BXFloatInject; do
+          # MVP 走 workspace（含 MobileVLCKit）
+          xcodebuild \
+            -workspace BXFloatMVP.xcworkspace \
+            -scheme BXFloatMVP \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+          # Host / Inject 仍用工程（无 VLC，体积小）
+          for scheme in BXFloatHost BXFloatInject; do
             xcodebuild \
               -project BXFloatMVP.xcodeproj \
               -scheme "$scheme" \
@@ -47,12 +67,20 @@ jobs:
           set -euo pipefail
           mkdir -p ../dist
 
+          sign_tree () {
+            local root="$1"
+            while IFS= read -r -d '' f; do
+              if file "$f" | grep -q 'Mach-O'; then
+                ldid -S "$f" || true
+              fi
+            done < <(find "$root" -type f -print0)
+          }
+
           package_ipa () {
             local app_path="$1"
-            local exe_name="$2"
-            local out_ipa="$3"
+            local out_ipa="$2"
             test -d "$app_path"
-            ldid -S"Resources/TrollStore.entitlements" "$app_path/$exe_name"
+            sign_tree "$app_path"
             rm -rf Payload
             mkdir Payload
             cp -R "$app_path" Payload/
@@ -62,12 +90,10 @@ jobs:
 
           package_ipa \
             "build/Build/Products/Release-iphoneos/BXFloatMVP.app" \
-            "BXFloatMVP" \
             "BXFloatMVP.ipa"
 
           package_ipa \
             "build/Build/Products/Release-iphoneos/BXFloatHost.app" \
-            "BXFloatHost" \
             "BXFloatHost.ipa"
 
           DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
