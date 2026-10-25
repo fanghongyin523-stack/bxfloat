@@ -1,33 +1,46 @@
-# 目标2：注入测试（不用系统 Safari）
+# 目标2：注入说明（白名单）
 
-系统 **Safari 经常不在巨魔注入器列表里**，这是正常现象。  
-改用我们自己的 **「BXFloat壳」** 做试验靶。
+## 产物（`e:\tuiliu\dist\`）
+
+| 文件 | 用途 |
+|---|---|
+| `BXFloatInject.dylib` | 注入用插件 |
+| `BXFloatHost.ipa` | 试验壳（注入器一定能看到） |
+| `BXFloatMVP.ipa` | 独立悬浮 App |
 
 ---
 
-## 你需要的文件（在 `e:\tuiliu\dist\`）
+## 当前白名单 App
 
-| 文件 | 干什么 |
+| App | Bundle ID |
 |---|---|
-| `BXFloatHost.ipa` | 巨魔安装 → 注入器里会出现「BXFloat壳」 |
-| `BXFloatInject.dylib` | 注入进「BXFloat壳」 |
-| `BXFloatMVP.ipa` | 原来的独立悬浮 App（可继续用） |
+| BXFloat壳 | `com.baixiang.bxfloat.host` |
+| 抖音 | `com.ss.iphone.ugc.Aweme` |
+| 抖音极速版 | `com.ss.iphone.ugc.Aweme.lite` |
+| 微信 | `com.tencent.xin` |
+| 快手 | `com.smile.gifmaker` |
+| 快手极速版 | `com.kuaishou.nebula` |
+| 小红书 | `com.xingin.discover` |
+| 淘宝 | `com.taobao.taobao4iphone` / `com.taobao.taobao` |
+
+注入器里**看不到的 App 无法注入**（系统 App 常见）。  
+列表里有哪个，就注入哪个。
 
 ---
 
 ## 步骤
 
-1. 巨魔安装 **`BXFloatHost.ipa`**（桌面出现「BXFloat壳」）  
-2. 打开巨魔注入器，找到 **BXFloat壳** / `com.baixiang.bxfloat.host`  
-3. 注入 **`BXFloatInject.dylib`**  
-4. **彻底划掉**「BXFloat壳」，再打开  
-5. 几秒内应出现悬浮窗并自动播测试视频  
+1. 巨魔注入器打开 → 选目标 App（如抖音/微信…）  
+2. 注入 `BXFloatInject.dylib`  
+3. **彻底划掉该 App** 再打开  
+4. 几秒内应出 BXFloat 悬浮窗  
 
-可试：拖动、缩放、顶栏「地址」、暂停、关闭。
+建议：先在一个 App 上试通，再注入下一个。
 
 ---
 
-## 失败时
+## 注意
 
-- 注入器仍没有「BXFloat壳」→ 确认 Host.ipa 已用巨魔装成功  
-- 有壳但打开无窗 / 闪退 → 取消注入后回我现象  
+- 目前是 **悬浮预览**（测试流/可改地址），还不是 RTSP，也不是虚拟摄像头  
+- 微信/抖音等有检测风险，仅建议自用试验  
+- 闪退 → 注入器里取消注入后告诉我是哪个 App  

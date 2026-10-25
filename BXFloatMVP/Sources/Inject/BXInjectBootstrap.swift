@@ -6,9 +6,20 @@ final class BXInjectBootstrap: NSObject {
     private static var observersReady = false
 
     private static let allowedBundleIds: Set<String> = [
-        "com.baixiang.bxfloat.host", // 巨魔安装的注入试验壳（推荐）
+        // 试验壳
+        "com.baixiang.bxfloat.host",
+        // 系统 Safari（多数注入器看不到）
         "com.apple.mobilesafari",
         "com.apple.SafariViewService",
+        // 用户指定白名单
+        "com.ss.iphone.ugc.Aweme", // 抖音
+        "com.ss.iphone.ugc.Aweme.lite", // 抖音极速版（若有）
+        "com.tencent.xin", // 微信
+        "com.smile.gifmaker", // 快手
+        "com.kuaishou.nebula", // 快手极速版（若有）
+        "com.xingin.discover", // 小红书
+        "com.taobao.taobao4iphone", // 淘宝
+        "com.taobao.taobao", // 淘宝（部分包名）
     ]
 
     private static let demoURL =
