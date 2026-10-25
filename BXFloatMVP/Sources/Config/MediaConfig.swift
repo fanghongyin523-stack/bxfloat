@@ -3,7 +3,7 @@ import Foundation
 enum ConnectionMode: String, Codable {
     /// 局域网：只填电脑 IP，自动拼 HLS（注入版也能播）
     case lan
-    /// 数据线：手机开 USB 个人热点，播电脑在 USB 网卡上的 IP（常见 172.20.10.2）
+    /// 数据线：不需 SIM/热点；手机播 127.0.0.1，电脑 usbmux 桥到 MediaMTX
     case usb
     /// 本地视频文件路径
     case localVideo
@@ -14,7 +14,7 @@ enum ConnectionMode: String, Codable {
 struct MediaConfig: Equatable {
     var streamURL: String
     var computerIP: String
-    /// USB 热点下电脑侧地址；空则用默认 172.20.10.2
+    /// 兼容旧配置字段（热点方案遗留，直连方案不再使用）
     var usbComputerIP: String
     var connectionMode: ConnectionMode
     /// MediaMTX HLS 端口（默认 18888）
@@ -27,13 +27,13 @@ struct MediaConfig: Equatable {
     var overlayEnabled: Bool
     var muted: Bool
 
-    /// Apple USB 个人热点下，电脑常见地址
-    static let defaultUSBComputerIP = "172.20.10.2"
+    /// usbmux 隧道端口（电脑助手连这个）
+    static let usbTunnelPort = 19888
 
     static let `default` = MediaConfig(
         streamURL: "",
         computerIP: "",
-        usbComputerIP: defaultUSBComputerIP,
+        usbComputerIP: "",
         connectionMode: .lan,
         hlsPort: 18888,
         rtspPort: 18554,
@@ -55,7 +55,7 @@ extension MediaConfig: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         streamURL = try c.decodeIfPresent(String.self, forKey: .streamURL) ?? ""
         computerIP = try c.decodeIfPresent(String.self, forKey: .computerIP) ?? ""
-        usbComputerIP = try c.decodeIfPresent(String.self, forKey: .usbComputerIP) ?? Self.defaultUSBComputerIP
+        usbComputerIP = try c.decodeIfPresent(String.self, forKey: .usbComputerIP) ?? ""
         connectionMode = try c.decodeIfPresent(ConnectionMode.self, forKey: .connectionMode) ?? .lan
         hlsPort = try c.decodeIfPresent(Int.self, forKey: .hlsPort) ?? 18888
         rtspPort = try c.decodeIfPresent(Int.self, forKey: .rtspPort) ?? 18554
@@ -76,9 +76,8 @@ extension MediaConfig {
             guard !ip.isEmpty else { return "" }
             return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
         case .usb:
-            var ip = sanitizedIP(usbComputerIP)
-            if ip.isEmpty { ip = Self.defaultUSBComputerIP }
-            return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
+            // 本机桥接端口，由 USBStreamBridge + 电脑助手转发到 MediaMTX
+            return "http://127.0.0.1:\(hlsPort)/\(streamPath)/index.m3u8"
         case .localVideo, .manual:
             return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -123,7 +122,6 @@ final class MediaConfigStore {
         {
             var migrated = MediaConfig.default
             migrated.streamURL = old.streamURL
-            migrated.usbComputerIP = MediaConfig.defaultUSBComputerIP
             migrated.opacity = old.opacity
             migrated.windowScale = old.windowScale
             migrated.overlayEnabled = old.overlayEnabled

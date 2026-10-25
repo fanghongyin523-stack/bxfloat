@@ -74,7 +74,6 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
         let start = makeButton(title: "打开悬浮窗", color: UIColor(red: 0.2, green: 0.55, blue: 0.95, alpha: 1), action: #selector(startOverlay))
         let stop = makeButton(title: "关闭悬浮窗", color: UIColor(white: 0.25, alpha: 1), action: #selector(stopOverlay))
         let fillLAN = makeButton(title: "填入本机常用 IP", color: UIColor(red: 0.85, green: 0.45, blue: 0.2, alpha: 1), action: #selector(fillLANIP))
-        let fillUSB = makeButton(title: "填 USB 默认 IP 172.20.10.2", color: UIColor(red: 0.2, green: 0.55, blue: 0.55, alpha: 1), action: #selector(fillUSBIP))
         let fillDemo = makeButton(title: "填公网测试视频", color: UIColor(red: 0.55, green: 0.35, blue: 0.85, alpha: 1), action: #selector(fillDemo))
         let pick = makeButton(title: "从相册选本地视频", color: UIColor(red: 0.15, green: 0.65, blue: 0.45, alpha: 1), action: #selector(pickVideo))
 
@@ -85,7 +84,6 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
             makeCaption("填写"),
             field,
             fillLAN,
-            fillUSB,
             fillDemo,
             pick,
             resolvedLabel,
@@ -136,7 +134,7 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
         case .manual, .localVideo:
             field.text = config.streamURL
         case .usb:
-            field.text = config.usbComputerIP.isEmpty ? MediaConfig.defaultUSBComputerIP : config.usbComputerIP
+            field.text = "http://127.0.0.1:\(config.hlsPort)/\(config.streamPath)/index.m3u8"
         }
         refreshResolved()
         let on = config.overlayEnabled ? "开" : "关"
@@ -146,18 +144,17 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
     @objc private func modeChanged() {
         applyModeUI(animated: true)
         if modeControl.selectedSegmentIndex == 3 {
-            let cur = (field.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if cur.isEmpty || cur.hasPrefix("192.168.") {
-                field.text = MediaConfig.defaultUSBComputerIP
-            }
+            let cfg = MediaConfigStore.shared.config
+            field.text = "http://127.0.0.1:\(cfg.hlsPort)/\(cfg.streamPath)/index.m3u8"
         }
         refreshResolved()
     }
 
     private func applyModeUI(animated: Bool) {
         let idx = modeControl.selectedSegmentIndex
-        field.isEnabled = true
-        field.alpha = 1
+        let usb = idx == 3
+        field.isEnabled = !usb
+        field.alpha = usb ? 0.45 : 1
 
         switch idx {
         case 0:
@@ -174,15 +171,15 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
             field.keyboardType = .default
         default:
             hintLabel.text = """
-            数据线步骤：
-            1. 手机打开「个人热点」→ 允许其他人加入
-            2. 用数据线插电脑，弹窗点「信任」
-            3. 电脑跑 MediaMTX+OBS（与局域网相同）
-            4. 电脑运行「BXFloat-USB助手.bat」看 USB 网卡 IP
-            5. 下面填电脑 USB IP（多数是 172.20.10.2）后打开悬浮窗
+            数据线（不需要手机卡 / 不需要个人热点）：
+            1. 数据线插电脑，手机点「信任」
+            2. 电脑装过 iTunes 或「Apple 设备」驱动
+            3. 电脑 MediaMTX+OBS 照常推流
+            4. 电脑运行「BXFloat-USB助手.bat」并保持窗口开着
+            5. 手机选数据线 → 打开悬浮窗
             """
-            field.placeholder = "电脑 USB IP，如 172.20.10.2"
-            field.keyboardType = .decimalPad
+            field.placeholder = "自动使用 127.0.0.1（无需填写）"
+            field.keyboardType = .default
         }
         _ = animated
     }
@@ -212,7 +209,6 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
             config.streamURL = raw
         default:
             config.connectionMode = .usb
-            config.usbComputerIP = raw.isEmpty ? MediaConfig.defaultUSBComputerIP : raw
         }
     }
 
@@ -238,14 +234,6 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
         field.text = "192.168.3.60"
         persist()
         statusLabel.text = "已填局域网 IP"
-    }
-
-    @objc private func fillUSBIP() {
-        modeControl.selectedSegmentIndex = 3
-        applyModeUI(animated: false)
-        field.text = MediaConfig.defaultUSBComputerIP
-        persist()
-        statusLabel.text = "已填 USB 默认电脑 IP，请确认助手显示的地址一致"
     }
 
     @objc private func fillDemo() {
@@ -490,17 +478,17 @@ final class HelpViewController: UIViewController {
         2. 「连接」选局域网，填电脑 IP（如 192.168.3.60）
         3. 打开悬浮窗；注入抖音/微信等也可在悬浮窗里改
 
-        怎么用（数据线）
-        1. 手机开个人热点，USB 线插电脑并信任
-        2. 电脑跑 MediaMTX+OBS，再运行 BXFloat-USB助手.bat
-        3. 「连接」选数据线，填助手显示的 USB IP（多为 172.20.10.2）
-        4. 打开悬浮窗
+        怎么用（数据线，无需手机卡）
+        1. USB 线插电脑并信任（不要个人热点）
+        2. 电脑 MediaMTX+OBS 推流
+        3. 电脑运行 BXFloat-USB助手.bat（保持开着）
+        4. 「连接」选数据线 → 打开悬浮窗
 
         注入
         TrollFools 注入 BXFloatInject.dylib。连接方式在悬浮窗「设置」里改。
 
         版本
-        BXFloat MVP · 局域网 / USB 热点 HLS
+        BXFloat MVP · 局域网 / USB usbmux 直连
         """
 
         text.translatesAutoresizingMaskIntoConstraints = false

@@ -53,12 +53,19 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         guard let hostWindow else { return }
 
         if !config.overlayEnabled {
+            USBStreamBridge.shared.stop()
             player?.stop()
             player = nil
             loadedURL = nil
             overlayView?.removeFromSuperview()
             overlayView = nil
             return
+        }
+
+        if config.connectionMode == .usb {
+            USBStreamBridge.shared.start()
+        } else {
+            USBStreamBridge.shared.stop()
         }
 
         let overlay: FloatingOverlayView
@@ -238,31 +245,14 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
     }
 
     private func presentUSBEditor(from presenter: UIViewController) {
-        let cfg = MediaConfigStore.shared.config
         let alert = UIAlertController(
             title: "数据线",
-            message: "手机开个人热点并用线插电脑。填电脑 USB 网卡 IP（助手脚本可查，常见 \(MediaConfig.defaultUSBComputerIP)）。",
+            message: "不需要手机卡和个人热点。\n1. 线插电脑并信任\n2. 电脑跑 MediaMTX+OBS\n3. 电脑运行 BXFloat-USB助手.bat 并保持开着\n4. 确定后打开悬浮窗",
             preferredStyle: .alert
         )
-        alert.addTextField { field in
-            field.text = cfg.usbComputerIP.isEmpty ? MediaConfig.defaultUSBComputerIP : cfg.usbComputerIP
-            field.placeholder = MediaConfig.defaultUSBComputerIP
-            field.keyboardType = .decimalPad
-            field.autocapitalizationType = .none
-            field.clearButtonMode = .whileEditing
-        }
-        alert.addAction(UIAlertAction(title: "用默认 \(MediaConfig.defaultUSBComputerIP)", style: .default) { _ in
+        alert.addAction(UIAlertAction(title: "启用数据线", style: .default) { _ in
             MediaConfigStore.shared.update { config in
                 config.connectionMode = .usb
-                config.usbComputerIP = MediaConfig.defaultUSBComputerIP
-                config.overlayEnabled = true
-            }
-        })
-        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
-            let ip = alert.textFields?.first?.text ?? MediaConfig.defaultUSBComputerIP
-            MediaConfigStore.shared.update { config in
-                config.connectionMode = .usb
-                config.usbComputerIP = ip
                 config.overlayEnabled = true
             }
         })
