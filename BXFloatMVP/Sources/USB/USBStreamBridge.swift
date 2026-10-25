@@ -16,22 +16,32 @@ final class USBStreamBridge {
     private var pendingTunnels: [NWConnection] = []
     private var activePairs: [(NWConnection, NWConnection)] = []
     private(set) var isRunning = false
+    private var localReady = false
+    private var tunnelReady = false
 
     private init() {}
 
-    func start() {
-        queue.async {
-            guard !self.isRunning else { return }
-            self.isRunning = true
-            self.startTunnelListener()
-            self.startLocalListener()
-            NSLog("BXFloat USB bridge on 127.0.0.1:%@ <- tunnel :%@", "\(Self.localPlayPort)", "\(Self.tunnelPort)")
+    /// 启动桥接；尽量等两个监听就绪后再返回（最多约 2 秒）
+    func startAndWait() {
+        queue.async { self.startLocked() }
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            var ok = false
+            queue.sync { ok = self.localReady && self.tunnelReady }
+            if ok { return }
+            Thread.sleep(forTimeInterval: 0.05)
         }
+    }
+
+    func start() {
+        queue.async { self.startLocked() }
     }
 
     func stop() {
         queue.async {
             self.isRunning = false
+            self.localReady = false
+            self.tunnelReady = false
             self.localListener?.cancel()
             self.tunnelListener?.cancel()
             self.localListener = nil
@@ -49,6 +59,14 @@ final class USBStreamBridge {
         }
     }
 
+    private func startLocked() {
+        guard !isRunning else { return }
+        isRunning = true
+        startTunnelListener()
+        startLocalListener()
+        NSLog("BXFloat USB bridge starting :%@ / :%@", "\(Self.localPlayPort)", "\(Self.tunnelPort)")
+    }
+
     private func startTunnelListener() {
         do {
             let listener = try NWListener(using: .tcp, on: Self.tunnelPort)
@@ -58,14 +76,25 @@ final class USBStreamBridge {
                         conn.cancel()
                         return
                     }
-                    conn.start(queue: self.queue)
-                    self.pendingTunnels.append(conn)
-                    NSLog("BXFloat USB tunnel ready, pending=%d", self.pendingTunnels.count)
+                    self.waitReady(conn) { ready in
+                        guard ready else {
+                            conn.cancel()
+                            return
+                        }
+                        self.pendingTunnels.append(conn)
+                        NSLog("BXFloat USB tunnel ready, pending=%d", self.pendingTunnels.count)
+                    }
                 }
             }
-            listener.stateUpdateHandler = { state in
-                if case .failed(let error) = state {
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    self?.queue.async { self?.tunnelReady = true }
+                    NSLog("BXFloat USB tunnel listener READY")
+                case .failed(let error):
                     NSLog("BXFloat USB tunnel listener failed: %@", "\(error)")
+                default:
+                    break
                 }
             }
             listener.start(queue: queue)
@@ -77,16 +106,21 @@ final class USBStreamBridge {
 
     private func startLocalListener() {
         do {
-            // 本机 AVPlayer 连 127.0.0.1:18888；监听所有地址即可
             let listener = try NWListener(using: .tcp, on: Self.localPlayPort)
             listener.newConnectionHandler = { [weak self] playerConn in
                 self?.queue.async {
                     self?.handlePlayerConnection(playerConn)
                 }
             }
-            listener.stateUpdateHandler = { state in
-                if case .failed(let error) = state {
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    self?.queue.async { self?.localReady = true }
+                    NSLog("BXFloat USB local listener READY")
+                case .failed(let error):
                     NSLog("BXFloat USB local listener failed: %@", "\(error)")
+                default:
+                    break
                 }
             }
             listener.start(queue: queue)
@@ -101,36 +135,64 @@ final class USBStreamBridge {
             playerConn.cancel()
             return
         }
-        playerConn.start(queue: queue)
 
+        waitReady(playerConn) { [weak self] ready in
+            guard let self, ready, self.isRunning else {
+                playerConn.cancel()
+                return
+            }
+            self.attachTunnel(to: playerConn, attemptsLeft: 75) // ~15s
+        }
+    }
+
+    private func attachTunnel(to playerConn: NWConnection, attemptsLeft: Int) {
         if let tunnel = pendingTunnels.first {
             pendingTunnels.removeFirst()
             pipe(playerConn, tunnel)
             return
         }
+        if attemptsLeft <= 0 || !isRunning {
+            NSLog("BXFloat USB: no PC tunnel; keep BXFloat-USB助手 running")
+            playerConn.cancel()
+            return
+        }
+        queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.attachTunnel(to: playerConn, attemptsLeft: attemptsLeft - 1)
+        }
+    }
 
-        // 等电脑助手连上来（最长 15 秒）
-        let deadline = Date().addingTimeInterval(15)
-        func waitLoop() {
-            if let tunnel = self.pendingTunnels.first {
-                self.pendingTunnels.removeFirst()
-                self.pipe(playerConn, tunnel)
-                return
-            }
-            if Date() > deadline || !self.isRunning {
-                NSLog("BXFloat USB: no PC tunnel; open BXFloat-USB助手")
-                playerConn.cancel()
-                return
-            }
-            self.queue.asyncAfter(deadline: .now() + 0.2) {
-                waitLoop()
+    private func waitReady(_ conn: NWConnection, completion: @escaping (Bool) -> Void) {
+        if conn.state == .ready {
+            completion(true)
+            return
+        }
+        var finished = false
+        let finish: (Bool) -> Void = { ok in
+            guard !finished else { return }
+            finished = true
+            completion(ok)
+        }
+        conn.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                finish(true)
+            case .failed, .cancelled:
+                finish(false)
+            default:
+                break
             }
         }
-        waitLoop()
+        conn.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 5) {
+            if conn.state != .ready {
+                finish(false)
+            }
+        }
     }
 
     private func pipe(_ a: NWConnection, _ b: NWConnection) {
         activePairs.append((a, b))
+        NSLog("BXFloat USB pipe started")
         pump(from: a, to: b)
         pump(from: b, to: a)
     }

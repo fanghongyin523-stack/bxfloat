@@ -63,7 +63,8 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         }
 
         if config.connectionMode == .usb {
-            USBStreamBridge.shared.start()
+            // 先把本机 18888 / 隧道 19888 听起来，再让播放器连，避免黑窗
+            USBStreamBridge.shared.startAndWait()
         } else {
             USBStreamBridge.shared.stop()
         }
@@ -90,11 +91,16 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         let url = config.resolvedPlaybackURL()
         let needReload = loadedURL != url || player == nil
         if needReload {
-            do {
-                try startPlayback(urlString: url, muted: config.muted, into: overlay)
-                loadedURL = url
-            } catch {
-                presentError(error.localizedDescription)
+            // USB：再稍等助手连上隧道
+            let delay: TimeInterval = config.connectionMode == .usb ? 0.8 : 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                do {
+                    try self.startPlayback(urlString: url, muted: config.muted, into: overlay)
+                    self.loadedURL = url
+                } catch {
+                    self.presentError(error.localizedDescription)
+                }
             }
         } else if let player {
             player.isMuted = config.muted
