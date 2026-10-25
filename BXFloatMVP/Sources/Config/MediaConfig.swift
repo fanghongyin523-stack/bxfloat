@@ -1,43 +1,110 @@
 import Foundation
 
+enum ConnectionMode: String, Codable {
+    /// 局域网：只填电脑 IP，自动拼 HLS（注入版也能播）
+    case lan
+    /// 数据线（后期）
+    case usb
+    /// 本地视频文件路径
+    case localVideo
+    /// 手动完整 URL（http/rtsp/file）
+    case manual
+}
+
 struct MediaConfig: Codable, Equatable {
-    /// 播放地址：本地 file://、http(s)、或后续 RTSP
     var streamURL: String
-    /// 0.2 ~ 1.0
+    var computerIP: String
+    var connectionMode: ConnectionMode
+    /// MediaMTX HLS 端口（默认 18888）
+    var hlsPort: Int
+    /// MediaMTX RTSP 端口（默认 18554，独立 App 可手填 rtsp 用）
+    var rtspPort: Int
+    var streamPath: String
     var opacity: Float
-    /// 悬浮窗默认边长比例（相对短边）
     var windowScale: Float
-    /// 是否开启悬浮窗
     var overlayEnabled: Bool
-    /// 是否静音
     var muted: Bool
 
     static let `default` = MediaConfig(
         streamURL: "",
+        computerIP: "",
+        connectionMode: .lan,
+        hlsPort: 18888,
+        rtspPort: 18554,
+        streamPath: "stream",
         opacity: 1.0,
         windowScale: 0.42,
         overlayEnabled: false,
         muted: false
     )
+
+    /// 实际拿去播放的地址
+    func resolvedPlaybackURL() -> String {
+        switch connectionMode {
+        case .lan:
+            let ip = sanitizedIP(computerIP)
+            guard !ip.isEmpty else { return "" }
+            // 注入版不能带 VLC，统一用 HLS，AVPlayer 可播
+            return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
+        case .usb:
+            return "http://127.0.0.1:\(hlsPort)/\(streamPath)/index.m3u8"
+        case .localVideo, .manual:
+            return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func sanitizedIP(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.replacingOccurrences(of: "http://", with: "")
+        s = s.replacingOccurrences(of: "https://", with: "")
+        s = s.replacingOccurrences(of: "rtsp://", with: "")
+        if let slash = s.firstIndex(of: "/") {
+            s = String(s[..<slash])
+        }
+        if let colon = s.firstIndex(of: ":"), s.contains(".") {
+            // 若误贴了 IP:端口，只留 IP（端口用配置）
+            let host = String(s[..<colon])
+            if host.split(separator: ".").count == 4 {
+                return host
+            }
+        }
+        return s
+    }
 }
 
 final class MediaConfigStore {
     static let shared = MediaConfigStore()
 
-    private let defaultsKey = "baixiang.conf.mvp"
+    private let defaultsKey = "baixiang.conf.mvp.v2"
     private(set) var config: MediaConfig = .default
 
     private init() {}
 
     func load() {
-        guard
-            let data = UserDefaults.standard.data(forKey: defaultsKey),
-            let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
-        else {
-            config = .default
+        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
+        {
+            config = decoded
             return
         }
-        config = decoded
+        // 兼容旧版 key
+        if let data = UserDefaults.standard.data(forKey: "baixiang.conf.mvp"),
+           let old = try? JSONDecoder().decode(OldMediaConfig.self, from: data)
+        {
+            var migrated = MediaConfig.default
+            migrated.streamURL = old.streamURL
+            migrated.opacity = old.opacity
+            migrated.windowScale = old.windowScale
+            migrated.overlayEnabled = old.overlayEnabled
+            migrated.muted = old.muted
+            if old.streamURL.lowercased().hasPrefix("rtsp://") || old.streamURL.lowercased().hasPrefix("http") {
+                migrated.connectionMode = .manual
+            }
+            config = migrated
+            save(migrated, postNotification: false)
+            return
+        }
+        config = .default
     }
 
     func save(_ config: MediaConfig, postNotification: Bool = true) {
@@ -55,6 +122,14 @@ final class MediaConfigStore {
         mutate(&next)
         save(next, postNotification: postNotification)
     }
+}
+
+private struct OldMediaConfig: Codable {
+    var streamURL: String
+    var opacity: Float
+    var windowScale: Float
+    var overlayEnabled: Bool
+    var muted: Bool
 }
 
 extension Notification.Name {

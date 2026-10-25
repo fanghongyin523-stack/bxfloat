@@ -1,6 +1,6 @@
 import UIKit
 
-/// 目标1：悬浮窗挂在主窗口上（不再另开全屏高层 Window，避免挡主界面按钮）。
+/// 悬浮窗挂在宿主主窗口上；支持局域网「只填 IP」。
 final class FloatingOverlayController: FloatingOverlayViewDelegate {
     static let shared = FloatingOverlayController()
 
@@ -78,8 +78,9 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         }
 
         overlay.alpha = CGFloat(max(0.2, min(config.opacity, 1)))
+        overlay.setConnectionHint(config)
 
-        let url = config.streamURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = config.resolvedPlaybackURL()
         let needReload = loadedURL != url || player == nil
         if needReload {
             do {
@@ -95,7 +96,9 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
     }
 
     private func startPlayback(urlString: String, muted: Bool, into overlay: FloatingOverlayView) throws {
-        guard !urlString.isEmpty else { throw StreamPlayerError.emptyURL }
+        guard !urlString.isEmpty else {
+            throw StreamPlayerError.emptyURL
+        }
 
         let kind = StreamURLAnalyzer.kind(of: urlString)
         let needNewPlayer: Bool
@@ -124,7 +127,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
     }
 
     private func presentError(_ message: String) {
-        NSLog("BXFloat overlay error: \(message)")
+        NSLog("BXFloat overlay error: %@", message)
         guard let root = hostWindow?.rootViewController else { return }
         var presenter = root
         while let shown = presenter.presentedViewController {
@@ -135,6 +138,15 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         if presenter.presentedViewController == nil {
             presenter.present(alert, animated: true)
         }
+    }
+
+    private func presenter() -> UIViewController? {
+        guard let root = hostWindow?.rootViewController else { return nil }
+        var presenter = root
+        while let shown = presenter.presentedViewController {
+            presenter = shown
+        }
+        return presenter
     }
 
     func floatingOverlayDidRequestClose(_ view: FloatingOverlayView) {
@@ -153,13 +165,62 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
     }
 
     func floatingOverlayDidRequestEditURL(_ view: FloatingOverlayView) {
-        guard let root = hostWindow?.rootViewController else { return }
-        var presenter = root
-        while let shown = presenter.presentedViewController {
-            presenter = shown
+        guard let presenter = presenter() else { return }
+        let sheet = UIAlertController(title: "画面连接方式", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "局域网（只填电脑 IP）", style: .default) { [weak self] _ in
+            self?.presentLANIPEditor(from: presenter)
+        })
+        sheet.addAction(UIAlertAction(title: "手动完整地址", style: .default) { [weak self] _ in
+            self?.presentManualURLEditor(from: presenter)
+        })
+        sheet.addAction(UIAlertAction(title: "数据线（后期）", style: .default) { _ in
+            let tip = UIAlertController(title: "数据线", message: "USB 直连后期再做，连接入口已预留。", preferredStyle: .alert)
+            tip.addAction(UIAlertAction(title: "好", style: .default))
+            presenter.present(tip, animated: true)
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        if let pop = sheet.popoverPresentationController {
+            pop.sourceView = view
+            pop.sourceRect = view.bounds
         }
+        presenter.present(sheet, animated: true)
+    }
 
-        let alert = UIAlertController(title: "播放地址", message: "支持 http(s) / 本地路径", preferredStyle: .alert)
+    private func presentLANIPEditor(from presenter: UIViewController) {
+        let cfg = MediaConfigStore.shared.config
+        let alert = UIAlertController(
+            title: "局域网",
+            message: "手机和电脑连同一个网络。只需填电脑 IP。\n将自动使用：http://IP:\(cfg.hlsPort)/\(cfg.streamPath)/index.m3u8",
+            preferredStyle: .alert
+        )
+        alert.addTextField { field in
+            field.text = cfg.computerIP
+            field.placeholder = "例如 192.168.3.60"
+            field.keyboardType = .decimalPad
+            field.autocapitalizationType = .none
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "粘贴并填入", style: .default) { _ in
+            let clip = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            self.commitLAN(ip: clip.isEmpty ? (alert.textFields?.first?.text ?? "") : clip)
+        })
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            self.commitLAN(ip: alert.textFields?.first?.text ?? "")
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presenter.present(alert, animated: true)
+    }
+
+    private func commitLAN(ip: String) {
+        MediaConfigStore.shared.update { config in
+            config.connectionMode = .lan
+            config.computerIP = ip
+            config.overlayEnabled = true
+        }
+    }
+
+    private func presentManualURLEditor(from presenter: UIViewController) {
+        let alert = UIAlertController(title: "完整播放地址", message: "http / https / rtsp / 本地路径", preferredStyle: .alert)
         alert.addTextField { field in
             field.text = MediaConfigStore.shared.config.streamURL
             field.keyboardType = .URL
@@ -170,6 +231,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
             let text = alert.textFields?.first?.text ?? ""
             MediaConfigStore.shared.update { config in
+                config.connectionMode = .manual
                 config.streamURL = text
                 config.overlayEnabled = true
             }

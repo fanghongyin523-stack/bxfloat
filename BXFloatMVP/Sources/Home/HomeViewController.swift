@@ -19,14 +19,14 @@ final class HomeViewController: UIViewController {
     }
 
     private func setupUI() {
-        let tip = makeCaption("本 App：http / 本地 / RTSP（局域网）。注入版 dylib 暂仍以 http 为主。")
-        let urlCaption = makeCaption("播放地址（http / https / rtsp / 本地路径）")
+        let tip = makeCaption("推荐只填电脑 IP（如 192.168.3.60），自动拼 HLS。注入版同样走 HLS。也可填完整地址或选本地视频。")
+        let urlCaption = makeCaption("电脑 IP 或完整地址 / 本地路径")
         urlField.borderStyle = .roundedRect
         urlField.autocapitalizationType = .none
         urlField.autocorrectionType = .no
         urlField.keyboardType = .URL
         urlField.returnKeyType = .done
-        urlField.placeholder = "例如 rtsp://192.168.1.100:554/stream"
+        urlField.placeholder = "192.168.3.60 或 http://…"
         urlField.textColor = .label
         urlField.delegate = self
 
@@ -44,8 +44,8 @@ final class HomeViewController: UIViewController {
         muteRow.distribution = .equalSpacing
         muteSwitch.addTarget(self, action: #selector(muteChanged), for: .valueChanged)
 
+        let lanButton = makeButton(title: "填局域网 IP（推荐）", color: UIColor(red: 0.85, green: 0.45, blue: 0.2, alpha: 1), action: #selector(fillLANIP))
         let demoButton = makeButton(title: "填入公网测试视频", color: UIColor(red: 0.55, green: 0.35, blue: 0.85, alpha: 1), action: #selector(fillDemoURL))
-        let rtspButton = makeButton(title: "填入局域网 RTSP 模板", color: UIColor(red: 0.85, green: 0.45, blue: 0.2, alpha: 1), action: #selector(fillRTSPTemplate))
         let startButton = makeButton(title: "打开悬浮窗", color: UIColor(red: 0.2, green: 0.55, blue: 0.95, alpha: 1), action: #selector(startOverlay))
         let stopButton = makeButton(title: "关闭悬浮窗", color: UIColor(white: 0.25, alpha: 1), action: #selector(stopOverlay))
         let pickButton = makeButton(title: "选本地视频", color: UIColor(red: 0.15, green: 0.65, blue: 0.45, alpha: 1), action: #selector(pickVideo))
@@ -59,8 +59,8 @@ final class HomeViewController: UIViewController {
             tip,
             urlCaption,
             urlField,
+            lanButton,
             demoButton,
-            rtspButton,
             pickButton,
             opacityCaption,
             opacitySlider,
@@ -110,23 +110,61 @@ final class HomeViewController: UIViewController {
 
     private func reloadFromStore() {
         let config = MediaConfigStore.shared.config
-        urlField.text = config.streamURL
+        switch config.connectionMode {
+        case .lan:
+            urlField.text = config.computerIP.isEmpty ? config.streamURL : config.computerIP
+        case .localVideo, .manual, .usb:
+            urlField.text = config.streamURL
+        }
         opacitySlider.value = config.opacity
         opacityValueLabel.text = String(format: "%.0f%%", config.opacity * 100)
         muteSwitch.isOn = config.muted
-        statusLabel.text = config.overlayEnabled ? "悬浮窗：开" : "悬浮窗：关"
+        let modeName: String
+        switch config.connectionMode {
+        case .lan: modeName = "局域网"
+        case .usb: modeName = "数据线"
+        case .localVideo: modeName = "本地"
+        case .manual: modeName = "手动"
+        }
+        let on = config.overlayEnabled ? "开" : "关"
+        statusLabel.text = "模式：\(modeName) · 悬浮窗：\(on)"
     }
 
     private func persistFields(overlayEnabled: Bool? = nil) {
+        let raw = (urlField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         MediaConfigStore.shared.update { config in
-            config.streamURL = urlField.text ?? ""
             config.opacity = opacitySlider.value
             config.muted = muteSwitch.isOn
             if let overlayEnabled {
                 config.overlayEnabled = overlayEnabled
             }
+
+            if raw.isEmpty {
+                return
+            }
+
+            // 纯 IP → 局域网；本地路径 → 本地视频；其余当完整地址
+            if Self.looksLikeIPv4(raw) {
+                config.connectionMode = .lan
+                config.computerIP = raw
+            } else if raw.hasPrefix("/") || raw.hasPrefix("file://") {
+                config.connectionMode = .localVideo
+                config.streamURL = raw
+            } else {
+                config.connectionMode = .manual
+                config.streamURL = raw
+            }
         }
         reloadFromStore()
+    }
+
+    private static func looksLikeIPv4(_ text: String) -> Bool {
+        let parts = text.split(separator: ".")
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { part in
+            guard let n = Int(part), (0...255).contains(n) else { return false }
+            return true
+        }
     }
 
     @objc private func endEditing() {
@@ -155,18 +193,16 @@ final class HomeViewController: UIViewController {
         statusLabel.text = "配置已保存（对标 baixiang.conf）"
     }
 
+    @objc private func fillLANIP() {
+        urlField.text = "192.168.3.60"
+        persistFields()
+        statusLabel.text = "已填局域网 IP，播放地址自动拼成 HLS（:18888/stream）"
+    }
+
     @objc private func fillDemoURL() {
-        // 公开测试流，方便无本地视频时先验证悬浮窗
         urlField.text = "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8"
         persistFields()
         statusLabel.text = "已填入苹果公开测试视频，点「打开悬浮窗」即可"
-    }
-
-    @objc private func fillRTSPTemplate() {
-        // 模板：请改成你电脑/摄像头的局域网 IP 与路径
-        urlField.text = "rtsp://192.168.1.100:554/stream1"
-        persistFields()
-        statusLabel.text = "已填入 RTSP 模板：请把 IP/路径改成你的设备，手机与设备同一 Wi‑Fi"
     }
 
     @objc private func startOverlay() {

@@ -12,11 +12,11 @@ final class BXInjectBootstrap: NSObject {
         "com.ss.iphone.ugc.Aweme",
         "com.ss.iphone.ugc.Aweme.lite",
         "com.tencent.xin",
-        "com.smile.gifmaker", // 快手
-        "com.kuaishou.nebula", // 快手极速版
-        "com.kuaishou.video", // 偶见变体
+        "com.smile.gifmaker",
+        "com.kuaishou.nebula",
+        "com.kuaishou.video",
         "com.kwai.gifshow.beta1",
-        "com.jiangjia.gif", // 旧包名
+        "com.jiangjia.gif",
         "com.xingin.discover",
         "com.taobao.taobao4iphone",
         "com.taobao.taobao",
@@ -42,7 +42,6 @@ final class BXInjectBootstrap: NSObject {
     private static func isAllowedHost(_ bid: String) -> Bool {
         if allowedBundleIds.contains(bid) { return true }
         let lower = bid.lowercased()
-        // 快手系：包名常变，放宽匹配
         if lower.contains("kuaishou") || lower.contains("gifmaker") || lower.hasPrefix("com.kwai.") {
             return true
         }
@@ -68,7 +67,6 @@ final class BXInjectBootstrap: NSObject {
         ) { _ in
             activate(reason: "scene")
         }
-        // 快手等启动慢：首屏起来后再挂几次
         for second in [2, 4, 7, 10, 15] {
             DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(second)) {
                 activate(reason: "delay-\(second)")
@@ -79,10 +77,15 @@ final class BXInjectBootstrap: NSObject {
     private static func activate(reason: String) {
         MediaConfigStore.shared.load()
         var cfg = MediaConfigStore.shared.config
-        if cfg.streamURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        cfg.overlayEnabled = true
+
+        // 没有局域网 IP、也没有手动地址时，先给公网测试流，避免黑窗
+        let resolved = cfg.resolvedPlaybackURL()
+        if resolved.isEmpty {
+            cfg.connectionMode = .manual
             cfg.streamURL = demoURL
         }
-        cfg.overlayEnabled = true
+
         MediaConfigStore.shared.save(cfg, postNotification: false)
 
         guard let window = preferredWindow() else {
@@ -90,12 +93,7 @@ final class BXInjectBootstrap: NSObject {
             return
         }
 
-        NSLog(
-            "BXFloatInject attach reason=%@ window=%@ frame=%@",
-            reason,
-            String(describing: type(of: window)),
-            NSCoder.string(for: window.bounds)
-        )
+        NSLog("BXFloatInject attach reason=%@ url=%@", reason, cfg.resolvedPlaybackURL())
         FloatingOverlayController.shared.attach(to: window)
         NotificationCenter.default.post(name: .bxMediaConfigDidChange, object: nil)
     }
@@ -106,7 +104,6 @@ final class BXInjectBootstrap: NSObject {
         for scene in scenes {
             candidates.append(contentsOf: scene.windows)
         }
-        // 兼容旧 API
         if candidates.isEmpty {
             candidates = UIApplication.shared.windows
         }
@@ -114,14 +111,12 @@ final class BXInjectBootstrap: NSObject {
         let visible = candidates.filter { !$0.isHidden && $0.alpha > 0.01 && $0.bounds.width > 1 }
         if visible.isEmpty { return nil }
 
-        // 优先：前台 scene 的 keyWindow
         for scene in scenes where scene.activationState == .foregroundActive {
             if let key = scene.windows.first(where: { $0.isKeyWindow && !$0.isHidden }) {
                 return key
             }
         }
 
-        // 其次：面积最大的普通层级窗口（避开很小的辅助窗）
         return visible.max { a, b in
             let areaA = a.bounds.width * a.bounds.height
             let areaB = b.bounds.width * b.bounds.height

@@ -15,7 +15,7 @@ enum StreamPlayerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyURL:
-            return "请先填写播放地址"
+            return "请先在「设置」里填写电脑 IP（局域网）或完整地址"
         case .invalidURL:
             return "地址格式无效"
         case .rtspNotLinkedYet:

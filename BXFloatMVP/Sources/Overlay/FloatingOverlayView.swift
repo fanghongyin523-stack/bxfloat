@@ -47,6 +47,20 @@ final class FloatingOverlayView: UIView {
         playButton.setTitle(playing ? "暂停" : "播放", for: .normal)
     }
 
+    func setConnectionHint(_ config: MediaConfig) {
+        switch config.connectionMode {
+        case .lan:
+            let ip = config.computerIP.isEmpty ? "未填IP" : config.computerIP
+            titleLabel.text = "局域网 \(ip)"
+        case .usb:
+            titleLabel.text = "数据线"
+        case .localVideo:
+            titleLabel.text = "本地视频"
+        case .manual:
+            titleLabel.text = "BXFloat"
+        }
+    }
+
     private func setup() {
         backgroundColor = .clear
         layer.cornerRadius = 12
@@ -71,7 +85,7 @@ final class FloatingOverlayView: UIView {
         playButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
 
-        urlButton.setTitle("地址", for: .normal)
+        urlButton.setTitle("设置", for: .normal)
         urlButton.setTitleColor(.white, for: .normal)
         urlButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         urlButton.addTarget(self, action: #selector(urlTapped), for: .touchUpInside)
