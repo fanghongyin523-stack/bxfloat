@@ -13,16 +13,16 @@ public static class BxUsbBridge {
     const int Workers = 8;
 
     public static void Run() {
-        Console.WriteLine("等待手机 usbmux...");
+        Console.WriteLine("Waiting for iPhone via usbmux...");
         while (true) {
             try {
                 int? deviceId = ListDeviceId();
                 if (deviceId == null) {
-                    Console.WriteLine("未检测到 iPhone（检查线 / 信任 / Apple 驱动）");
+                    Console.WriteLine("No iPhone. Check cable / Trust / Apple driver.");
                     Thread.Sleep(2000);
                     continue;
                 }
-                Console.WriteLine("设备 DeviceID=" + deviceId + "，启动 " + Workers + " 路桥接");
+                Console.WriteLine("DeviceID=" + deviceId + ", starting " + Workers + " bridges");
                 Thread[] threads = new Thread[Workers];
                 for (int i = 0; i < Workers; i++) {
                     int wid = i + 1;
@@ -33,7 +33,7 @@ public static class BxUsbBridge {
                 }
                 foreach (var t in threads) t.Join();
             } catch (Exception ex) {
-                Console.WriteLine("错误: " + ex.Message);
+                Console.WriteLine("Error: " + ex.Message);
                 Thread.Sleep(2000);
             }
         }
@@ -57,7 +57,7 @@ public static class BxUsbBridge {
             media = new TcpClient();
             media.NoDelay = true;
             media.Connect("127.0.0.1", MediaPort);
-            Console.WriteLine("[W" + wid + "] 桥接已建立");
+            Console.WriteLine("[W" + wid + "] bridge OK");
             NetworkStream a = phone.GetStream();
             NetworkStream b = media.GetStream();
             Thread t1 = new Thread(() => CopyStream(a, b));
@@ -106,7 +106,7 @@ public static class BxUsbBridge {
                 "</dict></plist>";
             SendPlist(stream, 1, plist);
             string text = ReadPlist(stream);
-            Match m = Regex.Match(text, @"<key>DeviceID</key>\s*<integer>(\d+)</integer>");
+            Match m = Regex.Match(text, "<key>DeviceID</key>\\s*<integer>(\\d+)</integer>");
             if (!m.Success) return null;
             return int.Parse(m.Groups[1].Value);
         }
@@ -130,9 +130,9 @@ public static class BxUsbBridge {
             "</dict></plist>";
         SendPlist(stream, 2, plist);
         string text = ReadPlist(stream);
-        if (!Regex.IsMatch(text, @"<key>Number</key>\s*<integer>0</integer>")) {
+        if (!Regex.IsMatch(text, "<key>Number</key>\\s*<integer>0</integer>")) {
             client.Close();
-            throw new Exception("连手机端口失败，请先打开手机数据线悬浮窗");
+            throw new Exception("Phone port connect failed. Open USB overlay on phone first.");
         }
         return client;
     }

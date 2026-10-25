@@ -1,11 +1,10 @@
 @echo off
-chcp 65001 >nul
-title BXFloat USB 直连助手（无需手机卡）
+title BXFloat USB Bridge
 cd /d "%~dp0"
 echo.
-echo 正在启动 USB 直连桥...
+echo Starting USB bridge...
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0usb-bridge.ps1"
 echo.
-echo 助手已退出。若上面有红字，把内容发我。
+echo Bridge exited. If you saw red errors, send a screenshot.
 pause
