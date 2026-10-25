@@ -1,25 +1,25 @@
 import UIKit
 
-/// 注入入口：白名单宿主（系统 Safari 常不在注入器列表，优先用 BXFloat壳）。
+/// 注入入口：白名单宿主 + 快手系包名模糊匹配。
 @objc(BXInjectBootstrap)
 final class BXInjectBootstrap: NSObject {
     private static var observersReady = false
 
     private static let allowedBundleIds: Set<String> = [
-        // 试验壳
         "com.baixiang.bxfloat.host",
-        // 系统 Safari（多数注入器看不到）
         "com.apple.mobilesafari",
         "com.apple.SafariViewService",
-        // 用户指定白名单
-        "com.ss.iphone.ugc.Aweme", // 抖音
-        "com.ss.iphone.ugc.Aweme.lite", // 抖音极速版（若有）
-        "com.tencent.xin", // 微信
+        "com.ss.iphone.ugc.Aweme",
+        "com.ss.iphone.ugc.Aweme.lite",
+        "com.tencent.xin",
         "com.smile.gifmaker", // 快手
-        "com.kuaishou.nebula", // 快手极速版（若有）
-        "com.xingin.discover", // 小红书
-        "com.taobao.taobao4iphone", // 淘宝
-        "com.taobao.taobao", // 淘宝（部分包名）
+        "com.kuaishou.nebula", // 快手极速版
+        "com.kuaishou.video", // 偶见变体
+        "com.kwai.gifshow.beta1",
+        "com.jiangjia.gif", // 旧包名
+        "com.xingin.discover",
+        "com.taobao.taobao4iphone",
+        "com.taobao.taobao",
     ]
 
     private static let demoURL =
@@ -27,15 +27,26 @@ final class BXInjectBootstrap: NSObject {
 
     @objc static func startIfNeeded() {
         let bid = Bundle.main.bundleIdentifier ?? ""
-        guard allowedBundleIds.contains(bid) else {
+        guard isAllowedHost(bid) else {
             NSLog("BXFloatInject skip host=%@", bid)
             return
         }
 
+        NSLog("BXFloatInject allow host=%@", bid)
         DispatchQueue.main.async {
             activate(reason: "ctor")
             installLifecycleObserversIfNeeded()
         }
+    }
+
+    private static func isAllowedHost(_ bid: String) -> Bool {
+        if allowedBundleIds.contains(bid) { return true }
+        let lower = bid.lowercased()
+        // 快手系：包名常变，放宽匹配
+        if lower.contains("kuaishou") || lower.contains("gifmaker") || lower.hasPrefix("com.kwai.") {
+            return true
+        }
+        return false
     }
 
     private static func installLifecycleObserversIfNeeded() {
@@ -57,6 +68,12 @@ final class BXInjectBootstrap: NSObject {
         ) { _ in
             activate(reason: "scene")
         }
+        // 快手等启动慢：首屏起来后再挂几次
+        for second in [2, 4, 7, 10, 15] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(second)) {
+                activate(reason: "delay-\(second)")
+            }
+        }
     }
 
     private static func activate(reason: String) {
@@ -73,27 +90,43 @@ final class BXInjectBootstrap: NSObject {
             return
         }
 
-        NSLog("BXFloatInject attach reason=%@ window=%@", reason, String(describing: type(of: window)))
+        NSLog(
+            "BXFloatInject attach reason=%@ window=%@ frame=%@",
+            reason,
+            String(describing: type(of: window)),
+            NSCoder.string(for: window.bounds)
+        )
         FloatingOverlayController.shared.attach(to: window)
-        // 触发一次 apply
         NotificationCenter.default.post(name: .bxMediaConfigDidChange, object: nil)
     }
 
     private static func preferredWindow() -> UIWindow? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        for scene in scenes where scene.activationState == .foregroundActive {
-            if let key = scene.windows.first(where: \.isKeyWindow) {
-                return key
-            }
-            if let first = scene.windows.first {
-                return first
-            }
-        }
+        var candidates: [UIWindow] = []
         for scene in scenes {
-            if let key = scene.windows.first(where: \.isKeyWindow) {
+            candidates.append(contentsOf: scene.windows)
+        }
+        // 兼容旧 API
+        if candidates.isEmpty {
+            candidates = UIApplication.shared.windows
+        }
+
+        let visible = candidates.filter { !$0.isHidden && $0.alpha > 0.01 && $0.bounds.width > 1 }
+        if visible.isEmpty { return nil }
+
+        // 优先：前台 scene 的 keyWindow
+        for scene in scenes where scene.activationState == .foregroundActive {
+            if let key = scene.windows.first(where: { $0.isKeyWindow && !$0.isHidden }) {
                 return key
             }
         }
-        return scenes.flatMap(\.windows).first
+
+        // 其次：面积最大的普通层级窗口（避开很小的辅助窗）
+        return visible.max { a, b in
+            let areaA = a.bounds.width * a.bounds.height
+            let areaB = b.bounds.width * b.bounds.height
+            if areaA != areaB { return areaA < areaB }
+            return a.windowLevel.rawValue < b.windowLevel.rawValue
+        }
     }
 }

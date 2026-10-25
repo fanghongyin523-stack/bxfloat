@@ -22,8 +22,9 @@ static void BXFloatInjectConstructor(void) {
     @autoreleasepool {
         dispatch_async(dispatch_get_main_queue(), ^{
             BXFloatInjectAttempt();
-            for (NSInteger i = 1; i <= 8; i++) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.75 * NSEC_PER_SEC)),
+            // 快手等冷启动较慢，拉长重试窗口到约 20 秒
+            for (NSInteger i = 1; i <= 20; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 1.0 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     BXFloatInjectAttempt();
                 });
