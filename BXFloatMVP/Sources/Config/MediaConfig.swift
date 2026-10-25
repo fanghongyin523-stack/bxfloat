@@ -3,7 +3,7 @@ import Foundation
 enum ConnectionMode: String, Codable {
     /// 局域网：只填电脑 IP，自动拼 HLS（注入版也能播）
     case lan
-    /// 数据线（后期）
+    /// 数据线：手机开 USB 个人热点，播电脑在 USB 网卡上的 IP（常见 172.20.10.2）
     case usb
     /// 本地视频文件路径
     case localVideo
@@ -11,9 +11,11 @@ enum ConnectionMode: String, Codable {
     case manual
 }
 
-struct MediaConfig: Codable, Equatable {
+struct MediaConfig: Equatable {
     var streamURL: String
     var computerIP: String
+    /// USB 热点下电脑侧地址；空则用默认 172.20.10.2
+    var usbComputerIP: String
     var connectionMode: ConnectionMode
     /// MediaMTX HLS 端口（默认 18888）
     var hlsPort: Int
@@ -25,9 +27,13 @@ struct MediaConfig: Codable, Equatable {
     var overlayEnabled: Bool
     var muted: Bool
 
+    /// Apple USB 个人热点下，电脑常见地址
+    static let defaultUSBComputerIP = "172.20.10.2"
+
     static let `default` = MediaConfig(
         streamURL: "",
         computerIP: "",
+        usbComputerIP: defaultUSBComputerIP,
         connectionMode: .lan,
         hlsPort: 18888,
         rtspPort: 18554,
@@ -37,17 +43,42 @@ struct MediaConfig: Codable, Equatable {
         overlayEnabled: false,
         muted: false
     )
+}
 
+extension MediaConfig: Codable {
+    enum CodingKeys: String, CodingKey {
+        case streamURL, computerIP, usbComputerIP, connectionMode
+        case hlsPort, rtspPort, streamPath, opacity, windowScale, overlayEnabled, muted
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        streamURL = try c.decodeIfPresent(String.self, forKey: .streamURL) ?? ""
+        computerIP = try c.decodeIfPresent(String.self, forKey: .computerIP) ?? ""
+        usbComputerIP = try c.decodeIfPresent(String.self, forKey: .usbComputerIP) ?? Self.defaultUSBComputerIP
+        connectionMode = try c.decodeIfPresent(ConnectionMode.self, forKey: .connectionMode) ?? .lan
+        hlsPort = try c.decodeIfPresent(Int.self, forKey: .hlsPort) ?? 18888
+        rtspPort = try c.decodeIfPresent(Int.self, forKey: .rtspPort) ?? 18554
+        streamPath = try c.decodeIfPresent(String.self, forKey: .streamPath) ?? "stream"
+        opacity = try c.decodeIfPresent(Float.self, forKey: .opacity) ?? 1
+        windowScale = try c.decodeIfPresent(Float.self, forKey: .windowScale) ?? 0.42
+        overlayEnabled = try c.decodeIfPresent(Bool.self, forKey: .overlayEnabled) ?? false
+        muted = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+    }
+}
+
+extension MediaConfig {
     /// 实际拿去播放的地址
     func resolvedPlaybackURL() -> String {
         switch connectionMode {
         case .lan:
             let ip = sanitizedIP(computerIP)
             guard !ip.isEmpty else { return "" }
-            // 注入版不能带 VLC，统一用 HLS，AVPlayer 可播
             return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
         case .usb:
-            return "http://127.0.0.1:\(hlsPort)/\(streamPath)/index.m3u8"
+            var ip = sanitizedIP(usbComputerIP)
+            if ip.isEmpty { ip = Self.defaultUSBComputerIP }
+            return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
         case .localVideo, .manual:
             return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -62,7 +93,6 @@ struct MediaConfig: Codable, Equatable {
             s = String(s[..<slash])
         }
         if let colon = s.firstIndex(of: ":"), s.contains(".") {
-            // 若误贴了 IP:端口，只留 IP（端口用配置）
             let host = String(s[..<colon])
             if host.split(separator: ".").count == 4 {
                 return host
@@ -93,6 +123,7 @@ final class MediaConfigStore {
         {
             var migrated = MediaConfig.default
             migrated.streamURL = old.streamURL
+            migrated.usbComputerIP = MediaConfig.defaultUSBComputerIP
             migrated.opacity = old.opacity
             migrated.windowScale = old.windowScale
             migrated.overlayEnabled = old.overlayEnabled

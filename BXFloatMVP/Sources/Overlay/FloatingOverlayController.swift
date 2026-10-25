@@ -173,10 +173,8 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         sheet.addAction(UIAlertAction(title: "手动完整地址", style: .default) { [weak self] _ in
             self?.presentManualURLEditor(from: presenter)
         })
-        sheet.addAction(UIAlertAction(title: "数据线（后期）", style: .default) { _ in
-            let tip = UIAlertController(title: "数据线", message: "USB 直连后期再做，连接入口已预留。", preferredStyle: .alert)
-            tip.addAction(UIAlertAction(title: "好", style: .default))
-            presenter.present(tip, animated: true)
+        sheet.addAction(UIAlertAction(title: "数据线（USB 热点）", style: .default) { [weak self] _ in
+            self?.presentUSBEditor(from: presenter)
         })
         sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
         if let pop = sheet.popoverPresentationController {
@@ -236,6 +234,39 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
                 config.overlayEnabled = true
             }
         })
+        presenter.present(alert, animated: true)
+    }
+
+    private func presentUSBEditor(from presenter: UIViewController) {
+        let cfg = MediaConfigStore.shared.config
+        let alert = UIAlertController(
+            title: "数据线",
+            message: "手机开个人热点并用线插电脑。填电脑 USB 网卡 IP（助手脚本可查，常见 \(MediaConfig.defaultUSBComputerIP)）。",
+            preferredStyle: .alert
+        )
+        alert.addTextField { field in
+            field.text = cfg.usbComputerIP.isEmpty ? MediaConfig.defaultUSBComputerIP : cfg.usbComputerIP
+            field.placeholder = MediaConfig.defaultUSBComputerIP
+            field.keyboardType = .decimalPad
+            field.autocapitalizationType = .none
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "用默认 \(MediaConfig.defaultUSBComputerIP)", style: .default) { _ in
+            MediaConfigStore.shared.update { config in
+                config.connectionMode = .usb
+                config.usbComputerIP = MediaConfig.defaultUSBComputerIP
+                config.overlayEnabled = true
+            }
+        })
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            let ip = alert.textFields?.first?.text ?? MediaConfig.defaultUSBComputerIP
+            MediaConfigStore.shared.update { config in
+                config.connectionMode = .usb
+                config.usbComputerIP = ip
+                config.overlayEnabled = true
+            }
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         presenter.present(alert, animated: true)
     }
 }
