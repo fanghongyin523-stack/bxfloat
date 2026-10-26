@@ -10,7 +10,7 @@ public static class BxUsbBridge {
     const int UsbmuxPort = 27015;
     const int TunnelPort = 19888;
     const int MediaPort = 18888;
-    const int Workers = 8;
+    const int Workers = 12;
 
     public static void Run() {
         Console.WriteLine("Waiting for iPhone via usbmux...");
@@ -45,7 +45,7 @@ public static class BxUsbBridge {
                 OneBridge(deviceId, wid);
             } catch {
             }
-            Thread.Sleep(400);
+            Thread.Sleep(120);
         }
     }
 
@@ -69,7 +69,7 @@ public static class BxUsbBridge {
             t1.Join();
             try { phone.Close(); } catch {}
             try { media.Close(); } catch {}
-            t2.Join(500);
+            t2.Join(300);
         } finally {
             try { if (phone != null) phone.Close(); } catch {}
             try { if (media != null) media.Close(); } catch {}
@@ -77,7 +77,7 @@ public static class BxUsbBridge {
     }
 
     static void CopyStream(NetworkStream src, NetworkStream dst) {
-        byte[] buf = new byte[65536];
+        byte[] buf = new byte[262144];
         try {
             while (true) {
                 int n = src.Read(buf, 0, buf.Length);

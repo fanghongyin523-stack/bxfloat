@@ -198,9 +198,10 @@ final class USBStreamBridge {
     }
 
     private func pump(from: NWConnection, to: NWConnection) {
-        from.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+        from.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let data, !data.isEmpty {
+                // 尽快转发，不额外积压
                 to.send(content: data, completion: .contentProcessed { sendError in
                     if sendError != nil {
                         from.cancel()

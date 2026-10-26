@@ -92,7 +92,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         let needReload = loadedURL != url || player == nil
         if needReload {
             // USB：再稍等助手连上隧道
-            let delay: TimeInterval = config.connectionMode == .usb ? 0.8 : 0
+            let delay: TimeInterval = config.connectionMode == .usb ? 0.35 : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
                 do {

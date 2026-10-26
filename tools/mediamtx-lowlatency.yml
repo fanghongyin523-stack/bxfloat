@@ -1,0 +1,35 @@
+logLevel: info
+
+authMethod: internal
+
+authInternalUsers:
+  - user: any
+    pass:
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+
+rtmp: true
+rtmpAddress: :11935
+
+rtsp: true
+rtspAddress: :18554
+
+# 低延迟 HLS（手机 AVPlayer / 注入版）
+hls: true
+hlsAddress: :18888
+hlsAlwaysRemux: true
+hlsVariant: lowLatency
+# 更短分片 + 更少保留 = 更低延迟（略增卡顿风险）
+hlsSegmentCount: 4
+hlsSegmentDuration: 500ms
+hlsPartDuration: 100ms
+hlsSegmentMaxSize: 50M
+hlsAllowOrigin: "*"
+
+srt: true
+srtAddress: :18890
+
+paths:
+  all_others:
