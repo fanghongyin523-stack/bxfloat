@@ -29,7 +29,6 @@ jobs:
       - name: Build App + Inject (with VLC) + Host
         run: |
           set -euo pipefail
-          # MVP + Inject 走 workspace（含 MobileVLCKit）
           for scheme in BXFloatMVP BXFloatInject; do
             xcodebuild \
               -workspace BXFloatMVP.xcworkspace \
@@ -45,7 +44,6 @@ jobs:
               build
           done
 
-          # Host 仍用工程（无 VLC）
           xcodebuild \
             -project BXFloatMVP.xcodeproj \
             -scheme BXFloatHost \
@@ -102,7 +100,6 @@ jobs:
           install_name_tool -add_rpath "@executable_path/Frameworks" "$DYLIB" 2>/dev/null || true
           install_name_tool -add_rpath "@loader_path/Frameworks" "$DYLIB" 2>/dev/null || true
 
-          # 注入包：dylib + MobileVLCKit.framework（局域网 RTSP 需要）
           rm -rf ../dist/BXFloatInjectPack
           mkdir -p ../dist/BXFloatInjectPack/Frameworks
           cp "$DYLIB" ../dist/BXFloatInjectPack/BXFloatInject.dylib
@@ -115,33 +112,28 @@ jobs:
             exit 1
           fi
           echo "Using VLC framework: $FW"
-
           cp -R "$FW" ../dist/BXFloatInjectPack/Frameworks/
           sign_tree ../dist/BXFloatInjectPack
 
-          cat > ../dist/BXFloatInjectPack/安装说明.txt << 'EOF'
-BXFloat 注入包（局域网 RTSP 低延迟）
+          cat > ../dist/BXFloatInjectPack/README.txt << 'EOF'
+BXFloat Inject Pack (LAN RTSP low latency)
 
-文件：
+Files:
 1) BXFloatInject.dylib
 2) Frameworks/MobileVLCKit.framework
 
-安装步骤（抖音等）：
-A. 用 TrollFools 注入 BXFloatInject.dylib
-B. 用 Filza 打开目标 App 包内，把 MobileVLCKit.framework
-   复制到：XXX.app/Frameworks/
-   （没有 Frameworks 文件夹就新建一个）
-C. 杀进程后重新打开 App，悬浮窗选「局域网」填电脑 IP
+Install (Douyin etc):
+A. TrollFools inject BXFloatInject.dylib
+B. Filza: copy MobileVLCKit.framework into XXX.app/Frameworks/
+   (create Frameworks folder if missing)
+C. Force-quit app, reopen, overlay -> LAN -> computer IP
 
-说明：
-- 本 App（BXFloatMVP.ipa）不需要 Framework，已内置 VLC
-- 注入版必须带上 MobileVLCKit，否则无法 RTSP，会退回/失败
+Notes:
+- BXFloatMVP.ipa already embeds VLC (no extra framework)
+- Inject MUST include MobileVLCKit for RTSP
 EOF
 
-          (
-            cd ../dist/BXFloatInjectPack
-            zip -qr ../BXFloatInjectPack.zip .
-          )
+          ( cd ../dist/BXFloatInjectPack && zip -qr ../BXFloatInjectPack.zip . )
           ls -lh ../dist
 
       - name: Upload MVP IPA
@@ -162,7 +154,7 @@ EOF
           name: BXFloatInject-dylib
           path: dist/BXFloatInject.dylib
 
-      - name: Upload Inject Pack (dylib + VLC)
+      - name: Upload Inject Pack
         uses: actions/upload-artifact@v4
         with:
           name: BXFloatInjectPack
