@@ -82,14 +82,7 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         guard let target, target.responds(to: dropSel) else { return }
-        typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput, CMSampleBuffer, AVCaptureConnection) -> Void
-        if let method = class_getInstanceMethod(object_getClass(target), dropSel)
-            ?? class_getInstanceMethod(type(of: target) as? AnyClass, dropSel)
-        {
-            let imp = method_getImplementation(method)
-            let call = unsafeBitCast(imp, to: Fn.self)
-            call(target, dropSel, output, sampleBuffer, connection)
-        }
+        invokeCapture(sel: dropSel, on: target, output: output, sampleBuffer: sampleBuffer, connection: connection)
     }
 
     private func invokeOutput(
@@ -99,12 +92,21 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         connection: AVCaptureConnection
     ) {
         guard let target, target.responds(to: outputSel) else { return }
+        invokeCapture(sel: outputSel, on: target, output: output, sampleBuffer: sampleBuffer, connection: connection)
+    }
+
+    private func invokeCapture(
+        sel: Selector,
+        on target: AnyObject,
+        output: AVCaptureOutput,
+        sampleBuffer: CMSampleBuffer,
+        connection: AVCaptureConnection
+    ) {
         typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput, CMSampleBuffer, AVCaptureConnection) -> Void
-        let cls: AnyClass = object_getClass(target) ?? (type(of: target) as AnyClass)
-        guard let method = class_getInstanceMethod(cls, outputSel) else { return }
-        let imp = method_getImplementation(method)
-        let call = unsafeBitCast(imp, to: Fn.self)
-        call(target, outputSel, output, sampleBuffer, connection)
+        guard let cls: AnyClass = object_getClass(target) else { return }
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let call = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        call(target, sel, output, sampleBuffer, connection)
     }
 }
 

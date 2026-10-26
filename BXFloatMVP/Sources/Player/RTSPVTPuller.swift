@@ -184,7 +184,7 @@ final class RTSPVTPuller {
                 var desc: CMFormatDescription?
                 let status = pointers.withUnsafeBufferPointer { buf -> OSStatus in
                     guard let base = buf.baseAddress else {
-                        return OSStatus(kCMFormatDescriptionError_InvalidParameter)
+                        return OSStatus(-12710)
                     }
                     return CMVideoFormatDescriptionCreateFromH264ParameterSets(
                         allocator: kCFAllocatorDefault,
