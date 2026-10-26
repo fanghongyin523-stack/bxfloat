@@ -1,7 +1,7 @@
 import Foundation
 
 enum ConnectionMode: String, Codable {
-    /// 局域网：只填电脑 IP，自动拼 HLS（注入版也能播）
+    /// 局域网：只填电脑 IP。App 拼 RTSP（低延迟）；注入版无 VLC 则拼 HLS
     case lan
     /// 数据线：不需 SIM/热点；手机播 127.0.0.1，电脑 usbmux 桥到 MediaMTX
     case usb
@@ -74,9 +74,15 @@ extension MediaConfig {
         case .lan:
             let ip = sanitizedIP(computerIP)
             guard !ip.isEmpty else { return "" }
+            #if canImport(MobileVLCKit)
+            // 独立 App：RTSP + VLC，延迟通常远低于 HLS
+            return "rtsp://\(ip):\(rtspPort)/\(streamPath)"
+            #else
+            // 注入 dylib：不能带 VLC，仍走 HLS
             return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
+            #endif
         case .usb:
-            // 本机桥接端口，由 USBStreamBridge + 电脑助手转发到 MediaMTX
+            // 本机桥接端口，由 USBStreamBridge + 电脑助手转发到 MediaMTX（HLS）
             return "http://127.0.0.1:\(hlsPort)/\(streamPath)/index.m3u8"
         case .localVideo, .manual:
             return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)

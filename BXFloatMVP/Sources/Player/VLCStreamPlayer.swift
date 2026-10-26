@@ -33,10 +33,15 @@ final class VLCStreamPlayer: NSObject, StreamPlayer, VLCMediaPlayerDelegate {
 
         stop()
         let media = VLCMedia(url: url)
-        // 降低缓存，偏向低延迟预览；局域网 RTSP 更稳一点用 TCP
-        media.addOption(":network-caching=400")
-        media.addOption(":live-caching=400")
+        // 低延迟优先（可略增卡顿风险）
+        media.addOption(":network-caching=120")
+        media.addOption(":live-caching=120")
+        media.addOption(":clock-jitter=0")
+        media.addOption(":clock-synchro=0")
         media.addOption(":rtsp-tcp")
+        media.addOption(":rtsp-frame-buffer-size=0")
+        media.addOption(":drop-late-frames")
+        media.addOption(":skip-frames")
         media.addOption(":avcodec-hw=any")
         mediaPlayer.media = media
     }

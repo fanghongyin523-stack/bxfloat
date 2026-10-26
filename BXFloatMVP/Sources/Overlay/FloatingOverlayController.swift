@@ -201,7 +201,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         let cfg = MediaConfigStore.shared.config
         let alert = UIAlertController(
             title: "局域网",
-            message: "手机和电脑连同一个网络。只需填电脑 IP。\n将自动使用：http://IP:\(cfg.hlsPort)/\(cfg.streamPath)/index.m3u8",
+            message: "同一 Wi‑Fi，只填电脑 IP。\nApp：rtsp://IP:\(cfg.rtspPort)/\(cfg.streamPath)\n注入版：自动改用 HLS",
             preferredStyle: .alert
         )
         alert.addTextField { field in

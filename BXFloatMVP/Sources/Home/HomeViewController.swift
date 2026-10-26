@@ -158,7 +158,7 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
 
         switch idx {
         case 0:
-            hintLabel.text = "手机和电脑同一 Wi‑Fi。只填电脑 IP，自动播 HLS（注入版同样）。"
+            hintLabel.text = "同一 Wi‑Fi，只填电脑 IP。本 App 自动播 RTSP（低延迟）。注入到抖音等仍走 HLS。"
             field.placeholder = "例如 192.168.3.60"
             field.keyboardType = .decimalPad
         case 1:
@@ -473,22 +473,21 @@ final class HelpViewController: UIViewController {
         text.textColor = .secondaryLabel
         text.font = .systemFont(ofSize: 15)
         text.text = """
-        怎么用（局域网）
+        怎么用（局域网 · 低延迟）
         1. 电脑开 MediaMTX + OBS 推流
-        2. 「连接」选局域网，填电脑 IP（如 192.168.3.60）
-        3. 打开悬浮窗；注入抖音/微信等也可在悬浮窗里改
+        2. 「连接」选局域网，填电脑 IP
+        3. 本 App 自动播 RTSP（一般几秒内）
+        4. OBS 关键帧间隔建议 1～2 秒
 
-        怎么用（数据线，无需手机卡）
-        1. USB 线插电脑并信任（不要个人热点）
-        2. 电脑 MediaMTX+OBS 推流
-        3. 电脑运行 BXFloat-USB助手.bat（保持开着）
-        4. 「连接」选数据线 → 打开悬浮窗
+        怎么用（数据线）
+        1. 插线信任，开 BXFloat-USB-Bridge.bat
+        2. 选数据线 → 打开悬浮窗（仍为 HLS，延迟会高于局域网）
 
         注入
-        TrollFools 注入 BXFloatInject.dylib。连接方式在悬浮窗「设置」里改。
+        抖音等注入版无 VLC，局域网也会走 HLS，延迟通常高于本 App。
 
         版本
-        BXFloat MVP · 局域网 / USB usbmux 直连
+        BXFloat MVP · 局域网 RTSP / USB HLS
         """
 
         text.translatesAutoresizingMaskIntoConstraints = false
