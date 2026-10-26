@@ -85,7 +85,7 @@ final class FloatingOverlayView: UIView {
         playButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
 
-        urlButton.setTitle("设置", for: .normal)
+        urlButton.setTitle("面板", for: .normal)
         urlButton.setTitleColor(.white, for: .normal)
         urlButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         urlButton.addTarget(self, action: #selector(urlTapped), for: .touchUpInside)

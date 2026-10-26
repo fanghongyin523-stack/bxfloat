@@ -19,7 +19,7 @@ enum StreamPlayerError: LocalizedError {
         case .invalidURL:
             return "地址格式无效"
         case .rtspNotLinkedYet:
-            return "当前包未打入 RTSP 引擎（请用带 VLC 的 BXFloatMVP.ipa 测试局域网/RTSP）"
+            return "当前包未打入 RTSP 引擎"
         }
     }
 }
@@ -61,7 +61,8 @@ enum StreamPlayerFactory {
             #if canImport(MobileVLCKit)
             return VLCStreamPlayer()
             #else
-            throw StreamPlayerError.rtspNotLinkedYet
+            // 注入单 dylib：内嵌 RTSP+VideoToolbox，不依赖 VLC Framework
+            return RTSPVTPlayer()
             #endif
         case .unsupported:
             throw StreamPlayerError.invalidURL

@@ -21,29 +21,46 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Setup CocoaPods
+      - name: Setup CocoaPods (App VLC only)
         run: |
           gem install cocoapods -N
           pod install --repo-update
 
-      - name: Build App + Inject (with VLC) + Host
+      - name: Build App (workspace + VLC)
         run: |
           set -euo pipefail
-          for scheme in BXFloatMVP BXFloatInject; do
-            xcodebuild \
-              -workspace BXFloatMVP.xcworkspace \
-              -scheme "$scheme" \
-              -configuration Release \
-              -sdk iphoneos \
-              -derivedDataPath build \
-              -destination "generic/platform=iOS" \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY="" \
-              ONLY_ACTIVE_ARCH=NO \
-              build
-          done
+          xcodebuild \
+            -workspace BXFloatMVP.xcworkspace \
+            -scheme BXFloatMVP \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
 
+      - name: Build Inject single dylib (no VLC)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project BXFloatMVP.xcodeproj \
+            -scheme BXFloatInject \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+      - name: Build Host
+        run: |
+          set -euo pipefail
           xcodebuild \
             -project BXFloatMVP.xcodeproj \
             -scheme BXFloatHost \
@@ -97,43 +114,22 @@ jobs:
           DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
           test -f "$DYLIB"
           ldid -S "$DYLIB" || true
-          install_name_tool -add_rpath "@executable_path/Frameworks" "$DYLIB" 2>/dev/null || true
-          install_name_tool -add_rpath "@loader_path/Frameworks" "$DYLIB" 2>/dev/null || true
-
-          rm -rf ../dist/BXFloatInjectPack
-          mkdir -p ../dist/BXFloatInjectPack/Frameworks
-          cp "$DYLIB" ../dist/BXFloatInjectPack/BXFloatInject.dylib
           cp "$DYLIB" ../dist/BXFloatInject.dylib
 
-          FW=$(find build Pods -type d -name 'MobileVLCKit.framework' 2>/dev/null | head -n 1 || true)
-          if [ -z "$FW" ] || [ ! -d "$FW" ]; then
-            echo "MobileVLCKit.framework not found"
-            find build -iname '*VLC*' | head -n 80 || true
-            exit 1
-          fi
-          echo "Using VLC framework: $FW"
-          cp -R "$FW" ../dist/BXFloatInjectPack/Frameworks/
-          sign_tree ../dist/BXFloatInjectPack
-
           printf '%s\n' \
-            'BXFloat Inject Pack (LAN RTSP low latency)' \
+            'BXFloatInject (Phase1 single dylib)' \
             '' \
-            'Files:' \
-            '1) BXFloatInject.dylib' \
-            '2) Frameworks/MobileVLCKit.framework' \
+            'Install: TrollFools inject THIS ONE FILE only.' \
+            'No Filza. No MobileVLCKit.framework.' \
             '' \
-            'Install (Douyin etc):' \
-            'A. TrollFools inject BXFloatInject.dylib' \
-            'B. Filza: copy MobileVLCKit.framework into XXX.app/Frameworks/' \
-            '   (create Frameworks folder if missing)' \
-            'C. Force-quit app, reopen, overlay -> LAN -> computer IP' \
-            '' \
-            'Notes:' \
-            '- BXFloatMVP.ipa already embeds VLC (no extra framework)' \
-            '- Inject MUST include MobileVLCKit for RTSP' \
-            > ../dist/BXFloatInjectPack/README.txt
+            'Usage:' \
+            '1) Inject into Douyin' \
+            '2) Force-quit Douyin, reopen' \
+            '3) Tap floating window -> Settings panel' \
+            '4) LAN + computer IP + enable Replace Camera' \
+            '5) MediaMTX RTSP :18554 /stream' \
+            > ../dist/BXFloatInject-README.txt
 
-          ( cd ../dist/BXFloatInjectPack && zip -qr ../BXFloatInjectPack.zip . )
           ls -lh ../dist
 
       - name: Upload MVP IPA
@@ -153,9 +149,3 @@ jobs:
         with:
           name: BXFloatInject-dylib
           path: dist/BXFloatInject.dylib
-
-      - name: Upload Inject Pack
-        uses: actions/upload-artifact@v4
-        with:
-          name: BXFloatInjectPack
-          path: dist/BXFloatInjectPack.zip

@@ -30,6 +30,20 @@
 		B10000000000000000000008 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* UIKit.framework */; };
 		B10000000000000000000009 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Foundation.framework */; };
 		B1000000000000000000000A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* AVFoundation.framework */; };
+		B1000000000000000000000D /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* VideoToolbox.framework */; };
+		B1000000000000000000000E /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* CoreMedia.framework */; };
+		B1000000000000000000000F /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* CoreVideo.framework */; };
+		B10000000000000000000010 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001C /* Network.framework */; };
+		B10000000000000000000011 /* CamFrameStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* CamFrameStore.swift */; };
+		B10000000000000000000012 /* CameraReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001E /* CameraReplaceHooks.swift */; };
+		B10000000000000000000013 /* RTSPVTPuller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001F /* RTSPVTPuller.swift */; };
+		B10000000000000000000014 /* RTSPVTPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* RTSPVTPlayer.swift */; };
+		B10000000000000000000015 /* CamSettingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* CamSettingsPanel.swift */; };
+		A1000000000000000000000E /* CamFrameStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* CamFrameStore.swift */; };
+		A1000000000000000000000F /* CameraReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001E /* CameraReplaceHooks.swift */; };
+		A10000000000000000000010 /* RTSPVTPuller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001F /* RTSPVTPuller.swift */; };
+		A10000000000000000000011 /* RTSPVTPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* RTSPVTPlayer.swift */; };
+		A10000000000000000000012 /* CamSettingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* CamSettingsPanel.swift */; };
 		C10000000000000000000001 /* HostAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* HostAppDelegate.swift */; };
 		C10000000000000000000002 /* HostSceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* HostSceneDelegate.swift */; };
 		C10000000000000000000003 /* HostViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* HostViewController.swift */; };
@@ -55,6 +69,15 @@
 		A2000000000000000000000E /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		A2000000000000000000000F /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 		A20000000000000000000010 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		A20000000000000000000019 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
+		A2000000000000000000001A /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+		A2000000000000000000001B /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
+		A2000000000000000000001C /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		A2000000000000000000001D /* CamFrameStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamFrameStore.swift; sourceTree = "<group>"; };
+		A2000000000000000000001E /* CameraReplaceHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraReplaceHooks.swift; sourceTree = "<group>"; };
+		A2000000000000000000001F /* RTSPVTPuller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPuller.swift; sourceTree = "<group>"; };
+		A20000000000000000000020 /* RTSPVTPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPlayer.swift; sourceTree = "<group>"; };
+		A20000000000000000000021 /* CamSettingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamSettingsPanel.swift; sourceTree = "<group>"; };
 		A20000000000000000000011 /* BXFloatInject.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = BXFloatInject.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000012 /* HostAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAppDelegate.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* HostSceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSceneDelegate.swift; sourceTree = "<group>"; };
@@ -78,6 +101,10 @@
 				B10000000000000000000008 /* UIKit.framework in Frameworks */,
 				B10000000000000000000009 /* Foundation.framework in Frameworks */,
 				B1000000000000000000000A /* AVFoundation.framework in Frameworks */,
+				B1000000000000000000000D /* VideoToolbox.framework in Frameworks */,
+				B1000000000000000000000E /* CoreMedia.framework in Frameworks */,
+				B1000000000000000000000F /* CoreVideo.framework in Frameworks */,
+				B10000000000000000000010 /* Network.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -108,12 +135,22 @@
 				A40000000000000000000004 /* Config */,
 				A40000000000000000000005 /* Player */,
 				A40000000000000000000008 /* Overlay */,
+				A4000000000000000000000E /* Camera */,
 				A40000000000000000000009 /* Home */,
 				A4000000000000000000000D /* USB */,
 				A4000000000000000000000B /* Inject */,
 				A4000000000000000000000C /* Host */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		A4000000000000000000000E /* Camera */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000001D /* CamFrameStore.swift */,
+				A2000000000000000000001E /* CameraReplaceHooks.swift */,
+			);
+			path = Camera;
 			sourceTree = "<group>";
 		};
 		A4000000000000000000000D /* USB */ = {
@@ -147,6 +184,8 @@
 				A20000000000000000000004 /* StreamPlayer.swift */,
 				A20000000000000000000005 /* AVStreamPlayer.swift */,
 				A20000000000000000000017 /* VLCStreamPlayer.swift */,
+				A2000000000000000000001F /* RTSPVTPuller.swift */,
+				A20000000000000000000020 /* RTSPVTPlayer.swift */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -176,6 +215,7 @@
 			children = (
 				A20000000000000000000006 /* FloatingOverlayView.swift */,
 				A20000000000000000000007 /* FloatingOverlayController.swift */,
+				A20000000000000000000021 /* CamSettingsPanel.swift */,
 			);
 			path = Overlay;
 			sourceTree = "<group>";
@@ -194,6 +234,10 @@
 				A2000000000000000000000E /* UIKit.framework */,
 				A2000000000000000000000F /* Foundation.framework */,
 				A20000000000000000000010 /* AVFoundation.framework */,
+				A20000000000000000000019 /* VideoToolbox.framework */,
+				A2000000000000000000001A /* CoreMedia.framework */,
+				A2000000000000000000001B /* CoreVideo.framework */,
+				A2000000000000000000001C /* Network.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -331,8 +375,13 @@
 				A10000000000000000000004 /* StreamPlayer.swift in Sources */,
 				A10000000000000000000005 /* AVStreamPlayer.swift in Sources */,
 				A1000000000000000000000C /* VLCStreamPlayer.swift in Sources */,
+				A10000000000000000000010 /* RTSPVTPuller.swift in Sources */,
+				A10000000000000000000011 /* RTSPVTPlayer.swift in Sources */,
 				A10000000000000000000006 /* FloatingOverlayView.swift in Sources */,
 				A10000000000000000000007 /* FloatingOverlayController.swift in Sources */,
+				A10000000000000000000012 /* CamSettingsPanel.swift in Sources */,
+				A1000000000000000000000E /* CamFrameStore.swift in Sources */,
+				A1000000000000000000000F /* CameraReplaceHooks.swift in Sources */,
 				A10000000000000000000008 /* HomeViewController.swift in Sources */,
 				A1000000000000000000000D /* USBStreamBridge.swift in Sources */,
 			);
@@ -345,9 +394,13 @@
 				B10000000000000000000001 /* MediaConfig.swift in Sources */,
 				B10000000000000000000002 /* StreamPlayer.swift in Sources */,
 				B10000000000000000000003 /* AVStreamPlayer.swift in Sources */,
-				B1000000000000000000000C /* VLCStreamPlayer.swift in Sources */,
+				B10000000000000000000013 /* RTSPVTPuller.swift in Sources */,
+				B10000000000000000000014 /* RTSPVTPlayer.swift in Sources */,
 				B10000000000000000000004 /* FloatingOverlayView.swift in Sources */,
 				B10000000000000000000005 /* FloatingOverlayController.swift in Sources */,
+				B10000000000000000000015 /* CamSettingsPanel.swift in Sources */,
+				B10000000000000000000011 /* CamFrameStore.swift in Sources */,
+				B10000000000000000000012 /* CameraReplaceHooks.swift in Sources */,
 				B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */,
 				B10000000000000000000007 /* BXInjectConstructor.m in Sources */,
 				B1000000000000000000000B /* USBStreamBridge.swift in Sources */,

@@ -1,7 +1,7 @@
 import Foundation
 
 enum ConnectionMode: String, Codable {
-    /// 局域网：只填电脑 IP。App 拼 RTSP（低延迟）；注入版无 VLC 则拼 HLS
+    /// 局域网：只填电脑 IP → RTSP（App=VLC，注入=内嵌 RTSP+VT）
     case lan
     /// 数据线：不需 SIM/热点；手机播 127.0.0.1，电脑 usbmux 桥到 MediaMTX
     case usb
@@ -19,13 +19,18 @@ struct MediaConfig: Equatable {
     var connectionMode: ConnectionMode
     /// MediaMTX HLS 端口（默认 18888）
     var hlsPort: Int
-    /// MediaMTX RTSP 端口（默认 18554，独立 App 可手填 rtsp 用）
+    /// MediaMTX RTSP 端口（默认 18554）
     var rtspPort: Int
     var streamPath: String
     var opacity: Float
     var windowScale: Float
     var overlayEnabled: Bool
     var muted: Bool
+    /// 最终目标：替换摄像头画面
+    var replaceCameraEnabled: Bool
+    /// 第2期：融合真实摄像头（占位持久化）
+    var blendRealCamera: Bool
+    var blendOBSPercent: Int
 
     /// usbmux 隧道端口（电脑助手连这个）
     static let usbTunnelPort = 19888
@@ -41,7 +46,10 @@ struct MediaConfig: Equatable {
         opacity: 1.0,
         windowScale: 0.42,
         overlayEnabled: false,
-        muted: false
+        muted: false,
+        replaceCameraEnabled: false,
+        blendRealCamera: false,
+        blendOBSPercent: 90
     )
 }
 
@@ -49,6 +57,7 @@ extension MediaConfig: Codable {
     enum CodingKeys: String, CodingKey {
         case streamURL, computerIP, usbComputerIP, connectionMode
         case hlsPort, rtspPort, streamPath, opacity, windowScale, overlayEnabled, muted
+        case replaceCameraEnabled, blendRealCamera, blendOBSPercent
     }
 
     init(from decoder: Decoder) throws {
@@ -64,25 +73,22 @@ extension MediaConfig: Codable {
         windowScale = try c.decodeIfPresent(Float.self, forKey: .windowScale) ?? 0.42
         overlayEnabled = try c.decodeIfPresent(Bool.self, forKey: .overlayEnabled) ?? false
         muted = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+        replaceCameraEnabled = try c.decodeIfPresent(Bool.self, forKey: .replaceCameraEnabled) ?? false
+        blendRealCamera = try c.decodeIfPresent(Bool.self, forKey: .blendRealCamera) ?? false
+        blendOBSPercent = try c.decodeIfPresent(Int.self, forKey: .blendOBSPercent) ?? 90
     }
 }
 
 extension MediaConfig {
-    /// 实际拿去播放的地址
+    /// 实际拿去播放的地址（局域网统一 RTSP，冲 3 秒内）
     func resolvedPlaybackURL() -> String {
         switch connectionMode {
         case .lan:
             let ip = sanitizedIP(computerIP)
             guard !ip.isEmpty else { return "" }
-            #if canImport(MobileVLCKit)
-            // 独立 App：RTSP + VLC，延迟通常远低于 HLS
             return "rtsp://\(ip):\(rtspPort)/\(streamPath)"
-            #else
-            // 注入 dylib：不能带 VLC，仍走 HLS
-            return "http://\(ip):\(hlsPort)/\(streamPath)/index.m3u8"
-            #endif
         case .usb:
-            // 本机桥接端口，由 USBStreamBridge + 电脑助手转发到 MediaMTX（HLS）
+            // 第1期 USB 仍 HLS；第2期再上 RTSP 隧道
             return "http://127.0.0.1:\(hlsPort)/\(streamPath)/index.m3u8"
         case .localVideo, .manual:
             return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)

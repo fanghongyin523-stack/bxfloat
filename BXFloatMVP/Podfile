@@ -3,15 +3,11 @@ inhibit_all_warnings!
 
 target 'BXFloatMVP' do
   use_frameworks!
-  # RTSP / 局域网拉流
+  # 独立 App 仍用 VLC 播 RTSP
   pod 'MobileVLCKit', '3.6.0'
 end
 
-# 注入版同样需要 RTSP 低延迟（dylib + 随包 Framework）
-target 'BXFloatInject' do
-  use_frameworks!
-  pod 'MobileVLCKit', '3.6.0'
-end
+# BXFloatInject：单 dylib，不走 CocoaPods（内嵌 RTSP+VideoToolbox）
 
 post_install do |installer|
   installer.pods_project.targets.each do |target|

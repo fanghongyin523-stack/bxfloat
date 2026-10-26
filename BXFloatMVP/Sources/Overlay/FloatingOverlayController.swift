@@ -1,13 +1,15 @@
 import UIKit
 
-/// 悬浮窗挂在宿主主窗口上；支持局域网「只填 IP」。
-final class FloatingOverlayController: FloatingOverlayViewDelegate {
+/// 小悬浮窗 ↔ 设置面板；局域网 RTSP；可选替换摄像头。
+final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsPanelDelegate {
     static let shared = FloatingOverlayController()
 
     private weak var hostWindow: UIWindow?
     private var overlayView: FloatingOverlayView?
+    private var settingsPanel: CamSettingsPanel?
     private var player: StreamPlayer?
     private var loadedURL: String?
+    private var panelVisible = false
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -20,6 +22,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
 
     func attach(to window: UIWindow) {
         hostWindow = window
+        CameraReplaceHooks.installIfNeeded()
         apply(MediaConfigStore.shared.config)
     }
 
@@ -54,16 +57,17 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
 
         if !config.overlayEnabled {
             USBStreamBridge.shared.stop()
+            RTSPVTPuller.shared.stop()
             player?.stop()
             player = nil
             loadedURL = nil
             overlayView?.removeFromSuperview()
             overlayView = nil
+            hidePanel()
             return
         }
 
         if config.connectionMode == .usb {
-            // 先把本机 18888 / 隧道 19888 听起来，再让播放器连，避免黑窗
             USBStreamBridge.shared.startAndWait()
         } else {
             USBStreamBridge.shared.stop()
@@ -74,10 +78,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
             overlay = existing
             hostWindow.bringSubviewToFront(existing)
         } else {
-            let bounds = hostWindow.bounds
-            let shortSide = min(max(bounds.width, 1), max(bounds.height, 1))
-            let width = max(shortSide * CGFloat(config.windowScale), 160)
-            let frame = CGRect(x: 24, y: 120, width: width, height: width * 0.75)
+            let frame = CGRect(x: 24, y: 120, width: 168, height: 126)
             let created = FloatingOverlayView(frame: frame)
             created.delegate = self
             hostWindow.addSubview(created)
@@ -87,11 +88,13 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
 
         overlay.alpha = CGFloat(max(0.2, min(config.opacity, 1)))
         overlay.setConnectionHint(config)
+        if panelVisible {
+            hostWindow.bringSubviewToFront(settingsPanel ?? overlay)
+        }
 
         let url = config.resolvedPlaybackURL()
         let needReload = loadedURL != url || player == nil
         if needReload {
-            // USB：再稍等助手连上隧道
             let delay: TimeInterval = config.connectionMode == .usb ? 0.35 : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
@@ -114,17 +117,15 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         }
 
         let kind = StreamURLAnalyzer.kind(of: urlString)
-        let needNewPlayer: Bool
-        if player == nil {
-            needNewPlayer = true
-        } else {
-            #if canImport(MobileVLCKit)
-            let isVLC = String(describing: type(of: player!)).contains("VLC")
-            needNewPlayer = (kind == .rtsp) != isVLC
-            #else
-            needNewPlayer = (kind == .rtsp)
-            #endif
-        }
+        #if canImport(MobileVLCKit)
+        let wantVLC = (kind == .rtsp)
+        let isVLC = player.map { String(describing: type(of: $0)).contains("VLC") } ?? false
+        let needNewPlayer = player == nil || wantVLC != isVLC
+        #else
+        let wantRTSPVT = (kind == .rtsp)
+        let isRTSPVT = player is RTSPVTPlayer
+        let needNewPlayer = player == nil || wantRTSPVT != isRTSPVT
+        #endif
 
         if needNewPlayer {
             player?.stop()
@@ -137,29 +138,49 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
         player.play()
         overlay.setPlayerView(player.view)
         overlay.setPlaying(true)
+
+        // 注入路径：额外保证拉流进 FrameStore（替换摄像头用）
+        if kind == .rtsp {
+            #if !canImport(MobileVLCKit)
+            RTSPVTPuller.shared.start(urlString: urlString)
+            #endif
+        }
     }
 
     private func presentError(_ message: String) {
         NSLog("BXFloat overlay error: %@", message)
-        guard let root = hostWindow?.rootViewController else { return }
-        var presenter = root
-        while let shown = presenter.presentedViewController {
-            presenter = shown
+    }
+
+    private func showPanel() {
+        guard let hostWindow else { return }
+        panelVisible = true
+        if settingsPanel == nil {
+            let panel = CamSettingsPanel(frame: hostWindow.bounds)
+            panel.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            panel.delegate = self
+            settingsPanel = panel
+            hostWindow.addSubview(panel)
+        } else {
+            settingsPanel?.reloadFromStore()
+            settingsPanel?.isHidden = false
+            hostWindow.bringSubviewToFront(settingsPanel!)
         }
-        let alert = UIAlertController(title: "无法播放", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "好", style: .default))
-        if presenter.presentedViewController == nil {
-            presenter.present(alert, animated: true)
+        overlayView?.isHidden = true
+    }
+
+    private func hidePanel() {
+        panelVisible = false
+        settingsPanel?.removeFromSuperview()
+        settingsPanel = nil
+        overlayView?.isHidden = false
+        if let overlayView, let hostWindow {
+            hostWindow.bringSubviewToFront(overlayView)
         }
     }
 
-    private func presenter() -> UIViewController? {
-        guard let root = hostWindow?.rootViewController else { return nil }
-        var presenter = root
-        while let shown = presenter.presentedViewController {
-            presenter = shown
-        }
-        return presenter
+    func camSettingsPanelDidCollapse(_ panel: CamSettingsPanel) {
+        hidePanel()
+        apply(MediaConfigStore.shared.config)
     }
 
     func floatingOverlayDidRequestClose(_ view: FloatingOverlayView) {
@@ -178,91 +199,6 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate {
     }
 
     func floatingOverlayDidRequestEditURL(_ view: FloatingOverlayView) {
-        guard let presenter = presenter() else { return }
-        let sheet = UIAlertController(title: "画面连接方式", message: nil, preferredStyle: .actionSheet)
-        sheet.addAction(UIAlertAction(title: "局域网（只填电脑 IP）", style: .default) { [weak self] _ in
-            self?.presentLANIPEditor(from: presenter)
-        })
-        sheet.addAction(UIAlertAction(title: "手动完整地址", style: .default) { [weak self] _ in
-            self?.presentManualURLEditor(from: presenter)
-        })
-        sheet.addAction(UIAlertAction(title: "数据线（USB 热点）", style: .default) { [weak self] _ in
-            self?.presentUSBEditor(from: presenter)
-        })
-        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
-        if let pop = sheet.popoverPresentationController {
-            pop.sourceView = view
-            pop.sourceRect = view.bounds
-        }
-        presenter.present(sheet, animated: true)
-    }
-
-    private func presentLANIPEditor(from presenter: UIViewController) {
-        let cfg = MediaConfigStore.shared.config
-        let alert = UIAlertController(
-            title: "局域网",
-            message: "同一 Wi‑Fi，只填电脑 IP。\nApp：rtsp://IP:\(cfg.rtspPort)/\(cfg.streamPath)\n注入版：自动改用 HLS",
-            preferredStyle: .alert
-        )
-        alert.addTextField { field in
-            field.text = cfg.computerIP
-            field.placeholder = "例如 192.168.3.60"
-            field.keyboardType = .decimalPad
-            field.autocapitalizationType = .none
-            field.clearButtonMode = .whileEditing
-        }
-        alert.addAction(UIAlertAction(title: "粘贴并填入", style: .default) { _ in
-            let clip = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            self.commitLAN(ip: clip.isEmpty ? (alert.textFields?.first?.text ?? "") : clip)
-        })
-        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
-            self.commitLAN(ip: alert.textFields?.first?.text ?? "")
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        presenter.present(alert, animated: true)
-    }
-
-    private func commitLAN(ip: String) {
-        MediaConfigStore.shared.update { config in
-            config.connectionMode = .lan
-            config.computerIP = ip
-            config.overlayEnabled = true
-        }
-    }
-
-    private func presentManualURLEditor(from presenter: UIViewController) {
-        let alert = UIAlertController(title: "完整播放地址", message: "http / https / rtsp / 本地路径", preferredStyle: .alert)
-        alert.addTextField { field in
-            field.text = MediaConfigStore.shared.config.streamURL
-            field.keyboardType = .URL
-            field.autocapitalizationType = .none
-            field.clearButtonMode = .whileEditing
-        }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
-            let text = alert.textFields?.first?.text ?? ""
-            MediaConfigStore.shared.update { config in
-                config.connectionMode = .manual
-                config.streamURL = text
-                config.overlayEnabled = true
-            }
-        })
-        presenter.present(alert, animated: true)
-    }
-
-    private func presentUSBEditor(from presenter: UIViewController) {
-        let alert = UIAlertController(
-            title: "数据线",
-            message: "不需要手机卡和个人热点。\n1. 线插电脑并信任\n2. 电脑跑 MediaMTX+OBS\n3. 电脑运行 BXFloat-USB助手.bat 并保持开着\n4. 确定后打开悬浮窗",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "启用数据线", style: .default) { _ in
-            MediaConfigStore.shared.update { config in
-                config.connectionMode = .usb
-                config.overlayEnabled = true
-            }
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        presenter.present(alert, animated: true)
+        showPanel()
     }
 }

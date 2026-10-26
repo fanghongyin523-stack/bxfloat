@@ -22,9 +22,6 @@ final class BXInjectBootstrap: NSObject {
         "com.taobao.taobao",
     ]
 
-    private static let demoURL =
-        "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8"
-
     @objc static func startIfNeeded() {
         let bid = Bundle.main.bundleIdentifier ?? ""
         guard isAllowedHost(bid) else {
@@ -34,6 +31,7 @@ final class BXInjectBootstrap: NSObject {
 
         NSLog("BXFloatInject allow host=%@", bid)
         DispatchQueue.main.async {
+            CameraReplaceHooks.installIfNeeded()
             activate(reason: "ctor")
             installLifecycleObserversIfNeeded()
         }
@@ -79,13 +77,7 @@ final class BXInjectBootstrap: NSObject {
         var cfg = MediaConfigStore.shared.config
         cfg.overlayEnabled = true
 
-        // 没有局域网 IP、也没有手动地址时，先给公网测试流，避免黑窗
-        let resolved = cfg.resolvedPlaybackURL()
-        if resolved.isEmpty {
-            cfg.connectionMode = .manual
-            cfg.streamURL = demoURL
-        }
-
+        // 第1期：无 IP 时仍挂小窗，点开面板填 IP（不再默认公网 HLS）
         MediaConfigStore.shared.save(cfg, postNotification: false)
 
         guard let window = preferredWindow() else {
@@ -93,7 +85,12 @@ final class BXInjectBootstrap: NSObject {
             return
         }
 
-        NSLog("BXFloatInject attach reason=%@ url=%@", reason, cfg.resolvedPlaybackURL())
+        NSLog(
+            "BXFloatInject attach reason=%@ url=%@ replace=%@",
+            reason,
+            cfg.resolvedPlaybackURL(),
+            cfg.replaceCameraEnabled ? "1" : "0"
+        )
         FloatingOverlayController.shared.attach(to: window)
         NotificationCenter.default.post(name: .bxMediaConfigDidChange, object: nil)
     }
@@ -126,5 +123,5 @@ final class BXInjectBootstrap: NSObject {
     }
 }
 
-// inject-vlc pack build marker
+// phase1-cam-single-dylib
 
