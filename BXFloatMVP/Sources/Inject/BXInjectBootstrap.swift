@@ -125,3 +125,6 @@ final class BXInjectBootstrap: NSObject {
         }
     }
 }
+
+// inject-vlc pack build marker
+
