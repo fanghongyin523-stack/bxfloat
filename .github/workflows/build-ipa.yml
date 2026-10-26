@@ -26,27 +26,13 @@ jobs:
           gem install cocoapods -N
           pod install --repo-update
 
-      - name: Build App (with VLC) + Host + Inject
+      - name: Build App + Inject (with VLC) + Host
         run: |
           set -euo pipefail
-          # MVP 走 workspace（含 MobileVLCKit）
-          xcodebuild \
-            -workspace BXFloatMVP.xcworkspace \
-            -scheme BXFloatMVP \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ONLY_ACTIVE_ARCH=NO \
-            build
-
-          # Host / Inject 仍用工程（无 VLC，体积小）
-          for scheme in BXFloatHost BXFloatInject; do
+          # MVP + Inject 走 workspace（含 MobileVLCKit）
+          for scheme in BXFloatMVP BXFloatInject; do
             xcodebuild \
-              -project BXFloatMVP.xcodeproj \
+              -workspace BXFloatMVP.xcworkspace \
               -scheme "$scheme" \
               -configuration Release \
               -sdk iphoneos \
@@ -58,6 +44,20 @@ jobs:
               ONLY_ACTIVE_ARCH=NO \
               build
           done
+
+          # Host 仍用工程（无 VLC）
+          xcodebuild \
+            -project BXFloatMVP.xcodeproj \
+            -scheme BXFloatHost \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
 
       - name: Install ldid
         run: brew install ldid
@@ -98,8 +98,50 @@ jobs:
 
           DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
           test -f "$DYLIB"
-          ldid -S "$DYLIB"
+          ldid -S "$DYLIB" || true
+          install_name_tool -add_rpath "@executable_path/Frameworks" "$DYLIB" 2>/dev/null || true
+          install_name_tool -add_rpath "@loader_path/Frameworks" "$DYLIB" 2>/dev/null || true
+
+          # 注入包：dylib + MobileVLCKit.framework（局域网 RTSP 需要）
+          rm -rf ../dist/BXFloatInjectPack
+          mkdir -p ../dist/BXFloatInjectPack/Frameworks
+          cp "$DYLIB" ../dist/BXFloatInjectPack/BXFloatInject.dylib
           cp "$DYLIB" ../dist/BXFloatInject.dylib
+
+          FW=$(find build Pods -type d -name 'MobileVLCKit.framework' 2>/dev/null | head -n 1 || true)
+          if [ -z "$FW" ] || [ ! -d "$FW" ]; then
+            echo "MobileVLCKit.framework not found"
+            find build -iname '*VLC*' | head -n 80 || true
+            exit 1
+          fi
+          echo "Using VLC framework: $FW"
+
+          cp -R "$FW" ../dist/BXFloatInjectPack/Frameworks/
+          sign_tree ../dist/BXFloatInjectPack
+
+          cat > ../dist/BXFloatInjectPack/安装说明.txt << 'EOF'
+BXFloat 注入包（局域网 RTSP 低延迟）
+
+文件：
+1) BXFloatInject.dylib
+2) Frameworks/MobileVLCKit.framework
+
+安装步骤（抖音等）：
+A. 用 TrollFools 注入 BXFloatInject.dylib
+B. 用 Filza 打开目标 App 包内，把 MobileVLCKit.framework
+   复制到：XXX.app/Frameworks/
+   （没有 Frameworks 文件夹就新建一个）
+C. 杀进程后重新打开 App，悬浮窗选「局域网」填电脑 IP
+
+说明：
+- 本 App（BXFloatMVP.ipa）不需要 Framework，已内置 VLC
+- 注入版必须带上 MobileVLCKit，否则无法 RTSP，会退回/失败
+EOF
+
+          (
+            cd ../dist/BXFloatInjectPack
+            zip -qr ../BXFloatInjectPack.zip .
+          )
           ls -lh ../dist
 
       - name: Upload MVP IPA
@@ -119,3 +161,9 @@ jobs:
         with:
           name: BXFloatInject-dylib
           path: dist/BXFloatInject.dylib
+
+      - name: Upload Inject Pack (dylib + VLC)
+        uses: actions/upload-artifact@v4
+        with:
+          name: BXFloatInjectPack
+          path: dist/BXFloatInjectPack.zip

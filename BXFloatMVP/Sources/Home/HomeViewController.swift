@@ -483,8 +483,9 @@ final class HelpViewController: UIViewController {
         1. 插线信任，开 BXFloat-USB-Bridge.bat
         2. 选数据线 → 打开悬浮窗（仍为 HLS，延迟会高于局域网）
 
-        注入
-        抖音等注入版无 VLC，局域网也会走 HLS，延迟通常高于本 App。
+        注入（低延迟）
+        使用 BXFloatInjectPack：dylib + MobileVLCKit.framework
+        注入 dylib 后，把 framework 拷进 App 的 Frameworks 目录。
 
         版本
         BXFloat MVP · 局域网 RTSP / USB HLS

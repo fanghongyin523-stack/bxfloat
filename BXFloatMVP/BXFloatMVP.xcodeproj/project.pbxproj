@@ -21,6 +21,7 @@
 		B10000000000000000000001 /* MediaConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* MediaConfig.swift */; };
 		B10000000000000000000002 /* StreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* StreamPlayer.swift */; };
 		B10000000000000000000003 /* AVStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* AVStreamPlayer.swift */; };
+		B1000000000000000000000C /* VLCStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* VLCStreamPlayer.swift */; };
 		B10000000000000000000004 /* FloatingOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* FloatingOverlayView.swift */; };
 		B10000000000000000000005 /* FloatingOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* FloatingOverlayController.swift */; };
 		B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BXInjectBootstrap.swift */; };
@@ -344,6 +345,7 @@
 				B10000000000000000000001 /* MediaConfig.swift in Sources */,
 				B10000000000000000000002 /* StreamPlayer.swift in Sources */,
 				B10000000000000000000003 /* AVStreamPlayer.swift in Sources */,
+				B1000000000000000000000C /* VLCStreamPlayer.swift in Sources */,
 				B10000000000000000000004 /* FloatingOverlayView.swift in Sources */,
 				B10000000000000000000005 /* FloatingOverlayController.swift in Sources */,
 				B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */,
@@ -457,6 +459,11 @@
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
 				MACH_O_TYPE = mh_dylib;
 				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.inject;
 				PRODUCT_NAME = BXFloatInject;
@@ -477,6 +484,11 @@
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
 				MACH_O_TYPE = mh_dylib;
 				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.inject;
 				PRODUCT_NAME = BXFloatInject;
