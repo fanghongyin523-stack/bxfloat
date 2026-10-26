@@ -115,23 +115,23 @@ jobs:
           cp -R "$FW" ../dist/BXFloatInjectPack/Frameworks/
           sign_tree ../dist/BXFloatInjectPack
 
-          cat > ../dist/BXFloatInjectPack/README.txt << 'EOF'
-BXFloat Inject Pack (LAN RTSP low latency)
-
-Files:
-1) BXFloatInject.dylib
-2) Frameworks/MobileVLCKit.framework
-
-Install (Douyin etc):
-A. TrollFools inject BXFloatInject.dylib
-B. Filza: copy MobileVLCKit.framework into XXX.app/Frameworks/
-   (create Frameworks folder if missing)
-C. Force-quit app, reopen, overlay -> LAN -> computer IP
-
-Notes:
-- BXFloatMVP.ipa already embeds VLC (no extra framework)
-- Inject MUST include MobileVLCKit for RTSP
-EOF
+          printf '%s\n' \
+            'BXFloat Inject Pack (LAN RTSP low latency)' \
+            '' \
+            'Files:' \
+            '1) BXFloatInject.dylib' \
+            '2) Frameworks/MobileVLCKit.framework' \
+            '' \
+            'Install (Douyin etc):' \
+            'A. TrollFools inject BXFloatInject.dylib' \
+            'B. Filza: copy MobileVLCKit.framework into XXX.app/Frameworks/' \
+            '   (create Frameworks folder if missing)' \
+            'C. Force-quit app, reopen, overlay -> LAN -> computer IP' \
+            '' \
+            'Notes:' \
+            '- BXFloatMVP.ipa already embeds VLC (no extra framework)' \
+            '- Inject MUST include MobileVLCKit for RTSP' \
+            > ../dist/BXFloatInjectPack/README.txt
 
           ( cd ../dist/BXFloatInjectPack && zip -qr ../BXFloatInjectPack.zip . )
           ls -lh ../dist
