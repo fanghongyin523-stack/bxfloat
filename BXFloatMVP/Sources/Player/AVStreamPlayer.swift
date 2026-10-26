@@ -8,6 +8,8 @@ final class AVStreamPlayer: StreamPlayer {
     private var statusObserver: NSKeyValueObservation?
     private var keepUpObserver: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
+    private var liveCatchTimer: Timer?
+    private var isLiveStream = false
 
     var view: UIView { container }
 
@@ -21,7 +23,6 @@ final class AVStreamPlayer: StreamPlayer {
     }
 
     init() {
-        // 低延迟：不要为了少卡顿而多缓冲
         player.automaticallyWaitsToMinimizeStalling = false
         if #available(iOS 15.0, *) {
             player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
@@ -33,6 +34,7 @@ final class AVStreamPlayer: StreamPlayer {
     }
 
     deinit {
+        stopLiveCatchTimer()
         statusObserver?.invalidate()
         keepUpObserver?.invalidate()
         if let endObserver {
@@ -47,8 +49,11 @@ final class AVStreamPlayer: StreamPlayer {
         let url: URL
         if trimmed.hasPrefix("/") {
             url = URL(fileURLWithPath: trimmed)
+            isLiveStream = false
         } else if let parsed = URL(string: trimmed) {
             url = parsed
+            let lower = trimmed.lowercased()
+            isLiveStream = lower.contains(".m3u8") || lower.hasPrefix("rtsp://") || lower.contains(":18888/")
         } else {
             throw StreamPlayerError.invalidURL
         }
@@ -59,8 +64,7 @@ final class AVStreamPlayer: StreamPlayer {
             AVURLAssetPreferPreciseDurationAndTimingKey: false,
         ])
         let item = AVPlayerItem(asset: asset)
-        // 直播向前缓冲压到约 1 秒，起播更快、延迟更低
-        item.preferredForwardBufferDuration = 1.0
+        item.preferredForwardBufferDuration = isLiveStream ? 0.5 : 2.0
         if #available(iOS 14.0, *) {
             item.startsOnFirstEligibleVariant = true
         }
@@ -70,10 +74,11 @@ final class AVStreamPlayer: StreamPlayer {
         statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard let self else { return }
             if item.status == .readyToPlay {
-                self.jumpToLiveEdgeIfNeeded(item)
+                self.jumpToLiveEdge(item, force: true)
                 if self.player.rate == 0 {
                     self.player.play()
                 }
+                self.startLiveCatchTimer()
             } else if item.status == .failed {
                 NSLog("BXFloat AVPlayer failed: \(String(describing: item.error))")
             }
@@ -82,10 +87,11 @@ final class AVStreamPlayer: StreamPlayer {
         keepUpObserver?.invalidate()
         keepUpObserver = item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
             guard let self else { return }
-            // 卡顿恢复后立刻继续播，并尽量贴直播沿
-            if item.isPlaybackLikelyToKeepUp, self.player.rate == 0 {
-                self.jumpToLiveEdgeIfNeeded(item)
-                self.player.play()
+            if item.isPlaybackLikelyToKeepUp {
+                self.jumpToLiveEdge(item, force: false)
+                if self.player.rate == 0 {
+                    self.player.play()
+                }
             }
         }
 
@@ -97,7 +103,6 @@ final class AVStreamPlayer: StreamPlayer {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            // 直播一般不会到 end；本地文件循环
             self?.player.seek(to: .zero)
             self?.player.play()
         }
@@ -105,16 +110,19 @@ final class AVStreamPlayer: StreamPlayer {
 
     func play() {
         if let item = player.currentItem {
-            jumpToLiveEdgeIfNeeded(item)
+            jumpToLiveEdge(item, force: true)
         }
         player.play()
+        startLiveCatchTimer()
     }
 
     func pause() {
+        stopLiveCatchTimer()
         player.pause()
     }
 
     func stop() {
+        stopLiveCatchTimer()
         statusObserver?.invalidate()
         statusObserver = nil
         keepUpObserver?.invalidate()
@@ -123,14 +131,39 @@ final class AVStreamPlayer: StreamPlayer {
         player.replaceCurrentItem(with: nil)
     }
 
-    /// HLS 直播：跳到可 seek 范围末尾，减少积压延迟
-    private func jumpToLiveEdgeIfNeeded(_ item: AVPlayerItem) {
+    private func startLiveCatchTimer() {
+        stopLiveCatchTimer()
+        guard isLiveStream else { return }
+        liveCatchTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self, let item = self.player.currentItem else { return }
+            self.jumpToLiveEdge(item, force: false)
+            if item.isPlaybackLikelyToKeepUp, self.player.rate == 0 {
+                self.player.play()
+            }
+        }
+        if let liveCatchTimer {
+            RunLoop.main.add(liveCatchTimer, forMode: .common)
+        }
+    }
+
+    private func stopLiveCatchTimer() {
+        liveCatchTimer?.invalidate()
+        liveCatchTimer = nil
+    }
+
+    private func jumpToLiveEdge(_ item: AVPlayerItem, force: Bool) {
+        guard isLiveStream else { return }
         guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
         let duration = range.duration
-        guard duration.isNumeric, duration.seconds > 0.3 else { return }
+        guard duration.isNumeric, duration.seconds > 0.2 else { return }
         let live = CMTimeAdd(range.start, duration)
-        // 略微退后 0.3s，避免贴太死导致频繁卡
-        let target = CMTimeSubtract(live, CMTimeMakeWithSeconds(0.3, preferredTimescale: 600))
+        let target = CMTimeSubtract(live, CMTimeMakeWithSeconds(0.25, preferredTimescale: 600))
+        let current = player.currentTime()
+        if current.isNumeric, target.isNumeric {
+            let lag = CMTimeGetSeconds(CMTimeSubtract(target, current))
+            if !force, lag < 1.2 { return }
+            if lag.isNaN || lag < 0 { return }
+        }
         player.seek(to: target, toleranceBefore: .positiveInfinity, toleranceAfter: .zero)
     }
 }

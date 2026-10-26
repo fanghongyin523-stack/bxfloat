@@ -16,17 +16,14 @@ rtmpAddress: :11935
 rtsp: true
 rtspAddress: :18554
 
-# 低延迟 HLS（手机 AVPlayer / 注入版）
 hls: true
 hlsAddress: :18888
 hlsAlwaysRemux: true
-hlsVariant: lowLatency
-# 更短分片 + 更少保留 = 更低延迟（略增卡顿风险）
-hlsSegmentCount: 4
-hlsSegmentDuration: 500ms
-hlsPartDuration: 100ms
+hlsVariant: mpegts
+hlsSegmentCount: 3
+hlsSegmentDuration: 1s
 hlsSegmentMaxSize: 50M
-hlsAllowOrigin: "*"
+hlsAllowOrigins: ["*"]
 
 srt: true
 srtAddress: :18890
