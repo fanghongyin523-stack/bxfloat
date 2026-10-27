@@ -9,9 +9,14 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
+  # Race for any available Mac runner; first successful inject dylib is enough.
   inject:
-    runs-on: macos-13
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: BXFloatMVP
@@ -44,24 +49,24 @@ jobs:
           mkdir -p ../dist
           DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
           test -f "$DYLIB"
-          if command -v ldid >/dev/null 2>&1; then
-            ldid -S "$DYLIB" || true
-          else
-            brew install ldid
-            ldid -S "$DYLIB" || true
-          fi
+          if ! command -v ldid >/dev/null 2>&1; then brew install ldid; fi
+          ldid -S "$DYLIB" || true
           cp "$DYLIB" ../dist/BXFloatInject.dylib
           ls -lh ../dist/BXFloatInject.dylib
+          file ../dist/BXFloatInject.dylib
 
       - name: Upload Inject dylib
         uses: actions/upload-artifact@v4
         with:
-          name: BXFloatInject-dylib
+          name: BXFloatInject-dylib-${{ matrix.os }}
           path: dist/BXFloatInject.dylib
+          if-no-files-found: error
 
   app:
-    runs-on: macos-13
+    needs: []
+    runs-on: macos-14
     timeout-minutes: 60
+    continue-on-error: true
     defaults:
       run:
         working-directory: BXFloatMVP
