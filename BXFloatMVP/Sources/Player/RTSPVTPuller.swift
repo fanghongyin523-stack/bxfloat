@@ -534,11 +534,11 @@ final class RTSPVTPuller {
             guard status == noErr, let sample else { return status }
 
             var flagsOut: VTDecodeInfoFlags = []
-            // 实时优先，避免异步堆积造成幻灯片感
+            // 异步解码 + 实时丢帧：避免队列堆积后变成幻灯片
             return VTDecompressionSessionDecodeFrame(
                 session,
                 sampleBuffer: sample,
-                flags: [._EnableAsynchronousDecompression],
+                flags: [._EnableAsynchronousDecompression, ._1xRealTimePlayback],
                 frameRefcon: nil,
                 infoFlagsOut: &flagsOut
             )

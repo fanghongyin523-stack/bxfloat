@@ -142,6 +142,7 @@ enum CameraReplaceHooks {
             if let s = session as? AVCaptureSession {
                 ShootSurfaceDetector.trackSession(s)
             }
+            ShootSurfaceDetector.invalidateCache()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
             DispatchQueue.main.async {
@@ -160,6 +161,7 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
+            ShootSurfaceDetector.invalidateCache()
             DispatchQueue.main.async {
                 // 会话停后按当前页面重算；离开摄像页会拆包装并停盖层
                 applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)

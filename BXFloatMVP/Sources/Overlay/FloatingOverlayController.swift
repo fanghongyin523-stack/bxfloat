@@ -87,7 +87,8 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
 
     private func startReattachTimer() {
         reattachTimer?.invalidate()
-        reattachTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+        // 1.0s 足够保活悬浮窗；摄像页检测另有短缓存，避免主线程被视图树扫描拖死
+        reattachTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.reattachIfNeeded(reason: "timer")
         }
         if let t = reattachTimer {
@@ -98,7 +99,8 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
     /// 主 feed：不盖预览、不包装相机；仅摄像页开替换相关逻辑。
     private func syncReplaceForCurrentSurface() {
         let cfgOn = MediaConfigStore.shared.config.replaceCameraEnabled
-        let onCam = ShootSurfaceDetector.isCameraSurfaceVisible()
+        // 未开替换时不必反复扫摄像页；关替换则确保 unwrap
+        let onCam = cfgOn ? ShootSurfaceDetector.isCameraSurfaceVisible() : false
         CameraReplaceHooks.applyReplaceMode(cfgOn && onCam)
 
         let scene = UIApplication.shared.connectedScenes
