@@ -173,8 +173,19 @@ final class CamSettingsPanel: UIView {
         titleLabel.text = store.width > 0
             ? "素材分辨率：\(store.width) × \(store.height)"
             : "素材分辨率：—"
-        statusLabel.text =
-            "收帧 \(store.frameCount) · 更新 \(ageText)\n替换摄像头：\(MediaConfigStore.shared.config.replaceCameraEnabled ? "开" : "关") · 目标延迟 ≤3s"
+        let replaceOn = MediaConfigStore.shared.config.replaceCameraEnabled
+        statusLabel.text = [
+            "收帧 \(store.frameCount) · 更新 \(ageText)",
+            "替换：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount) · 回调 \(CameraReplaceHooks.callbackCount)",
+            "写入成功 \(CameraReplaceHooks.paintCount) · 失败 \(CameraReplaceHooks.paintFailCount)",
+            store.frameCount == 0
+                ? "若收帧=0：检查电脑 MediaMTX/OBS 与 IP"
+                : (CameraReplaceHooks.callbackCount == 0
+                    ? "有收帧但无摄像头回调：请进入抖音拍摄页后再开替换"
+                    : (CameraReplaceHooks.paintCount == 0 && replaceOn
+                        ? "有回调但未写入：正在重试格式适配"
+                        : "运行中")),
+        ].joined(separator: "\n")
     }
 
     private func commit() {

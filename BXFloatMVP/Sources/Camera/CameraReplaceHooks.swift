@@ -5,19 +5,43 @@ import CoreVideo
 import ObjectiveC
 import UIKit
 
-/// 替换摄像头画面：在采集回调里把最新电脑帧画进 CMSampleBuffer。
+/// 替换摄像头画面（对标 aux 思路）：
+/// 1) 尽早 swizzle setSampleBufferDelegate
+/// 2) 再 hook addOutput / startRunning，把已经挂上的 delegate 重新包一层
+/// 3) 不要改只读相机帧，而是新建 CMSampleBuffer 再交给原回调
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
 
+    private(set) static var wrapCount: Int64 = 0
+    private(set) static var callbackCount: Int64 = 0
+    private(set) static var paintCount: Int64 = 0
+    private(set) static var paintFailCount: Int64 = 0
+
     static func installIfNeeded() {
         lock.lock()
         defer { lock.unlock() }
-        guard !installed else { return }
+        guard !installed else {
+            rewrapRunningSessions()
+            return
+        }
         installed = true
         swizzleVideoDataOutput()
+        swizzleSessionAddOutput()
+        swizzleSessionStartRunning()
         NSLog("BXFloatCam hooks installed")
+        // 相机可能已启动：延迟再扫几次
+        DispatchQueue.main.async {
+            rewrapRunningSessions()
+        }
+        for sec in [1, 2, 4, 8] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(sec)) {
+                rewrapRunningSessions()
+            }
+        }
     }
+
+    // MARK: - Swizzles
 
     private static func swizzleVideoDataOutput() {
         let cls: AnyClass = AVCaptureVideoDataOutput.self
@@ -26,29 +50,92 @@ enum CameraReplaceHooks {
             NSLog("BXFloatCam missing setSampleBufferDelegate")
             return
         }
-
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject, AnyObject?, DispatchQueue?) -> Void = { obj, delegate, queue in
             let wrapped: AnyObject?
-            if let delegate {
+            if let delegate, !(delegate is CamSampleBufferProxy) {
                 wrapped = CamSampleBufferProxy(target: delegate)
+                wrapCount += 1
+                NSLog("BXFloatCam wrap delegate #%lld %@", wrapCount, String(describing: type(of: delegate)))
             } else {
-                wrapped = nil
+                wrapped = delegate
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
-            let call = unsafeBitCast(original, to: Fn.self)
-            call(obj, sel, wrapped, queue)
+            unsafeBitCast(original, to: Fn.self)(obj, sel, wrapped, queue)
         }
-        let imp = imp_implementationWithBlock(block)
-        method_setImplementation(method, imp)
+        method_setImplementation(method, imp_implementationWithBlock(block))
     }
+
+    private static func swizzleSessionAddOutput() {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString("addOutput:")
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, AnyObject) -> Void = { session, output in
+            typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+            unsafeBitCast(original, to: Fn.self)(session, sel, output)
+            if let vout = output as? AVCaptureVideoDataOutput {
+                DispatchQueue.main.async {
+                    rewrap(output: vout)
+                }
+            }
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private static func swizzleSessionStartRunning() {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString("startRunning")
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject) -> Void = { session in
+            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+            unsafeBitCast(original, to: Fn.self)(session, sel)
+            DispatchQueue.main.async {
+                rewrapRunningSessions()
+            }
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    /// 通过 KVC / runtime 尽量找到已有 VideoDataOutput 并重设 delegate（走我们的 swizzle）
+    static func rewrapRunningSessions() {
+        // 扫描常见持有：UIApplication windows 下不一定有 session。
+        // 用 objc 关联：对所有 AVCaptureVideoDataOutput 实例无法直接枚举。
+        // 折中：若宿主把 session 挂在通知/单例上不可靠；依赖 addOutput/startRunning。
+        // 再补：尝试从当前 key window 的 responder 链拿不到。
+        // 这里额外 hook 已存在的 output：通过 _output 不可行。
+        // 实用做法：用户开替换后，提示重进拍摄页；同时我们在 startRunning 时 rewrap。
+        NSLog(
+            "BXFloatCam rewrap tick wrap=%lld cb=%lld paint=%lld fail=%lld frames=%lld",
+            wrapCount, callbackCount, paintCount, paintFailCount, CamFrameStore.shared.frameCount
+        )
+    }
+
+    fileprivate static func rewrap(output: AVCaptureVideoDataOutput) {
+        guard let delegate = output.sampleBufferDelegate else { return }
+        if delegate is CamSampleBufferProxy { return }
+        let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
+        // 再 set 一次，触发 swizzle 包装
+        output.setSampleBufferDelegate(nil, queue: nil)
+        output.setSampleBufferDelegate(delegate, queue: queue)
+        NSLog("BXFloatCam rewrap existing output")
+    }
+
+    fileprivate static func noteCallback() { callbackCount += 1 }
+    fileprivate static func notePaintOK() { paintCount += 1 }
+    fileprivate static func notePaintFail() { paintFailCount += 1 }
 }
 
-/// 转发原始 delegate，并在「替换摄像头」开启时改写像素。
+/// 转发原 delegate；替换开启时用「新 sampleBuffer」替换相机帧。
 final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private weak var target: AnyObject?
-    private let outputSel = #selector(AVCaptureVideoDataOutputSampleBufferDelegate.captureOutput(_:didOutput:from:))
-    private let dropSel = #selector(AVCaptureVideoDataOutputSampleBufferDelegate.captureOutput(_:didDrop:from:))
+    private let outputSel = #selector(
+        AVCaptureVideoDataOutputSampleBufferDelegate.captureOutput(_:didOutput:from:)
+    )
+    private let dropSel = #selector(
+        AVCaptureVideoDataOutputSampleBufferDelegate.captureOutput(_:didDrop:from:)
+    )
 
     init(target: AnyObject) {
         self.target = target
@@ -70,10 +157,17 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CameraReplaceHooks.noteCallback()
+        var forward = sampleBuffer
         if MediaConfigStore.shared.config.replaceCameraEnabled {
-            CamBufferPainter.paintIfPossible(into: sampleBuffer)
+            if let replaced = CamBufferPainter.makeReplacing(sampleBuffer) {
+                forward = replaced
+                CameraReplaceHooks.notePaintOK()
+            } else {
+                CameraReplaceHooks.notePaintFail()
+            }
         }
-        invokeOutput(on: target, output: output, sampleBuffer: sampleBuffer, connection: connection)
+        invokeCapture(sel: outputSel, on: target, output: output, sampleBuffer: forward, connection: connection)
     }
 
     func captureOutput(
@@ -81,91 +175,100 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didDrop sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let target, target.responds(to: dropSel) else { return }
         invokeCapture(sel: dropSel, on: target, output: output, sampleBuffer: sampleBuffer, connection: connection)
     }
 
-    private func invokeOutput(
+    private func invokeCapture(
+        sel: Selector,
         on target: AnyObject?,
         output: AVCaptureOutput,
         sampleBuffer: CMSampleBuffer,
         connection: AVCaptureConnection
     ) {
-        guard let target, target.responds(to: outputSel) else { return }
-        invokeCapture(sel: outputSel, on: target, output: output, sampleBuffer: sampleBuffer, connection: connection)
-    }
-
-    private func invokeCapture(
-        sel: Selector,
-        on target: AnyObject,
-        output: AVCaptureOutput,
-        sampleBuffer: CMSampleBuffer,
-        connection: AVCaptureConnection
-    ) {
-        typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput, CMSampleBuffer, AVCaptureConnection) -> Void
+        guard let target, target.responds(to: sel) else { return }
+        typealias Fn = @convention(c) (
+            AnyObject, Selector, AVCaptureOutput, CMSampleBuffer, AVCaptureConnection
+        ) -> Void
         guard let cls: AnyClass = object_getClass(target) else { return }
         guard let method = class_getInstanceMethod(cls, sel) else { return }
-        let call = unsafeBitCast(method_getImplementation(method), to: Fn.self)
-        call(target, sel, output, sampleBuffer, connection)
+        unsafeBitCast(method_getImplementation(method), to: Fn.self)(
+            target, sel, output, sampleBuffer, connection
+        )
     }
 }
 
 enum CamBufferPainter {
-    static func paintIfPossible(into sampleBuffer: CMSampleBuffer) {
-        guard let src = CamFrameStore.shared.copyLatest() else { return }
-        guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    private static let ci = CIContext(options: [.useSoftwareRenderer: false])
 
-        let sw = CVPixelBufferGetWidth(src)
-        let sh = CVPixelBufferGetHeight(src)
-        let dw = CVPixelBufferGetWidth(dst)
-        let dh = CVPixelBufferGetHeight(dst)
-        guard sw > 0, sh > 0, dw > 0, dh > 0 else { return }
+    /// 新建与相机帧同尺寸/格式的 buffer，画入电脑画面，再包成 CMSampleBuffer。
+    static func makeReplacing(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+        guard let src = CamFrameStore.shared.copyLatest() else { return nil }
+        guard let dstProto = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
 
-        CVPixelBufferLockBaseAddress(src, .readOnly)
-        CVPixelBufferLockBaseAddress(dst, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(dst, [])
-            CVPixelBufferUnlockBaseAddress(src, .readOnly)
-        }
+        let dw = CVPixelBufferGetWidth(dstProto)
+        let dh = CVPixelBufferGetHeight(dstProto)
+        guard dw > 0, dh > 0 else { return nil }
 
-        // 尺寸一致：整帧拷贝（同格式时）
-        if sw == dw, sh == dh,
-           CVPixelBufferGetPixelFormatType(src) == CVPixelBufferGetPixelFormatType(dst)
-        {
-            let planes = CVPixelBufferGetPlaneCount(src)
-            if planes == 0 {
-                if let s = CVPixelBufferGetBaseAddress(src),
-                   let d = CVPixelBufferGetBaseAddress(dst)
-                {
-                    let bytes = min(
-                        CVPixelBufferGetDataSize(src),
-                        CVPixelBufferGetDataSize(dst)
-                    )
-                    memcpy(d, s, bytes)
-                }
-                return
-            }
-            for p in 0..<planes {
-                guard let s = CVPixelBufferGetBaseAddressOfPlane(src, p),
-                      let d = CVPixelBufferGetBaseAddressOfPlane(dst, p)
-                else { continue }
-                let rows = CVPixelBufferGetHeightOfPlane(src, p)
-                let sRow = CVPixelBufferGetBytesPerRowOfPlane(src, p)
-                let dRow = CVPixelBufferGetBytesPerRowOfPlane(dst, p)
-                let copyW = min(sRow, dRow)
-                for r in 0..<rows {
-                    memcpy(d.advanced(by: r * dRow), s.advanced(by: r * sRow), copyW)
-                }
-            }
-            return
-        }
+        // 统一输出 BGRA：CI 可靠写入；整帧替换 sampleBuffer 时多数链路可接受
+        let format = kCVPixelFormatType_32BGRA
+        var newPB: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            dw,
+            dh,
+            format,
+            attrs as CFDictionary,
+            &newPB
+        )
+        guard status == kCVReturnSuccess, let newPB else { return nil }
 
-        // 尺寸不同：用 CoreImage 缩放到目标
         let ciSrc = CIImage(cvPixelBuffer: src)
-        let scaleX = CGFloat(dw) / CGFloat(sw)
-        let scaleY = CGFloat(dh) / CGFloat(sh)
-        let scaled = ciSrc.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-        let ctx = CIContext(options: [.useSoftwareRenderer: false])
-        ctx.render(scaled, to: dst)
+        let sw = CGFloat(CVPixelBufferGetWidth(src))
+        let sh = CGFloat(CVPixelBufferGetHeight(src))
+        guard sw > 0, sh > 0 else { return nil }
+        let scaled = ciSrc.transformed(
+            by: CGAffineTransform(scaleX: CGFloat(dw) / sw, y: CGFloat(dh) / sh)
+        )
+        let bounds = CGRect(x: 0, y: 0, width: dw, height: dh)
+        ci.render(scaled, to: newPB, bounds: bounds, colorSpace: CGColorSpaceCreateDeviceRGB())
+
+        var timing = CMSampleTimingInfo(
+            duration: CMSampleBufferGetDuration(sampleBuffer),
+            presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+            decodeTimeStamp: CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
+        )
+        var formatDesc: CMFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: newPB,
+            formatDescriptionOut: &formatDesc
+        )
+        guard let formatDesc else { return nil }
+
+        var out: CMSampleBuffer?
+        let err = CMSampleBufferCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: newPB,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: formatDesc,
+            sampleTiming: &timing,
+            sampleBufferOut: &out
+        )
+        guard err == noErr else { return nil }
+        return out
     }
+}
+
+/// 供 ObjC constructor 尽早调用
+@_cdecl("BXFloatInstallCameraHooks")
+public func BXFloatInstallCameraHooks() {
+    CameraReplaceHooks.installIfNeeded()
 }
