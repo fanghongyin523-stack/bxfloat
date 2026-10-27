@@ -8,8 +8,8 @@ import UIKit
 final class CamPreviewPresenter {
     static let shared = CamPreviewPresenter()
 
-    /// 预览最长边（像素）：小窗够看，显著降 CPU/GPU
-    private let maxPreviewEdge: CGFloat = 540
+    /// 预览最长边（像素）：FFmpeg 进帧稳定后可略高，兼顾清晰与性能
+    private let maxPreviewEdge: CGFloat = 720
     private let ci = CIContext(options: [
         .useSoftwareRenderer: false,
         .cacheIntermediates: false,
@@ -43,7 +43,7 @@ final class CamPreviewPresenter {
         guard link == nil else { return }
         let l = CADisplayLink(target: self, selector: #selector(tick))
         if #available(iOS 10.0, *) {
-            l.preferredFramesPerSecond = 24
+            l.preferredFramesPerSecond = 30
         }
         l.add(to: .main, forMode: .common)
         link = l

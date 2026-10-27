@@ -6,6 +6,7 @@ on:
     branches: [main, master]
     paths:
       - "BXFloatMVP/**"
+      - "tools/**"
       - ".github/workflows/build-ipa.yml"
 
 jobs:
@@ -27,6 +28,16 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
+      - name: Fetch FFmpeg static libs (embed into single dylib)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          chmod +x tools/ci-fetch-ffmpeg-ios.sh
+          tools/ci-fetch-ffmpeg-ios.sh
+          ls -lh BXFloatMVP/Vendor/FFmpeg/lib
+          test -f BXFloatMVP/Vendor/FFmpeg/include/libavformat/avformat.h \
+            || test -f BXFloatMVP/Vendor/FFmpeg/include/libavformat/avformat.h
+
       - name: Build Inject dylib
         run: |
           set -euo pipefail
@@ -41,6 +52,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             ONLY_ACTIVE_ARCH=NO \
+            ARCHS=arm64 \
             build
 
       - name: Package dylib
@@ -54,6 +66,15 @@ jobs:
           cp "$DYLIB" ../dist/BXFloatInject.dylib
           ls -lh ../dist/BXFloatInject.dylib
           file ../dist/BXFloatInject.dylib
+          # 参考版约 9MB；内嵌 FFmpeg 后应明显大于旧的 ~0.5MB
+          python3 - <<'PY'
+          import os
+          p="../dist/BXFloatInject.dylib"
+          n=os.path.getsize(p)
+          print(f"size_bytes={n}")
+          if n < 2_000_000:
+              raise SystemExit(f"dylib too small ({n}); FFmpeg likely not linked")
+          PY
 
       - name: Upload Inject dylib
         uses: actions/upload-artifact@v4

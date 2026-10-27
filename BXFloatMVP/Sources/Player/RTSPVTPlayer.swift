@@ -15,7 +15,7 @@ final class RTSPVTPlayer: NSObject, StreamPlayer, CamPreviewConsuming {
         guard StreamURLAnalyzer.kind(of: trimmed) == .rtsp else {
             throw StreamPlayerError.invalidURL
         }
-        RTSPVTPuller.shared.start(urlString: trimmed)
+        FFRTSPController.start(urlString: trimmed)
     }
 
     func play() {
@@ -30,7 +30,7 @@ final class RTSPVTPlayer: NSObject, StreamPlayer, CamPreviewConsuming {
     func stop() {
         isPlaying = false
         CamPreviewPresenter.shared.removeConsumer(self)
-        RTSPVTPuller.shared.stop()
+        FFRTSPController.stop()
         preview.setCGImage(nil)
     }
 

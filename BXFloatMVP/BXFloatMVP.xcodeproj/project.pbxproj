@@ -43,6 +43,12 @@
 		B10000000000000000000017 /* CameraProxyForward.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000023 /* CameraProxyForward.m */; };
 		B10000000000000000000018 /* ShootSurfaceDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* ShootSurfaceDetector.swift */; };
 		B10000000000000000000019 /* CamPreviewPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* CamPreviewPresenter.swift */; };
+		B1000000000000000000001A /* FFRTSPBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000031 /* FFRTSPBridge.m */; };
+		B1000000000000000000001B /* CamFramePublish.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000032 /* CamFramePublish.swift */; };
+		B1000000000000000000001C /* FFRTSPController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000033 /* FFRTSPController.swift */; };
+		A10000000000000000000017 /* FFRTSPBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000031 /* FFRTSPBridge.m */; };
+		A10000000000000000000018 /* CamFramePublish.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000032 /* CamFramePublish.swift */; };
+		A10000000000000000000019 /* FFRTSPController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000033 /* FFRTSPController.swift */; };
 		A1000000000000000000000E /* CamFrameStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* CamFrameStore.swift */; };
 		A1000000000000000000000F /* CameraReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001E /* CameraReplaceHooks.swift */; };
 		A10000000000000000000013 /* PreviewCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* PreviewCover.swift */; };
@@ -90,6 +96,10 @@
 		A20000000000000000000026 /* CamPreviewPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamPreviewPresenter.swift; sourceTree = "<group>"; };
 		A2000000000000000000001F /* RTSPVTPuller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPuller.swift; sourceTree = "<group>"; };
 		A20000000000000000000020 /* RTSPVTPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPlayer.swift; sourceTree = "<group>"; };
+		A20000000000000000000030 /* FFRTSPBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FFRTSPBridge.h; sourceTree = "<group>"; };
+		A20000000000000000000031 /* FFRTSPBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = FFRTSPBridge.m; sourceTree = "<group>"; };
+		A20000000000000000000032 /* CamFramePublish.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamFramePublish.swift; sourceTree = "<group>"; };
+		A20000000000000000000033 /* FFRTSPController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFRTSPController.swift; sourceTree = "<group>"; };
 		A20000000000000000000021 /* CamSettingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamSettingsPanel.swift; sourceTree = "<group>"; };
 		A20000000000000000000011 /* BXFloatInject.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = BXFloatInject.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000012 /* HostAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAppDelegate.swift; sourceTree = "<group>"; };
@@ -204,6 +214,10 @@
 				A20000000000000000000017 /* VLCStreamPlayer.swift */,
 				A2000000000000000000001F /* RTSPVTPuller.swift */,
 				A20000000000000000000020 /* RTSPVTPlayer.swift */,
+				A20000000000000000000030 /* FFRTSPBridge.h */,
+				A20000000000000000000031 /* FFRTSPBridge.m */,
+				A20000000000000000000032 /* CamFramePublish.swift */,
+				A20000000000000000000033 /* FFRTSPController.swift */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -395,6 +409,9 @@
 				A1000000000000000000000C /* VLCStreamPlayer.swift in Sources */,
 				A10000000000000000000010 /* RTSPVTPuller.swift in Sources */,
 				A10000000000000000000011 /* RTSPVTPlayer.swift in Sources */,
+				A10000000000000000000017 /* FFRTSPBridge.m in Sources */,
+				A10000000000000000000018 /* CamFramePublish.swift in Sources */,
+				A10000000000000000000019 /* FFRTSPController.swift in Sources */,
 				A10000000000000000000006 /* FloatingOverlayView.swift in Sources */,
 				A10000000000000000000007 /* FloatingOverlayController.swift in Sources */,
 				A10000000000000000000012 /* CamSettingsPanel.swift in Sources */,
@@ -418,6 +435,9 @@
 				B10000000000000000000003 /* AVStreamPlayer.swift in Sources */,
 				B10000000000000000000013 /* RTSPVTPuller.swift in Sources */,
 				B10000000000000000000014 /* RTSPVTPlayer.swift in Sources */,
+				B1000000000000000000001A /* FFRTSPBridge.m in Sources */,
+				B1000000000000000000001B /* CamFramePublish.swift in Sources */,
+				B1000000000000000000001C /* FFRTSPController.swift in Sources */,
 				B10000000000000000000004 /* FloatingOverlayView.swift in Sources */,
 				B10000000000000000000005 /* FloatingOverlayController.swift in Sources */,
 				B10000000000000000000015 /* CamSettingsPanel.swift in Sources */,
@@ -537,17 +557,55 @@
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = "";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"BXFLOAT_HAS_FFMPEG=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Vendor/FFmpeg/include",
+					"$(SRCROOT)/Sources/Player",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Vendor/FFmpeg/lib",
+				);
 				MACH_O_TYPE = mh_dylib;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lavcodec",
+					"-lavformat",
+					"-lavutil",
+					"-lswscale",
+					"-lswresample",
+					"-lbz2",
+					"-lz",
+					"-liconv",
+					"-lc++",
+					"-framework",
+					Security,
+					"-framework",
+					CFNetwork,
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					CoreMedia,
+					"-framework",
+					CoreVideo,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.inject;
 				PRODUCT_NAME = BXFloatInject;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "BXFLOAT_FFMPEG";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -562,17 +620,55 @@
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				EXECUTABLE_PREFIX = "";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"BXFLOAT_HAS_FFMPEG=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Vendor/FFmpeg/include",
+					"$(SRCROOT)/Sources/Player",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Vendor/FFmpeg/lib",
+				);
 				MACH_O_TYPE = mh_dylib;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lavcodec",
+					"-lavformat",
+					"-lavutil",
+					"-lswscale",
+					"-lswresample",
+					"-lbz2",
+					"-lz",
+					"-liconv",
+					"-lc++",
+					"-framework",
+					Security,
+					"-framework",
+					CFNetwork,
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					CoreMedia,
+					"-framework",
+					CoreVideo,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.baixiang.bxfloat.inject;
 				PRODUCT_NAME = BXFloatInject;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "BXFLOAT_FFMPEG";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

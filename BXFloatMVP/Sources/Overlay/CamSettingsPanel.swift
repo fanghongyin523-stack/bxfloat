@@ -204,7 +204,7 @@ final class CamSettingsPanel: UIView {
         if mode == .lan, let ip = ipField.text, !ip.isEmpty {
             let url = MediaConfigStore.shared.config.resolvedPlaybackURL()
             if url.hasPrefix("rtsp://") {
-                RTSPVTPuller.shared.start(urlString: url)
+                FFRTSPController.start(urlString: url)
             }
         }
     }

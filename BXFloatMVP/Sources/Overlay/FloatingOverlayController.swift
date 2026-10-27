@@ -237,7 +237,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
             overlay.setPlaying(player.isPlaying)
             if config.connectionMode == .lan, url.hasPrefix("rtsp://") {
                 #if !canImport(MobileVLCKit)
-                RTSPVTPuller.shared.start(urlString: url)
+                FFRTSPController.start(urlString: url)
                 #endif
             }
         }
@@ -268,7 +268,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         overlay.setPlaying(true)
         if kind == .rtsp {
             #if !canImport(MobileVLCKit)
-            RTSPVTPuller.shared.start(urlString: urlString)
+            FFRTSPController.start(urlString: urlString)
             #endif
         }
     }
