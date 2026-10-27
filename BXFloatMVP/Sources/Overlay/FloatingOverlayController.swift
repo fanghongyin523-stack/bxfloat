@@ -95,19 +95,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
     private func syncReplaceForCurrentSurface() {
         let cfgOn = MediaConfigStore.shared.config.replaceCameraEnabled
+        // 真替换：只走 sample 画帧；盖层窗会挡住开播按钮/标题，永久关掉
+        PreviewCover.stop()
         CameraReplaceHooks.applyReplaceMode(cfgOn)
-
-        let scene = floatWindow?.windowScene
-            ?? UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-        let host = scene?.windows.first { $0 !== floatWindow && !$0.isHidden } ?? floatWindow
-
-        if cfgOn {
-            PreviewCover.refreshIfNeeded(in: host)
-        } else {
-            PreviewCover.stop()
-        }
     }
 
     private func reattachIfNeeded(reason: String) {
