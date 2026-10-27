@@ -28,7 +28,7 @@ final class AVStreamPlayer: StreamPlayer {
             player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
         }
         playerLayer.player = player
-        playerLayer.videoGravity = .resizeAspect
+        playerLayer.videoGravity = .resizeAspectFill
         container.playerLayer = playerLayer
         container.layer.addSublayer(playerLayer)
     }

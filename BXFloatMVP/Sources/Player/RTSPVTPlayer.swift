@@ -47,7 +47,8 @@ private final class RTSPPreviewView: UIView {
         super.init(frame: frame)
         backgroundColor = .black
         layer.addSublayer(imageLayer)
-        imageLayer.contentsGravity = .resizeAspect
+        // 铺满小窗并裁切黑边（与拍摄盖层 scaleAspectFill 一致）
+        imageLayer.contentsGravity = .resizeAspectFill
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:)") }
