@@ -1,8 +1,7 @@
 import AVFoundation
 import UIKit
 
-/// 判断当前是否在「加号摄像/拍摄」页，避免主 feed 盖预览层。
-/// 结果短时缓存，避免抖音巨大视图树被 0.6s 定时器反复全量遍历。
+/// 判断当前是否在「加号摄像/拍摄」页，避免主 feed 误盖。
 enum ShootSurfaceDetector {
     private static var trackedSessions = NSHashTable<AVCaptureSession>.weakObjects()
     private static var cachedVisible: Bool?
@@ -19,14 +18,14 @@ enum ShootSurfaceDetector {
         cachedAt = 0
     }
 
-    /// 摄像页判定：有预览层，或「running 的采集会话 + 大面积预览宿主」。
-    /// 仅 session.isRunning 不够（易误判），避免主 feed 误开替换。
     static func isCameraSurfaceVisible() -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         if let cached = cachedVisible, now - cachedAt < cacheTTL {
             return cached
         }
-        let found = hasPreviewLayer() || hasRunningSessionWithLikelyPreview()
+        // 有预览层，或采集会话在跑（拍摄页常见）
+        let running = trackedSessions.allObjects.contains { $0.isRunning }
+        let found = hasPreviewLayer() || running
         cachedVisible = found
         cachedAt = now
         return found
@@ -37,21 +36,18 @@ enum ShootSurfaceDetector {
         var found: UIView?
         func walk(_ v: UIView) {
             if found != nil { return }
+            if v.tag == 0x42584643 || v.tag == 0x4258464C { return }
             if v.layer is AVCaptureVideoPreviewLayer {
                 found = v
                 return
             }
             for s in v.subviews { walk(s) }
         }
-        if let root = window.rootViewController?.view {
-            walk(root)
-        } else {
-            walk(window)
-        }
+        walk(window.rootViewController?.view ?? window)
         return found
     }
 
-    /// 抖音等可能不用 AVCaptureVideoPreviewLayer，退而求面积最大的候选视图。
+    /// 按类名/图层猜测预览宿主。
     static func findLikelyPreviewHost(in window: UIWindow?) -> UIView? {
         guard let window else { return nil }
         let root = window.rootViewController?.view ?? window
@@ -60,11 +56,10 @@ enum ShootSurfaceDetector {
         var best: UIView?
         var bestArea: CGFloat = 0
         func walk(_ v: UIView) {
-            // 跳过我们自己的浮层 / 盖层
             if v.tag == 0x42584643 || v.tag == 0x4258464C { return }
+            if v is UIControl || v is UIButton { return }
             let area = v.bounds.width * v.bounds.height
-            // 接近全屏、且是 Metal / GL / 专用预览类名
-            if area > screenArea * 0.35, area > bestArea {
+            if area > screenArea * 0.30, area > bestArea {
                 let name = String(describing: type(of: v))
                 let layerName = String(describing: type(of: v.layer))
                 let hit =
@@ -72,9 +67,13 @@ enum ShootSurfaceDetector {
                     || name.localizedCaseInsensitiveContains("camera")
                     || name.localizedCaseInsensitiveContains("capture")
                     || name.localizedCaseInsensitiveContains("metal")
+                    || name.localizedCaseInsensitiveContains("render")
+                    || name.localizedCaseInsensitiveContains("glk")
                     || layerName.localizedCaseInsensitiveContains("metal")
                     || layerName.localizedCaseInsensitiveContains("sample")
+                    || layerName.localizedCaseInsensitiveContains("gl")
                     || v.layer is AVCaptureVideoPreviewLayer
+                    || v.layer.contents != nil && area > screenArea * 0.45
                 if hit {
                     best = v
                     bestArea = area
@@ -86,23 +85,37 @@ enum ShootSurfaceDetector {
         return best
     }
 
+    /// 最后手段：面积最大的非控件视图（拍摄页预览通常接近全屏）。
+    static func findLargestContentView(in window: UIWindow?) -> UIView? {
+        guard let window else { return nil }
+        let root = window.rootViewController?.view ?? window
+        let screenArea = window.bounds.width * window.bounds.height
+        guard screenArea > 1 else { return nil }
+        var best: UIView?
+        var bestArea: CGFloat = 0
+        func walk(_ v: UIView) {
+            if v.tag == 0x42584643 || v.tag == 0x4258464C { return }
+            if v is UIControl || v is UILabel || v is UIButton || v is UIImageView { return }
+            if v.isHidden || v.alpha < 0.05 { return }
+            let area = v.bounds.width * v.bounds.height
+            // 要够大，又不要直接用 root（避免把整页控件都盖住；优先中间层）
+            if area > screenArea * 0.40, area < screenArea * 0.98, area > bestArea {
+                best = v
+                bestArea = area
+            }
+            for s in v.subviews { walk(s) }
+        }
+        walk(root)
+        if let best { return best }
+        // 实在没有中间层，就盖 root（触摸关闭，按钮仍可点，但会被画面挡住看起来）
+        return root
+    }
+
     private static func hasPreviewLayer() -> Bool {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         for scene in scenes {
             for w in scene.windows where !w.isHidden {
                 if findPreviewLayerHost(in: w) != nil { return true }
-            }
-        }
-        return false
-    }
-
-    private static func hasRunningSessionWithLikelyPreview() -> Bool {
-        let running = trackedSessions.allObjects.contains { $0.isRunning }
-        guard running else { return false }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        for scene in scenes {
-            for w in scene.windows where !w.isHidden {
-                if findLikelyPreviewHost(in: w) != nil { return true }
             }
         }
         return false
