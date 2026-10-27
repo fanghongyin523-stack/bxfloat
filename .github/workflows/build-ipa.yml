@@ -9,8 +9,9 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
-  build:
+  inject:
     runs-on: macos-13
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: BXFloatMVP
@@ -21,28 +22,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Setup CocoaPods (App VLC only)
-        run: |
-          gem install cocoapods -N
-          pod install --repo-update
-
-      - name: Build App (workspace + VLC)
-        run: |
-          set -euo pipefail
-          xcodebuild \
-            -workspace BXFloatMVP.xcworkspace \
-            -scheme BXFloatMVP \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ONLY_ACTIVE_ARCH=NO \
-            build
-
-      - name: Build Inject single dylib (no VLC)
+      - name: Build Inject dylib
         run: |
           set -euo pipefail
           xcodebuild \
@@ -58,9 +38,60 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             build
 
-      - name: Build Host
+      - name: Package dylib
         run: |
           set -euo pipefail
+          mkdir -p ../dist
+          DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
+          test -f "$DYLIB"
+          if command -v ldid >/dev/null 2>&1; then
+            ldid -S "$DYLIB" || true
+          else
+            brew install ldid
+            ldid -S "$DYLIB" || true
+          fi
+          cp "$DYLIB" ../dist/BXFloatInject.dylib
+          ls -lh ../dist/BXFloatInject.dylib
+
+      - name: Upload Inject dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: BXFloatInject-dylib
+          path: dist/BXFloatInject.dylib
+
+  app:
+    runs-on: macos-13
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: BXFloatMVP
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Setup CocoaPods
+        run: |
+          gem install cocoapods -N
+          pod install --repo-update
+
+      - name: Build App + Host
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace BXFloatMVP.xcworkspace \
+            -scheme BXFloatMVP \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
           xcodebuild \
             -project BXFloatMVP.xcodeproj \
             -scheme BXFloatHost \
@@ -74,14 +105,11 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             build
 
-      - name: Install ldid
-        run: brew install ldid
-
-      - name: Package artifacts
+      - name: Package IPAs
         run: |
           set -euo pipefail
           mkdir -p ../dist
-
+          if ! command -v ldid >/dev/null 2>&1; then brew install ldid; fi
           sign_tree () {
             local root="$1"
             while IFS= read -r -d '' f; do
@@ -90,7 +118,6 @@ jobs:
               fi
             done < <(find "$root" -type f -print0)
           }
-
           package_ipa () {
             local app_path="$1"
             local out_ipa="$2"
@@ -102,34 +129,12 @@ jobs:
             zip -qr "$out_ipa" Payload
             cp "$out_ipa" ../dist/
           }
-
           package_ipa \
             "build/Build/Products/Release-iphoneos/BXFloatMVP.app" \
             "BXFloatMVP.ipa"
-
           package_ipa \
             "build/Build/Products/Release-iphoneos/BXFloatHost.app" \
             "BXFloatHost.ipa"
-
-          DYLIB="build/Build/Products/Release-iphoneos/BXFloatInject.dylib"
-          test -f "$DYLIB"
-          ldid -S "$DYLIB" || true
-          cp "$DYLIB" ../dist/BXFloatInject.dylib
-
-          printf '%s\n' \
-            'BXFloatInject (Phase1 single dylib)' \
-            '' \
-            'Install: TrollFools inject THIS ONE FILE only.' \
-            'No Filza. No MobileVLCKit.framework.' \
-            '' \
-            'Usage:' \
-            '1) Inject into Douyin' \
-            '2) Force-quit Douyin, reopen' \
-            '3) Tap floating window -> Settings panel' \
-            '4) LAN + computer IP + enable Replace Camera' \
-            '5) MediaMTX RTSP :18554 /stream' \
-            > ../dist/BXFloatInject-README.txt
-
           ls -lh ../dist
 
       - name: Upload MVP IPA
@@ -143,9 +148,3 @@ jobs:
         with:
           name: BXFloatHost-ipa
           path: dist/BXFloatHost.ipa
-
-      - name: Upload Inject dylib
-        uses: actions/upload-artifact@v4
-        with:
-          name: BXFloatInject-dylib
-          path: dist/BXFloatInject.dylib
