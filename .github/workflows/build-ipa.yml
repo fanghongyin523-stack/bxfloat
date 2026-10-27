@@ -10,13 +10,9 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
-  # Race for any available Mac runner; first successful inject dylib is enough.
+  # Single Mac runner to avoid queueing 3 inject jobs on scarce macos capacity.
   inject:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-13, macos-14, macos-15]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     timeout-minutes: 40
     defaults:
       run:
@@ -79,7 +75,7 @@ jobs:
       - name: Upload Inject dylib
         uses: actions/upload-artifact@v4
         with:
-          name: BXFloatInject-dylib-${{ matrix.os }}
+          name: BXFloatInject-dylib
           path: dist/BXFloatInject.dylib
           if-no-files-found: error
 
