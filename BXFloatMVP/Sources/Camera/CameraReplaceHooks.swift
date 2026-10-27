@@ -29,17 +29,21 @@ func BXFloatRestoreSampleBufferDelegate(
 
 /// 真替换（防冻帧版）：
 /// - 采集回调里只做像素拷贝，禁止 CI / UIKit
-/// - 关替换：先清 active 再 unwrap，保证后续帧立刻透传
+/// - AVCaptureVideoDataOutput.sampleBufferDelegate 是弱引用 → 必须强持有 proxy，否则立刻释放 → 回调=0、画面冻死
+/// - 关替换：先清 active 再 unwrap
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
     private static var trackedOutputs = NSHashTable<AVCaptureVideoDataOutput>.weakObjects()
+    /// key=output（弱），value=proxy（强）——修回调为 0 的根因
+    private static let retainedProxies = NSMapTable<AVCaptureVideoDataOutput, CamSampleBufferProxy>.weakToStrongObjects()
     private static var replaceActive = false
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
     private(set) static var paintCount: Int64 = 0
     private(set) static var paintFailCount: Int64 = 0
+    private(set) static var retainedProxyCount: Int = 0
 
     static func noteCallback() { callbackCount += 1 }
     static func notePaintOK() { paintCount += 1 }
@@ -79,19 +83,20 @@ enum CameraReplaceHooks {
         let outputs = trackedOutputs.allObjects
         for output in outputs {
             if want {
-                // 在采集队列上换 delegate，减少和正在跑的回调打架
                 let q = output.sampleBufferCallbackQueue ?? DispatchQueue.main
                 q.async { ensureWrapped(output) }
             } else {
                 unwrap(output)
             }
         }
+        retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatCam applyReplaceMode cfg=%d cam=%d active=%d tracked=%d paintOK=%lld fail=%lld",
+            "BXFloatCam applyReplaceMode cfg=%d cam=%d active=%d tracked=%d retainProxy=%d paintOK=%lld fail=%lld",
             enabled ? 1 : 0,
             onCamera ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
+            retainedProxyCount,
             paintCount,
             paintFailCount
         )
@@ -112,12 +117,28 @@ enum CameraReplaceHooks {
             }
             var finalDelegate = delegate
             if isReplaceActive(),
+               let vout = obj as? AVCaptureVideoDataOutput,
                let delegate,
                !(delegate is CamSampleBufferProxy)
             {
-                finalDelegate = CamSampleBufferProxy(target: delegate)
+                let proxy = CamSampleBufferProxy(target: delegate)
+                retainedProxies.setObject(proxy, forKey: vout)
+                retainedProxyCount = retainedProxies.count
+                finalDelegate = proxy
                 wrapCount += 1
-                NSLog("BXFloatCam wrap #%lld %@", wrapCount, String(describing: type(of: delegate)))
+                NSLog(
+                    "BXFloatCam wrap #%lld retain=%d %@",
+                    wrapCount,
+                    retainedProxyCount,
+                    String(describing: type(of: delegate))
+                )
+            }
+            // 外部主动设回非 proxy 时，丢掉旧持有
+            if let vout = obj as? AVCaptureVideoDataOutput,
+               !(finalDelegate is CamSampleBufferProxy)
+            {
+                retainedProxies.removeObject(forKey: vout)
+                retainedProxyCount = retainedProxies.count
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
             unsafeBitCast(original, to: Fn.self)(obj, sel, finalDelegate, queue)
@@ -185,21 +206,36 @@ enum CameraReplaceHooks {
     private static func ensureWrapped(_ output: AVCaptureVideoDataOutput) {
         track(output)
         guard isReplaceActive() else { return }
-        guard let delegate = output.sampleBufferDelegate else { return }
-        if delegate is CamSampleBufferProxy { return }
+        if let existing = output.sampleBufferDelegate as? CamSampleBufferProxy {
+            retainedProxies.setObject(existing, forKey: output)
+            retainedProxyCount = retainedProxies.count
+            return
+        }
+        // delegate 已是 nil：可能是上次弱引用把 proxy 放掉了，无法恢复原 target
+        guard let delegate = output.sampleBufferDelegate else {
+            NSLog("BXFloatCam ensureWrapped skip: delegate=nil (need re-enter camera page)")
+            return
+        }
         let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
         let proxy = CamSampleBufferProxy(target: delegate)
+        retainedProxies.setObject(proxy, forKey: output) // 先强持有再 set
+        retainedProxyCount = retainedProxies.count
         output.setSampleBufferDelegate(proxy, queue: queue)
         wrapCount += 1
-        NSLog("BXFloatCam ensureWrapped")
+        NSLog("BXFloatCam ensureWrapped retained=%d", retainedProxyCount)
     }
 
     private static func unwrap(_ output: AVCaptureVideoDataOutput) {
-        if let proxy = output.sampleBufferDelegate as? CamSampleBufferProxy {
+        let proxy =
+            (output.sampleBufferDelegate as? CamSampleBufferProxy)
+            ?? retainedProxies.object(forKey: output)
+        if let proxy {
             let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
             BXFloatRestoreSampleBufferDelegate(output, proxy.originalTarget, queue)
             NSLog("BXFloatCam unwrapped")
         }
+        retainedProxies.removeObject(forKey: output)
+        retainedProxyCount = retainedProxies.count
     }
 }
 
@@ -221,6 +257,7 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         return super.forwardingTarget(for: aSelector)
     }
 
+    @objc(captureOutput:didOutputSampleBuffer:fromConnection:)
     func captureOutput(
         _ output: AVCaptureOutput,
         didOutput sampleBuffer: CMSampleBuffer,
@@ -234,10 +271,10 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 CameraReplaceHooks.notePaintFail()
             }
         }
-        // 无论画没画上，都立刻转发，绝不堵采集队列
         BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
     }
 
+    @objc(captureOutput:didDropSampleBuffer:fromConnection:)
     func captureOutput(
         _ output: AVCaptureOutput,
         didDrop sampleBuffer: CMSampleBuffer,

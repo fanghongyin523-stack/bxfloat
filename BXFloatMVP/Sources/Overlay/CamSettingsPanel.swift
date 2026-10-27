@@ -176,14 +176,14 @@ final class CamSettingsPanel: UIView {
         let replaceOn = MediaConfigStore.shared.config.replaceCameraEnabled
         statusLabel.text = [
             "收帧 \(store.frameCount) · 更新 \(ageText)",
-            "替换：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount) · 回调 \(CameraReplaceHooks.callbackCount)",
+            "替换：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount) · 持有 \(CameraReplaceHooks.retainedProxyCount) · 回调 \(CameraReplaceHooks.callbackCount)",
             "写入成功 \(CameraReplaceHooks.paintCount) · 失败 \(CameraReplaceHooks.paintFailCount)",
             store.frameCount == 0
                 ? "若收帧=0：检查电脑 MediaMTX/OBS 与 IP"
-                : (CameraReplaceHooks.callbackCount == 0
-                    ? "回调=0：请点「试播」或进入拍摄页；已开预览层兜底"
-                    : (CameraReplaceHooks.paintCount == 0 && replaceOn
-                        ? "有回调但未写入：正在重试格式适配"
+                : (replaceOn && CameraReplaceHooks.callbackCount == 0
+                    ? "回调=0：杀抖音重进拍摄页后再开替换"
+                    : (replaceOn && CameraReplaceHooks.paintCount == 0
+                        ? "有回调未写入：等格式对齐中"
                         : "运行中")),
         ].joined(separator: "\n")
     }
