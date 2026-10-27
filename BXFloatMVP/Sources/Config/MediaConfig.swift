@@ -88,8 +88,8 @@ extension MediaConfig {
             guard !ip.isEmpty else { return "" }
             return "rtsp://\(ip):\(rtspPort)/\(streamPath)"
         case .usb:
-            // 第1期 USB 仍 HLS；第2期再上 RTSP 隧道
-            return "http://127.0.0.1:\(hlsPort)/\(streamPath)/index.m3u8"
+            // 数据线：走本机 RTSP（USB 助手把 18554 桥到电脑 MediaMTX）
+            return "rtsp://127.0.0.1:\(rtspPort)/\(streamPath)"
         case .localVideo, .manual:
             return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)
         }

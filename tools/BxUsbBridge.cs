@@ -5,15 +5,33 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 
+/// Phone USB overlay listens:
+/// - RTSP play :18554  tunnel :19889  → PC MediaMTX RTSP :18554
+/// - HLS  play :18888  tunnel :19888  → PC MediaMTX HLS  :18888
 public static class BxUsbBridge {
     const string UsbmuxHost = "127.0.0.1";
     const int UsbmuxPort = 27015;
-    const int TunnelPort = 19888;
-    const int MediaPort = 18888;
-    const int Workers = 12;
+    const int WorkersPerChannel = 8;
+
+    static readonly Channel[] Channels = new Channel[] {
+        new Channel("rtsp", PhoneTunnelPort: 19889, PcMediaPort: 18554),
+        new Channel("hls",  PhoneTunnelPort: 19888, PcMediaPort: 18888),
+    };
+
+    struct Channel {
+        public string Name;
+        public int PhoneTunnelPort;
+        public int PcMediaPort;
+        public Channel(string name, int PhoneTunnelPort, int PcMediaPort) {
+            this.Name = name;
+            this.PhoneTunnelPort = PhoneTunnelPort;
+            this.PcMediaPort = PcMediaPort;
+        }
+    }
 
     public static void Run() {
         Console.WriteLine("Waiting for iPhone via usbmux...");
+        Console.WriteLine("Channels: RTSP 18554 via phone:19889 | HLS 18888 via phone:19888");
         while (true) {
             try {
                 int? deviceId = ListDeviceId();
@@ -22,14 +40,18 @@ public static class BxUsbBridge {
                     Thread.Sleep(2000);
                     continue;
                 }
-                Console.WriteLine("DeviceID=" + deviceId + ", starting " + Workers + " bridges");
-                Thread[] threads = new Thread[Workers];
-                for (int i = 0; i < Workers; i++) {
-                    int wid = i + 1;
-                    int did = deviceId.Value;
-                    threads[i] = new Thread(() => WorkerLoop(did, wid));
-                    threads[i].IsBackground = true;
-                    threads[i].Start();
+                Console.WriteLine("DeviceID=" + deviceId + ", starting bridges");
+                var threads = new System.Collections.Generic.List<Thread>();
+                foreach (var ch in Channels) {
+                    for (int i = 0; i < WorkersPerChannel; i++) {
+                        int wid = i + 1;
+                        int did = deviceId.Value;
+                        Channel channel = ch;
+                        var t = new Thread(() => WorkerLoop(did, wid, channel));
+                        t.IsBackground = true;
+                        t.Start();
+                        threads.Add(t);
+                    }
                 }
                 foreach (var t in threads) t.Join();
             } catch (Exception ex) {
@@ -39,25 +61,25 @@ public static class BxUsbBridge {
         }
     }
 
-    static void WorkerLoop(int deviceId, int wid) {
+    static void WorkerLoop(int deviceId, int wid, Channel ch) {
         while (true) {
             try {
-                OneBridge(deviceId, wid);
+                OneBridge(deviceId, wid, ch);
             } catch {
             }
             Thread.Sleep(120);
         }
     }
 
-    static void OneBridge(int deviceId, int wid) {
+    static void OneBridge(int deviceId, int wid, Channel ch) {
         TcpClient phone = null;
         TcpClient media = null;
         try {
-            phone = ConnectTunnel(deviceId, TunnelPort);
+            phone = ConnectTunnel(deviceId, ch.PhoneTunnelPort);
             media = new TcpClient();
             media.NoDelay = true;
-            media.Connect("127.0.0.1", MediaPort);
-            Console.WriteLine("[W" + wid + "] bridge OK");
+            media.Connect("127.0.0.1", ch.PcMediaPort);
+            Console.WriteLine("[" + ch.Name + " W" + wid + "] bridge OK → :" + ch.PcMediaPort);
             NetworkStream a = phone.GetStream();
             NetworkStream b = media.GetStream();
             Thread t1 = new Thread(() => CopyStream(a, b));
@@ -132,7 +154,7 @@ public static class BxUsbBridge {
         string text = ReadPlist(stream);
         if (!Regex.IsMatch(text, "<key>Number</key>\\s*<integer>0</integer>")) {
             client.Close();
-            throw new Exception("Phone port connect failed. Open USB overlay on phone first.");
+            throw new Exception("Phone port " + port + " connect failed. Open USB mode + overlay on phone first.");
         }
         return client;
     }

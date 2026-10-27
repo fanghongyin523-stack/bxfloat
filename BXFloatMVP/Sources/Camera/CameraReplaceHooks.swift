@@ -265,10 +265,13 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
     ) {
         CameraReplaceHooks.noteCallback()
         if CameraReplaceHooks.isReplaceActive() {
-            if CamBufferPainter.paintInPlace(sampleBuffer) {
-                CameraReplaceHooks.notePaintOK()
-            } else {
-                CameraReplaceHooks.notePaintFail()
+            // 没素材时不算「写入失败」，避免收帧=0 时失败数狂涨误导排查
+            if CamFrameStore.shared.hasFreshFrame {
+                if CamBufferPainter.paintInPlace(sampleBuffer) {
+                    CameraReplaceHooks.notePaintOK()
+                } else {
+                    CameraReplaceHooks.notePaintFail()
+                }
             }
         }
         BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)

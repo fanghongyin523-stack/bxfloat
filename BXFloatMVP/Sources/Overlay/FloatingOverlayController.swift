@@ -192,17 +192,12 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     /// 只有开「替换摄像头」才拉流；平常悬浮球不跑画面。
+    /// 局域网 / 数据线 都走 RTSP → CamFrameStore。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
-        if config.replaceCameraEnabled, !url.isEmpty {
-            if config.connectionMode == .lan, url.hasPrefix("rtsp://") {
-                if pullURL != url {
-                    FFRTSPController.start(urlString: url)
-                    pullURL = url
-                } else {
-                    FFRTSPController.start(urlString: url)
-                }
-            }
+        if config.replaceCameraEnabled, !url.isEmpty, url.hasPrefix("rtsp://") {
+            FFRTSPController.start(urlString: url)
+            pullURL = url
         } else {
             stopPuller()
         }

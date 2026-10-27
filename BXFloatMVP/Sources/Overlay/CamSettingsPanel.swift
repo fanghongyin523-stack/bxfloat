@@ -158,7 +158,7 @@ final class CamSettingsPanel: UIView {
     private func updateModeHint() {
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：手机播本机端口，电脑跑 USB 助手桥到 MediaMTX。"
+            modeHint.text = "数据线：插线信任，电脑开 MediaMTX+OBS+USB助手；手机开替换即可（RTSP 隧道）。"
         case 2:
             modeHint.text = "本地视频：第2期完善；第1期请先用局域网。"
         default:
@@ -179,11 +179,13 @@ final class CamSettingsPanel: UIView {
             "替换：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount) · 持有 \(CameraReplaceHooks.retainedProxyCount) · 回调 \(CameraReplaceHooks.callbackCount)",
             "写入成功 \(CameraReplaceHooks.paintCount) · 失败 \(CameraReplaceHooks.paintFailCount)",
             store.frameCount == 0
-                ? "若收帧=0：检查电脑 MediaMTX/OBS 与 IP"
+                ? (replaceOn
+                    ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"
+                    : "若收帧=0：检查电脑 MediaMTX/OBS 与 IP")
                 : (replaceOn && CameraReplaceHooks.callbackCount == 0
                     ? "回调=0：杀抖音重进拍摄页后再开替换"
                     : (replaceOn && CameraReplaceHooks.paintCount == 0
-                        ? "有回调未写入：等格式对齐中"
+                        ? "有收帧但未写入：格式对齐中"
                         : "运行中")),
         ].joined(separator: "\n")
     }
