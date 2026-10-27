@@ -28,12 +28,16 @@ func BXFloatRestoreSampleBufferDelegate(
     _ queue: DispatchQueue?
 )
 
+private var bxSavedVideoSettingsKey: UInt8 = 0
+
 /// 摄像头替换钩子。
-/// 关键修复：原始 delegate 必须强引用；转发走 ObjC msgSend；替换关闭时尽量不包装，避免黑屏。
+/// 关替换：还原 delegate + videoSettings，原样透传，避免黑屏。
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
     private static var trackedOutputs = NSHashTable<AVCaptureVideoDataOutput>.weakObjects()
+    /// 配置开关且当前在摄像页时才真正包装
+    private static var replaceActive = false
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -52,21 +56,31 @@ enum CameraReplaceHooks {
         swizzleVideoDataOutput()
         swizzleSessionAddOutput()
         swizzleSessionStartRunning()
+        swizzleSessionStopRunning()
         NSLog("BXFloatCam hooks installed")
     }
 
-    /// 替换开关变化时调用：开=包装；关=还原，避免关替换仍黑屏
+    /// enabled=配置开替换；内部再结合摄像页决定是否包装。
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
+        let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
+        let want = enabled && onCamera
+        replaceActive = want
         let outputs = trackedOutputs.allObjects
         for output in outputs {
-            if enabled {
+            if want {
                 ensureWrapped(output)
             } else {
                 unwrap(output)
             }
         }
-        NSLog("BXFloatCam applyReplaceMode=%d tracked=%d", enabled ? 1 : 0, outputs.count)
+        NSLog(
+            "BXFloatCam applyReplaceMode cfg=%d cam=%d active=%d tracked=%d",
+            enabled ? 1 : 0,
+            onCamera ? 1 : 0,
+            want ? 1 : 0,
+            outputs.count
+        )
     }
 
     private static func track(_ output: AVCaptureVideoDataOutput) {
@@ -83,8 +97,8 @@ enum CameraReplaceHooks {
                 track(vout)
             }
             var finalDelegate = delegate
-            // 仅在「开启替换」时包装；关闭时保持原样，避免黑屏
-            if MediaConfigStore.shared.config.replaceCameraEnabled,
+            // 仅摄像页 + 开替换时包装；否则原样，保证真镜头通路
+            if replaceActive,
                let delegate,
                !(delegate is CamSampleBufferProxy)
             {
@@ -104,11 +118,14 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject, AnyObject) -> Void = { session, output in
+            if let s = session as? AVCaptureSession {
+                ShootSurfaceDetector.trackSession(s)
+            }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel, output)
             if let vout = output as? AVCaptureVideoDataOutput {
                 track(vout)
-                if MediaConfigStore.shared.config.replaceCameraEnabled {
+                if replaceActive {
                     DispatchQueue.main.async { ensureWrapped(vout) }
                 }
             }
@@ -122,10 +139,33 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
+            if let s = session as? AVCaptureSession {
+                ShootSurfaceDetector.trackSession(s)
+            }
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            if MediaConfigStore.shared.config.replaceCameraEnabled {
-                DispatchQueue.main.async { applyReplaceMode(true) }
+            DispatchQueue.main.async {
+                // 进摄像页：若配置开了替换再包装
+                applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
+            }
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private static func swizzleSessionStopRunning() {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString("stopRunning")
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject) -> Void = { session in
+            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+            unsafeBitCast(original, to: Fn.self)(session, sel)
+            DispatchQueue.main.async {
+                // 会话停后按当前页面重算；离开摄像页会拆包装并停盖层
+                applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
+                if !ShootSurfaceDetector.isCameraSurfaceVisible() {
+                    PreviewCover.stop()
+                }
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
@@ -133,7 +173,6 @@ enum CameraReplaceHooks {
 
     private static func ensureWrapped(_ output: AVCaptureVideoDataOutput) {
         track(output)
-        // 尽量改成 BGRA，CI 绘制才能进 sampleBuffer（NV12 直接 render 经常失败→替换无效）
         preferBGRA(output)
         guard let delegate = output.sampleBufferDelegate else { return }
         if delegate is CamSampleBufferProxy { return }
@@ -145,18 +184,42 @@ enum CameraReplaceHooks {
     }
 
     private static func unwrap(_ output: AVCaptureVideoDataOutput) {
-        guard let proxy = output.sampleBufferDelegate as? CamSampleBufferProxy else { return }
-        let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
-        // 必须走 ObjC：Swift 协议转换可能把原 delegate 变成 nil → 真摄像黑屏
-        BXFloatRestoreSampleBufferDelegate(output, proxy.originalTarget, queue)
-        NSLog("BXFloatCam unwrapped")
+        restoreVideoSettings(output)
+        if let proxy = output.sampleBufferDelegate as? CamSampleBufferProxy {
+            let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
+            BXFloatRestoreSampleBufferDelegate(output, proxy.originalTarget, queue)
+            NSLog("BXFloatCam unwrapped")
+        }
     }
 
     private static func preferBGRA(_ output: AVCaptureVideoDataOutput) {
         let key = kCVPixelBufferPixelFormatTypeKey as String
         let want = Int(kCVPixelFormatType_32BGRA)
+        if objc_getAssociatedObject(output, &bxSavedVideoSettingsKey) == nil {
+            // 保存原始 settings；nil 用 NSNull 占位，unwrap 时还原成 nil
+            let saved: Any = (output.videoSettings as NSDictionary?) ?? NSNull()
+            objc_setAssociatedObject(
+                output,
+                &bxSavedVideoSettingsKey,
+                saved,
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        }
         if let cur = output.videoSettings?[key] as? Int, cur == want { return }
         output.videoSettings = [key: want]
+    }
+
+    private static func restoreVideoSettings(_ output: AVCaptureVideoDataOutput) {
+        guard let saved = objc_getAssociatedObject(output, &bxSavedVideoSettingsKey) else { return }
+        if saved is NSNull {
+            output.videoSettings = nil
+        } else if let dict = saved as? [String: Any] {
+            output.videoSettings = dict
+        } else if let dict = saved as? NSDictionary {
+            output.videoSettings = dict as? [String: Any]
+        }
+        objc_setAssociatedObject(output, &bxSavedVideoSettingsKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        NSLog("BXFloatCam restored videoSettings")
     }
 }
 
@@ -185,14 +248,20 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         CameraReplaceHooks.noteCallback()
+        // 关替换：100% 原帧透传
+        guard MediaConfigStore.shared.config.replaceCameraEnabled,
+              ShootSurfaceDetector.isCameraSurfaceVisible()
+        else {
+            BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
+            return
+        }
         var forward = sampleBuffer
-        if MediaConfigStore.shared.config.replaceCameraEnabled {
-            if let replaced = CamBufferPainter.makeReplacing(sampleBuffer) {
-                forward = replaced
-                CameraReplaceHooks.notePaintOK()
-            } else {
-                CameraReplaceHooks.notePaintFail()
-            }
+        if let replaced = CamBufferPainter.makeReplacing(sampleBuffer) {
+            forward = replaced
+            CameraReplaceHooks.notePaintOK()
+        } else {
+            CameraReplaceHooks.notePaintFail()
+            // 画失败时仍送原帧，避免整页黑
         }
         BXFloatForwardDidOutput(originalTarget, output, forward, connection)
     }
@@ -207,16 +276,19 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
 }
 
 enum CamBufferPainter {
-    private static let ci = CIContext(options: [.useSoftwareRenderer: false])
+    private static let ci = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .cacheIntermediates: false,
+    ])
 
     static func makeReplacing(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
-        guard let src = CamFrameStore.shared.copyLatest() else { return nil }
+        guard CamFrameStore.shared.hasFreshFrame,
+              let src = CamFrameStore.shared.copyLatest() else { return nil }
         guard let dstProto = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
         let dw = CVPixelBufferGetWidth(dstProto)
         let dh = CVPixelBufferGetHeight(dstProto)
         guard dw > 0, dh > 0 else { return nil }
 
-        // 统一画到 BGRA（与 preferBGRA 配合）；NV12 目标上 CI render 经常空结果
         var newPB: CVPixelBuffer?
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,

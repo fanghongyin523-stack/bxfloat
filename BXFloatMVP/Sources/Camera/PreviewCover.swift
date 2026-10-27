@@ -1,141 +1,81 @@
 import AVFoundation
-import CoreImage
 import QuartzCore
 import UIKit
 
-/// 当抖音还没走到 sampleBuffer 回调（回调=0）时，用电脑画面盖住预览层，先保证「看得见替换」。
-/// 真正进直播推流仍依赖 CameraReplaceHooks；本类是预览兜底。
+/// 仅在「摄像页」且开启替换时，盖住 AVCaptureVideoPreviewLayer。
+/// 绝不在主 feed 用大面积黑底兜底（那会盖掉同城/关注里的视频）。
 enum PreviewCover {
     private static var coverView: UIImageView?
-    private static var link: CADisplayLink?
-    private static var hostWindow: UIWindow?
-    private static let ci = CIContext(options: [.useSoftwareRenderer: false, .cacheIntermediates: false])
-    private static var lastFrameID: Int64 = -1
+    private static var hostView: UIView?
+    private static var consumer: CoverConsumer?
 
     static func start(in window: UIWindow?) {
-        hostWindow = window
-        guard MediaConfigStore.shared.config.replaceCameraEnabled else {
+        guard MediaConfigStore.shared.config.replaceCameraEnabled,
+              ShootSurfaceDetector.isCameraSurfaceVisible()
+        else {
             stop()
             return
         }
-        if link == nil {
-            let l = CADisplayLink(target: TickTarget.shared, selector: #selector(TickTarget.tick))
-            l.add(to: .main, forMode: .common)
-            link = l
-        }
-        TickTarget.shared.onTick = { tick() }
-    }
-
-    static func stop() {
-        link?.invalidate()
-        link = nil
-        TickTarget.shared.onTick = nil
-        coverView?.removeFromSuperview()
-        coverView = nil
-        lastFrameID = -1
-    }
-
-    private static func tick() {
-        guard MediaConfigStore.shared.config.replaceCameraEnabled else {
+        // 只挂预览层宿主；找不到就不盖（避免 feed 误盖）
+        guard let target = ShootSurfaceDetector.findPreviewLayerHost(in: window) else {
             stop()
             return
         }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let window = hostWindow
-            ?? scenes.flatMap(\.windows).first(where: { $0.isKeyWindow && !$0.isHidden })
-            ?? scenes.flatMap(\.windows).first(where: { !$0.isHidden })
-        guard let window else { return }
-
-        // 已有 sample 回调时，不必盖预览（避免双画面）
+        // 已有 sample 绘制成功时不必盖
         if CameraReplaceHooks.callbackCount > 30, CameraReplaceHooks.paintCount > 0 {
             coverView?.isHidden = true
             return
         }
 
-        let store = CamFrameStore.shared
-        let fid = store.frameCount
-        guard fid != lastFrameID, let pb = store.copyLatest() else { return }
-        lastFrameID = fid
-
-        let target = findPreviewHost(in: window) ?? fallbackLargeView(in: window)
-        guard let target else { return }
-
-        let cover: UIImageView
-        if let existing = coverView, existing.superview === target {
-            cover = existing
-        } else {
+        if coverView == nil || hostView !== target {
             coverView?.removeFromSuperview()
             let v = UIImageView(frame: target.bounds)
             v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             v.contentMode = .scaleAspectFill
             v.clipsToBounds = true
             v.isUserInteractionEnabled = false
-            v.tag = 0x42584643 // 'BXFC'
+            v.tag = 0x42584643
             target.addSubview(v)
             coverView = v
-            cover = v
+            hostView = target
         }
-        cover.isHidden = false
-        let img = CIImage(cvPixelBuffer: pb)
-        if let cg = ci.createCGImage(img, from: img.extent) {
-            cover.image = UIImage(cgImage: cg)
+        coverView?.isHidden = false
+        target.bringSubviewToFront(coverView!)
+
+        if consumer == nil {
+            let c = CoverConsumer()
+            consumer = c
+            CamPreviewPresenter.shared.addConsumer(c)
         }
-        target.bringSubviewToFront(cover)
     }
 
-    private static func findPreviewHost(in root: UIView) -> UIView? {
-        var found: UIView?
-        func walk(_ v: UIView) {
-            if let layer = v.layer as? AVCaptureVideoPreviewLayer {
-                found = v
-                return
-            }
-            for name in ["preview", "Preview", "camera", "Camera", "capture", "Capture"] {
-                if String(describing: type(of: v)).contains(name) {
-                    if v.bounds.width * v.bounds.height > 200 * 200 {
-                        found = v
-                    }
-                }
-            }
-            for s in v.subviews { walk(s) }
+    static func stop() {
+        if let c = consumer {
+            CamPreviewPresenter.shared.removeConsumer(c)
+            consumer = nil
         }
-        walk(root)
-        return found
+        coverView?.removeFromSuperview()
+        coverView = nil
+        hostView = nil
     }
 
-    private static func fallbackLargeView(in window: UIWindow) -> UIView? {
-        // 找接近全屏的深色视图（直播准备页黑底预览）
-        var best: UIView?
-        var bestArea: CGFloat = 0
-        let screenArea = window.bounds.width * window.bounds.height
-        func walk(_ v: UIView) {
-            let area = v.bounds.width * v.bounds.height
-            if area > screenArea * 0.35, area > bestArea {
-                let bg = v.backgroundColor
-                let dark: Bool = {
-                    guard let bg, let c = bg.cgColor.components, c.count >= 3 else {
-                        return v.subviews.isEmpty
-                    }
-                    return (c[0] + c[1] + c[2]) / 3.0 < 0.25
-                }()
-                if dark || v.layer is AVCaptureVideoPreviewLayer {
-                    best = v
-                    bestArea = area
-                }
-            }
-            for s in v.subviews where s.tag != 0x42584643 { walk(s) }
-        }
-        if let root = window.rootViewController?.view {
-            walk(root)
+    static func refreshIfNeeded(in window: UIWindow?) {
+        if MediaConfigStore.shared.config.replaceCameraEnabled,
+           ShootSurfaceDetector.isCameraSurfaceVisible()
+        {
+            start(in: window)
         } else {
-            walk(window)
+            stop()
         }
-        return best
+    }
+
+    fileprivate static func applyImage(_ image: CGImage) {
+        coverView?.image = UIImage(cgImage: image)
     }
 }
 
-private final class TickTarget: NSObject {
-    static let shared = TickTarget()
-    var onTick: (() -> Void)?
-    @objc func tick() { onTick?() }
+private final class CoverConsumer: NSObject, CamPreviewConsuming {
+    func camPreviewDidUpdate(_ image: CGImage) {
+        PreviewCover.applyImage(image)
+    }
 }

@@ -1,14 +1,9 @@
-import CoreImage
-import CoreVideo
 import QuartzCore
 import UIKit
 
-/// 注入用 RTSP 播放器：拉流进 CamFrameStore，CIContext 刷 layer（避免 UIImage(ciImage:) 卡顿）。
-final class RTSPVTPlayer: NSObject, StreamPlayer {
+/// 注入用 RTSP 播放器：拉流进 CamFrameStore，小窗吃共享降分辨率预览。
+final class RTSPVTPlayer: NSObject, StreamPlayer, CamPreviewConsuming {
     private let preview = RTSPPreviewView()
-    private var displayLink: CADisplayLink?
-    private let ci = CIContext(options: [.useSoftwareRenderer: false, .cacheIntermediates: false])
-    private var lastFrameID: Int64 = -1
     private(set) var isPlaying = false
     var isMuted: Bool = true
 
@@ -25,14 +20,7 @@ final class RTSPVTPlayer: NSObject, StreamPlayer {
 
     func play() {
         isPlaying = true
-        if displayLink == nil {
-            let link = CADisplayLink(target: self, selector: #selector(tick))
-            if #available(iOS 10.0, *) {
-                link.preferredFramesPerSecond = 30
-            }
-            link.add(to: .main, forMode: .common)
-            displayLink = link
-        }
+        CamPreviewPresenter.shared.addConsumer(self)
     }
 
     func pause() {
@@ -41,25 +29,14 @@ final class RTSPVTPlayer: NSObject, StreamPlayer {
 
     func stop() {
         isPlaying = false
-        displayLink?.invalidate()
-        displayLink = nil
+        CamPreviewPresenter.shared.removeConsumer(self)
         RTSPVTPuller.shared.stop()
         preview.setCGImage(nil)
-        lastFrameID = -1
     }
 
-    @objc private func tick() {
+    func camPreviewDidUpdate(_ image: CGImage) {
         guard isPlaying else { return }
-        let store = CamFrameStore.shared
-        let fid = store.frameCount
-        guard fid != lastFrameID, let pb = store.copyLatest() else { return }
-        lastFrameID = fid
-        let ciImage = CIImage(cvPixelBuffer: pb)
-        let rect = ciImage.extent
-        guard rect.width > 1, rect.height > 1,
-              let cg = ci.createCGImage(ciImage, from: rect)
-        else { return }
-        preview.setCGImage(cg)
+        preview.setCGImage(image)
     }
 }
 

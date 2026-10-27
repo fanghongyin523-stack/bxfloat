@@ -9,7 +9,7 @@ private final class BXFloatPassthroughWindow: UIWindow {
     }
 }
 
-/// 小悬浮窗挂在独立 UIWindow 上，避免抖音切页把子视图拆掉。
+/// 小悬浮窗挂在独立 UIWindow 上；替换预览仅在摄像页启用。
 final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsPanelDelegate {
     static let shared = FloatingOverlayController()
 
@@ -52,7 +52,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
     func attach(to window: UIWindow) {
         ensureFloatWindow(preferring: window.windowScene)
         CameraReplaceHooks.installIfNeeded()
-        CameraReplaceHooks.applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
+        syncReplaceForCurrentSurface()
         apply(MediaConfigStore.shared.config)
         startReattachTimer()
     }
@@ -80,7 +80,6 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
     @objc private func sceneActive() { reattachIfNeeded(reason: "scene") }
     @objc private func windowVisible(_ note: Notification) {
         guard let w = note.object as? UIWindow, w !== floatWindow else { return }
-        // 抖音切到摄像页常会新建全屏 window，立刻把浮窗顶回去
         DispatchQueue.main.async { [weak self] in
             self?.reattachIfNeeded(reason: "win")
         }
@@ -93,6 +92,24 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         }
         if let t = reattachTimer {
             RunLoop.main.add(t, forMode: .common)
+        }
+    }
+
+    /// 主 feed：不盖预览、不包装相机；仅摄像页开替换相关逻辑。
+    private func syncReplaceForCurrentSurface() {
+        let cfgOn = MediaConfigStore.shared.config.replaceCameraEnabled
+        let onCam = ShootSurfaceDetector.isCameraSurfaceVisible()
+        CameraReplaceHooks.applyReplaceMode(cfgOn && onCam)
+
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        let host = scene?.windows.first { $0 !== floatWindow && !$0.isHidden }
+
+        if cfgOn, onCam {
+            PreviewCover.refreshIfNeeded(in: host)
+        } else {
+            PreviewCover.stop()
         }
     }
 
@@ -112,7 +129,6 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
             NSLog("BXFloatCam reattach overlay reason=%@", reason)
             fw.addSubview(overlay)
         }
-        // 切页时抖音可能把我们的 window 藏掉 —— 只恢复显示，不要反复抢 key
         fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
         fw.isHidden = false
         fw.alpha = 1
@@ -123,11 +139,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
                 scene?.windows.first { $0 !== fw && !$0.isHidden }?.makeKey()
             }
         }
-        if MediaConfigStore.shared.config.replaceCameraEnabled {
-            let host = scene?.windows.first { $0 !== fw && !$0.isHidden }
-            PreviewCover.start(in: host)
-            CameraReplaceHooks.applyReplaceMode(true)
-        }
+        syncReplaceForCurrentSurface()
     }
 
     private func ensureFloatWindow(preferring scene: UIWindowScene?) {
@@ -158,12 +170,13 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
     }
 
     private func apply(_ config: MediaConfig) {
-        CameraReplaceHooks.applyReplaceMode(config.replaceCameraEnabled)
+        syncReplaceForCurrentSurface()
 
         if !config.overlayEnabled {
             USBStreamBridge.shared.stop()
             RTSPVTPuller.shared.stop()
             PreviewCover.stop()
+            CameraReplaceHooks.applyReplaceMode(false)
             player?.stop()
             player = nil
             loadedURL = nil
@@ -202,16 +215,6 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         overlay.setConnectionHint(config)
         if panelVisible, let panel = settingsPanel {
             host.bringSubviewToFront(panel)
-        }
-
-        if config.replaceCameraEnabled {
-            let appWindow = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .flatMap(\.windows)
-                .first { $0 !== host && !$0.isHidden }
-            PreviewCover.start(in: appWindow)
-        } else {
-            PreviewCover.stop()
         }
 
         let url = config.resolvedPlaybackURL()
