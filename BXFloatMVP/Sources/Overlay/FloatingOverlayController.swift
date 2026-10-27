@@ -51,6 +51,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     func attach(to window: UIWindow) {
         ensureFloatWindow(preferring: window.windowScene)
         CameraReplaceHooks.installIfNeeded()
+        MicReplaceHooks.installIfNeeded()
         syncReplaceForCurrentSurface()
         apply(MediaConfigStore.shared.config)
         startReattachTimer()
@@ -94,10 +95,11 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     private func syncReplaceForCurrentSurface() {
-        let cfgOn = MediaConfigStore.shared.config.replaceCameraEnabled
+        let cfg = MediaConfigStore.shared.config
         // 真替换：只走 sample 画帧；盖层窗会挡住开播按钮/标题，永久关掉
         PreviewCover.stop()
-        CameraReplaceHooks.applyReplaceMode(cfgOn)
+        CameraReplaceHooks.applyReplaceMode(cfg.replaceCameraEnabled)
+        MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
     }
 
     private func reattachIfNeeded(reason: String) {
@@ -191,11 +193,13 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         syncPuller(config)
     }
 
-    /// 只有开「替换摄像头」才拉流；平常悬浮球不跑画面。
-    /// 局域网 / 数据线 都走 RTSP → CamFrameStore。
+    /// 开「替换摄像头」或「推流声音」时拉 RTSP（画面+音频同流）。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
-        if config.replaceCameraEnabled, !url.isEmpty, url.hasPrefix("rtsp://") {
+        let needPull = (config.replaceCameraEnabled || config.audioCaptureMode == .stream)
+            && !url.isEmpty
+            && url.hasPrefix("rtsp://")
+        if needPull {
             FFRTSPController.start(urlString: url)
             pullURL = url
         } else {

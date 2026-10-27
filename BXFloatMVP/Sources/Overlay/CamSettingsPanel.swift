@@ -16,6 +16,8 @@ final class CamSettingsPanel: UIView {
     private let pasteButton = UIButton(type: .system)
     private let replaceSwitch = UISwitch()
     private let replaceLabel = UILabel()
+    private let audioLabel = UILabel()
+    private let audioControl = UISegmentedControl(items: ["推流声音", "手机麦克风", "静音"])
     private let collapseButton = UIButton(type: .system)
     private let statusLabel = UILabel()
 
@@ -37,6 +39,11 @@ final class CamSettingsPanel: UIView {
         }
         ipField.text = cfg.computerIP
         replaceSwitch.isOn = cfg.replaceCameraEnabled
+        switch cfg.audioCaptureMode {
+        case .stream: audioControl.selectedSegmentIndex = 0
+        case .microphone: audioControl.selectedSegmentIndex = 1
+        case .mute: audioControl.selectedSegmentIndex = 2
+        }
         updateModeHint()
         refreshStatus()
     }
@@ -93,6 +100,15 @@ final class CamSettingsPanel: UIView {
         replaceSwitch.addTarget(self, action: #selector(replaceChanged), for: .valueChanged)
         replaceSwitch.onTintColor = UIColor(red: 0.2, green: 0.75, blue: 0.35, alpha: 1)
 
+        audioLabel.text = "直播麦声音"
+        audioLabel.textColor = .white
+        audioLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        audioControl.selectedSegmentIndex = 0
+        audioControl.addTarget(self, action: #selector(audioChanged), for: .valueChanged)
+        if #available(iOS 13.0, *) {
+            audioControl.selectedSegmentTintColor = UIColor(red: 0.2, green: 0.75, blue: 0.35, alpha: 1)
+        }
+
         collapseButton.setTitle("收起设置 · 回到悬浮球", for: .normal)
         collapseButton.setTitleColor(UIColor(red: 0.2, green: 0.75, blue: 0.35, alpha: 1), for: .normal)
         collapseButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
@@ -100,9 +116,9 @@ final class CamSettingsPanel: UIView {
 
         statusLabel.textColor = UIColor.white.withAlphaComponent(0.55)
         statusLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        statusLabel.numberOfLines = 3
+        statusLabel.numberOfLines = 4
 
-        [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, collapseButton, statusLabel].forEach {
+        [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, audioLabel, audioControl, collapseButton, statusLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             card.addSubview($0)
         }
@@ -141,7 +157,14 @@ final class CamSettingsPanel: UIView {
             replaceSwitch.centerYAnchor.constraint(equalTo: replaceLabel.centerYAnchor),
             replaceSwitch.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
 
-            collapseButton.topAnchor.constraint(equalTo: replaceLabel.bottomAnchor, constant: 18),
+            audioLabel.topAnchor.constraint(equalTo: replaceLabel.bottomAnchor, constant: 14),
+            audioLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+
+            audioControl.topAnchor.constraint(equalTo: audioLabel.bottomAnchor, constant: 8),
+            audioControl.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            audioControl.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+
+            collapseButton.topAnchor.constraint(equalTo: audioControl.bottomAnchor, constant: 16),
             collapseButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
 
             statusLabel.topAnchor.constraint(equalTo: collapseButton.bottomAnchor, constant: 12),
@@ -173,19 +196,27 @@ final class CamSettingsPanel: UIView {
         titleLabel.text = store.width > 0
             ? "素材分辨率：\(store.width) × \(store.height)"
             : "素材分辨率：—"
-        let replaceOn = MediaConfigStore.shared.config.replaceCameraEnabled
+        let cfg = MediaConfigStore.shared.config
+        let replaceOn = cfg.replaceCameraEnabled
+        let audioName: String
+        switch cfg.audioCaptureMode {
+        case .stream: audioName = "推流"
+        case .microphone: audioName = "原麦"
+        case .mute: audioName = "静音"
+        }
+        let audioPkts = CamAudioStore.shared.packetCount
         statusLabel.text = [
-            "收帧 \(store.frameCount) · 更新 \(ageText)",
-            "替换：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount) · 持有 \(CameraReplaceHooks.retainedProxyCount) · 回调 \(CameraReplaceHooks.callbackCount)",
-            "写入成功 \(CameraReplaceHooks.paintCount) · 失败 \(CameraReplaceHooks.paintFailCount)",
+            "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
+            "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
+            "麦：\(audioName) · 挂钩 \(MicReplaceHooks.wrapCount)/回调 \(MicReplaceHooks.callbackCount)/写 \(MicReplaceHooks.paintCount)",
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"
                     : "若收帧=0：检查电脑 MediaMTX/OBS 与 IP")
-                : (replaceOn && CameraReplaceHooks.callbackCount == 0
-                    ? "回调=0：杀抖音重进拍摄页后再开替换"
-                    : (replaceOn && CameraReplaceHooks.paintCount == 0
-                        ? "有收帧但未写入：格式对齐中"
+                : (cfg.audioCaptureMode == .stream && audioPkts == 0
+                    ? "有画面无音频包：OBS 推流需勾选音频轨"
+                    : (replaceOn && CameraReplaceHooks.callbackCount == 0
+                        ? "回调=0：杀抖音重进拍摄页后再开替换"
                         : "运行中")),
         ].joined(separator: "\n")
     }
@@ -197,10 +228,18 @@ final class CamSettingsPanel: UIView {
         case 2: mode = .localVideo
         default: mode = .lan
         }
+        let audioMode: AudioCaptureMode
+        switch audioControl.selectedSegmentIndex {
+        case 1: audioMode = .microphone
+        case 2: audioMode = .mute
+        default: audioMode = .stream
+        }
         MediaConfigStore.shared.update { cfg in
             cfg.connectionMode = mode
             cfg.computerIP = (ipField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             cfg.replaceCameraEnabled = replaceSwitch.isOn
+            cfg.audioCaptureMode = audioMode
+            cfg.muted = (audioMode == .mute)
             cfg.overlayEnabled = true
         }
         if mode == .lan, let ip = ipField.text, !ip.isEmpty {
@@ -227,6 +266,8 @@ final class CamSettingsPanel: UIView {
     }
 
     @objc private func replaceChanged() { commit() }
+
+    @objc private func audioChanged() { commit() }
 
     @objc private func collapseTapped() {
         commit()

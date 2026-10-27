@@ -11,6 +11,13 @@ enum ConnectionMode: String, Codable {
     case manual
 }
 
+/// 直播麦采集：推流声 / 手机原麦 / 静音
+enum AudioCaptureMode: String, Codable {
+    case stream
+    case microphone
+    case mute
+}
+
 struct MediaConfig: Equatable {
     var streamURL: String
     var computerIP: String
@@ -28,6 +35,8 @@ struct MediaConfig: Equatable {
     var muted: Bool
     /// 最终目标：替换摄像头画面
     var replaceCameraEnabled: Bool
+    /// 麦克风采集：推流声音 / 原麦 / 静音
+    var audioCaptureMode: AudioCaptureMode
     /// 第2期：融合真实摄像头（占位持久化）
     var blendRealCamera: Bool
     var blendOBSPercent: Int
@@ -48,6 +57,7 @@ struct MediaConfig: Equatable {
         overlayEnabled: false,
         muted: false,
         replaceCameraEnabled: false,
+        audioCaptureMode: .stream,
         blendRealCamera: false,
         blendOBSPercent: 90
     )
@@ -57,7 +67,7 @@ extension MediaConfig: Codable {
     enum CodingKeys: String, CodingKey {
         case streamURL, computerIP, usbComputerIP, connectionMode
         case hlsPort, rtspPort, streamPath, opacity, windowScale, overlayEnabled, muted
-        case replaceCameraEnabled, blendRealCamera, blendOBSPercent
+        case replaceCameraEnabled, audioCaptureMode, blendRealCamera, blendOBSPercent
     }
 
     init(from decoder: Decoder) throws {
@@ -74,6 +84,13 @@ extension MediaConfig: Codable {
         overlayEnabled = try c.decodeIfPresent(Bool.self, forKey: .overlayEnabled) ?? false
         muted = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
         replaceCameraEnabled = try c.decodeIfPresent(Bool.self, forKey: .replaceCameraEnabled) ?? false
+        if let mode = try c.decodeIfPresent(AudioCaptureMode.self, forKey: .audioCaptureMode) {
+            audioCaptureMode = mode
+        } else if muted {
+            audioCaptureMode = .mute
+        } else {
+            audioCaptureMode = .stream
+        }
         blendRealCamera = try c.decodeIfPresent(Bool.self, forKey: .blendRealCamera) ?? false
         blendOBSPercent = try c.decodeIfPresent(Int.self, forKey: .blendOBSPercent) ?? 90
     }

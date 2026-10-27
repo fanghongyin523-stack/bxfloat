@@ -47,6 +47,10 @@
 		B10000000000000000000019 /* CamPreviewPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* CamPreviewPresenter.swift */; };
 		B1000000000000000000001E /* CamFrameBlitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000035 /* CamFrameBlitter.swift */; };
 		A1000000000000000000001B /* CamFrameBlitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000035 /* CamFrameBlitter.swift */; };
+		B1000000000000000000001F /* CamAudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000036 /* CamAudioStore.swift */; };
+		B10000000000000000000020 /* MicReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000037 /* MicReplaceHooks.swift */; };
+		A1000000000000000000001C /* CamAudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000036 /* CamAudioStore.swift */; };
+		A1000000000000000000001D /* MicReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000037 /* MicReplaceHooks.swift */; };
 		B1000000000000000000001A /* FFRTSPBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000031 /* FFRTSPBridge.m */; };
 		B1000000000000000000001B /* CamFramePublish.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000032 /* CamFramePublish.swift */; };
 		B1000000000000000000001C /* FFRTSPController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000033 /* FFRTSPController.swift */; };
@@ -100,6 +104,8 @@
 		A20000000000000000000025 /* ShootSurfaceDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShootSurfaceDetector.swift; sourceTree = "<group>"; };
 		A20000000000000000000026 /* CamPreviewPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamPreviewPresenter.swift; sourceTree = "<group>"; };
 		A20000000000000000000035 /* CamFrameBlitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamFrameBlitter.swift; sourceTree = "<group>"; };
+		A20000000000000000000036 /* CamAudioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamAudioStore.swift; sourceTree = "<group>"; };
+		A20000000000000000000037 /* MicReplaceHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicReplaceHooks.swift; sourceTree = "<group>"; };
 		A2000000000000000000001F /* RTSPVTPuller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPuller.swift; sourceTree = "<group>"; };
 		A20000000000000000000020 /* RTSPVTPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPlayer.swift; sourceTree = "<group>"; };
 		A20000000000000000000030 /* FFRTSPBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FFRTSPBridge.h; sourceTree = "<group>"; };
@@ -184,6 +190,8 @@
 				A20000000000000000000025 /* ShootSurfaceDetector.swift */,
 				A20000000000000000000026 /* CamPreviewPresenter.swift */,
 				A20000000000000000000035 /* CamFrameBlitter.swift */,
+				A20000000000000000000036 /* CamAudioStore.swift */,
+				A20000000000000000000037 /* MicReplaceHooks.swift */,
 			);
 			path = Camera;
 			sourceTree = "<group>";
@@ -431,6 +439,8 @@
 				A10000000000000000000015 /* ShootSurfaceDetector.swift in Sources */,
 				A10000000000000000000016 /* CamPreviewPresenter.swift in Sources */,
 				A1000000000000000000001B /* CamFrameBlitter.swift in Sources */,
+				A1000000000000000000001C /* CamAudioStore.swift in Sources */,
+				A1000000000000000000001D /* MicReplaceHooks.swift in Sources */,
 				A10000000000000000000008 /* HomeViewController.swift in Sources */,
 				A1000000000000000000000D /* USBStreamBridge.swift in Sources */,
 			);
@@ -459,6 +469,8 @@
 				B10000000000000000000018 /* ShootSurfaceDetector.swift in Sources */,
 				B10000000000000000000019 /* CamPreviewPresenter.swift in Sources */,
 				B1000000000000000000001E /* CamFrameBlitter.swift in Sources */,
+				B1000000000000000000001F /* CamAudioStore.swift in Sources */,
+				B10000000000000000000020 /* MicReplaceHooks.swift in Sources */,
 				B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */,
 				B10000000000000000000007 /* BXInjectConstructor.m in Sources */,
 				B1000000000000000000000B /* USBStreamBridge.swift in Sources */,

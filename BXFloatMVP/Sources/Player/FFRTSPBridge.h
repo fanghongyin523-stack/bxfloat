@@ -21,6 +21,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// 由 Swift 侧实现：把帧写入 CamFrameStore
 FOUNDATION_EXPORT void BXFloatPublishVideoFrame(CVPixelBufferRef buffer);
 
+/// 由 Swift 侧实现：PCM Int16 interleaved → CamAudioStore（frames=每声道采样数）
+FOUNDATION_EXPORT void BXFloatPublishAudioPCM(
+    const int16_t *samples,
+    int frames,
+    int channels,
+    int sampleRate
+);
+
 /// C 入口（免 bridging header，供 Swift @_silgen_name 调用）
 FOUNDATION_EXPORT BOOL BXFloatFFIsAvailable(void);
 FOUNDATION_EXPORT void BXFloatFFStartUTF8(const char * _Nonnull urlUTF8);

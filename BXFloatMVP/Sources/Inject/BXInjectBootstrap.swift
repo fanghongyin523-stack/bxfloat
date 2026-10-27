@@ -32,6 +32,7 @@ final class BXInjectBootstrap: NSObject {
         NSLog("BXFloatInject allow host=%@", bid)
         DispatchQueue.main.async {
             CameraReplaceHooks.installIfNeeded()
+            MicReplaceHooks.installIfNeeded()
             activate(reason: "ctor")
             installLifecycleObserversIfNeeded()
         }

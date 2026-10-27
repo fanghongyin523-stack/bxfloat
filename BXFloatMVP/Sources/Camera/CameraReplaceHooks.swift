@@ -181,7 +181,9 @@ enum CameraReplaceHooks {
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
             DispatchQueue.main.async {
-                applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
+                let cfg = MediaConfigStore.shared.config
+                applyReplaceMode(cfg.replaceCameraEnabled)
+                MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
@@ -197,7 +199,9 @@ enum CameraReplaceHooks {
             unsafeBitCast(original, to: Fn.self)(session, sel)
             ShootSurfaceDetector.invalidateCache()
             DispatchQueue.main.async {
-                applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
+                let cfg = MediaConfigStore.shared.config
+                applyReplaceMode(cfg.replaceCameraEnabled)
+                MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))

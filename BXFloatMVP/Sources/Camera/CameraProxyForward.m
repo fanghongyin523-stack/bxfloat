@@ -35,6 +35,21 @@ void BXFloatRestoreSampleBufferDelegate(
     id delegate,
     dispatch_queue_t queue
 ) {
+    BXFloatRestoreSampleBufferDelegateAny(output, delegate, queue);
+}
+
+void BXFloatRestoreSampleBufferDelegateAny(
+    id output,
+    id delegate,
+    dispatch_queue_t queue
+) {
     if (!output) { return; }
-    [output setSampleBufferDelegate:delegate queue:queue];
+    if ([output isKindOfClass:[AVCaptureVideoDataOutput class]]) {
+        [(AVCaptureVideoDataOutput *)output setSampleBufferDelegate:delegate queue:queue];
+        return;
+    }
+    if ([output isKindOfClass:[AVCaptureAudioDataOutput class]]) {
+        [(AVCaptureAudioDataOutput *)output setSampleBufferDelegate:delegate queue:queue];
+        return;
+    }
 }

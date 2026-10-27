@@ -25,4 +25,11 @@ void BXFloatRestoreSampleBufferDelegate(
     dispatch_queue_t _Nullable queue
 );
 
+/// 视频 / 音频 Output 通用还原。
+void BXFloatRestoreSampleBufferDelegateAny(
+    id output,
+    id _Nullable delegate,
+    dispatch_queue_t _Nullable queue
+);
+
 NS_ASSUME_NONNULL_END

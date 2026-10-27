@@ -7,6 +7,11 @@
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+
+#ifndef AV_CH_LAYOUT_MONO
+#define AV_CH_LAYOUT_MONO 0x4ULL
+#endif
 
 #endif
 
@@ -94,10 +99,16 @@ void BXFloatFFStop(void) {
 - (void)runLoopWithURL:(NSString *)urlString {
     AVFormatContext *fmt = NULL;
     AVCodecContext *codecCtx = NULL;
+    AVCodecContext *audioCtx = NULL;
     struct SwsContext *sws = NULL;
+    struct SwrContext *swr = NULL;
     AVFrame *frame = NULL;
+    AVFrame *audioFrame = NULL;
     AVPacket *packet = NULL;
     int videoIdx = -1;
+    int audioIdx = -1;
+    uint8_t *audioOutBuf = NULL;
+    int audioOutBufSamples = 0;
 
     avformat_network_init();
 
@@ -150,11 +161,62 @@ void BXFloatFFStop(void) {
         goto cleanup;
     }
 
+    audioIdx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    if (audioIdx >= 0) {
+        AVStream *ast = fmt->streams[audioIdx];
+        const AVCodec *acodec = avcodec_find_decoder(ast->codecpar->codec_id);
+        if (acodec) {
+            audioCtx = avcodec_alloc_context3(acodec);
+            if (audioCtx) {
+                avcodec_parameters_to_context(audioCtx, ast->codecpar);
+                if (avcodec_open2(audioCtx, acodec, NULL) < 0) {
+                    NSLog(@"BXFloatCam ffmpeg audio open fail");
+                    avcodec_free_context(&audioCtx);
+                    audioCtx = NULL;
+                    audioIdx = -1;
+                } else {
+                    int64_t inLayout = audioCtx->channel_layout;
+                    if (!inLayout) {
+                        inLayout = av_get_default_channel_layout(audioCtx->channels);
+                    }
+                    swr = swr_alloc_set_opts(
+                        NULL,
+                        AV_CH_LAYOUT_MONO,
+                        AV_SAMPLE_FMT_S16,
+                        48000,
+                        inLayout,
+                        audioCtx->sample_fmt,
+                        audioCtx->sample_rate,
+                        0,
+                        NULL
+                    );
+                    if (!swr || swr_init(swr) < 0) {
+                        NSLog(@"BXFloatCam ffmpeg swr init fail");
+                        if (swr) { swr_free(&swr); swr = NULL; }
+                        avcodec_free_context(&audioCtx);
+                        audioCtx = NULL;
+                        audioIdx = -1;
+                    } else {
+                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz → mono 48k s16",
+                              audioCtx->channels, audioCtx->sample_rate);
+                    }
+                }
+            }
+        } else {
+            NSLog(@"BXFloatCam ffmpeg no audio decoder id=%d", ast->codecpar->codec_id);
+            audioIdx = -1;
+        }
+    } else {
+        NSLog(@"BXFloatCam ffmpeg no audio stream (video-only)");
+    }
+
     frame = av_frame_alloc();
+    audioFrame = av_frame_alloc();
     packet = av_packet_alloc();
     if (!frame || !packet) goto cleanup;
 
-    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d", urlString, codecCtx->width, codecCtx->height);
+    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d",
+          urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0);
 
     while (self.running) {
         ret = av_read_frame(fmt, packet);
@@ -164,36 +226,77 @@ void BXFloatFFStop(void) {
             }
             break;
         }
-        if (packet->stream_index != videoIdx) {
+        if (packet->stream_index == videoIdx) {
+            ret = avcodec_send_packet(codecCtx, packet);
             av_packet_unref(packet);
-            continue;
-        }
-        ret = avcodec_send_packet(codecCtx, packet);
-        av_packet_unref(packet);
-        if (ret < 0) {
-            self.frameFail++;
-            continue;
-        }
-        while (ret >= 0 && self.running) {
-            ret = avcodec_receive_frame(codecCtx, frame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) {
                 self.frameFail++;
-                break;
+                continue;
             }
-            if (![self publishFrame:frame codecCtx:codecCtx sws:&sws]) {
-                self.frameFail++;
-            } else {
-                self.frameOK++;
+            while (ret >= 0 && self.running) {
+                ret = avcodec_receive_frame(codecCtx, frame);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+                if (ret < 0) {
+                    self.frameFail++;
+                    break;
+                }
+                if (![self publishFrame:frame codecCtx:codecCtx sws:&sws]) {
+                    self.frameFail++;
+                } else {
+                    self.frameOK++;
+                }
             }
+        } else if (audioIdx >= 0 && packet->stream_index == audioIdx && audioCtx && swr && audioFrame) {
+            ret = avcodec_send_packet(audioCtx, packet);
+            av_packet_unref(packet);
+            if (ret < 0) continue;
+            while (ret >= 0 && self.running) {
+                ret = avcodec_receive_frame(audioCtx, audioFrame);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+                if (ret < 0) break;
+
+                int outSamples = (int)av_rescale_rnd(
+                    swr_get_delay(swr, audioCtx->sample_rate) + audioFrame->nb_samples,
+                    48000,
+                    audioCtx->sample_rate,
+                    AV_ROUND_UP
+                );
+                if (outSamples <= 0) outSamples = audioFrame->nb_samples;
+                if (outSamples > audioOutBufSamples) {
+                    av_freep(&audioOutBuf);
+                    if (av_samples_alloc(&audioOutBuf, NULL, 1, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
+                        audioOutBuf = NULL;
+                        audioOutBufSamples = 0;
+                        break;
+                    }
+                    audioOutBufSamples = outSamples;
+                }
+                uint8_t *outPlanes[1] = { audioOutBuf };
+                int converted = swr_convert(
+                    swr,
+                    outPlanes,
+                    outSamples,
+                    (const uint8_t **)audioFrame->data,
+                    audioFrame->nb_samples
+                );
+                if (converted > 0) {
+                    BXFloatPublishAudioPCM((const int16_t *)audioOutBuf, converted, 1, 48000);
+                }
+            }
+        } else {
+            av_packet_unref(packet);
         }
     }
 
 cleanup:
     if (sws) sws_freeContext(sws);
+    if (swr) swr_free(&swr);
+    av_freep(&audioOutBuf);
     if (packet) av_packet_free(&packet);
     if (frame) av_frame_free(&frame);
+    if (audioFrame) av_frame_free(&audioFrame);
     if (codecCtx) avcodec_free_context(&codecCtx);
+    if (audioCtx) avcodec_free_context(&audioCtx);
     if (fmt) avformat_close_input(&fmt);
 
     BOOL shouldReconnect = self.running;
