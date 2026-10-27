@@ -551,6 +551,7 @@
 		B90000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_IDENTITY = "";
@@ -577,6 +578,10 @@
 					"$(SRCROOT)/Vendor/FFmpeg/lib",
 				);
 				MACH_O_TYPE = mh_dylib;
+				OTHER_CFLAGS = (
+					"$(inherited)",
+					"-fno-modules",
+				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lavcodec",
@@ -614,6 +619,7 @@
 		B90000000000000000000002 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_IDENTITY = "";
@@ -640,6 +646,10 @@
 					"$(SRCROOT)/Vendor/FFmpeg/lib",
 				);
 				MACH_O_TYPE = mh_dylib;
+				OTHER_CFLAGS = (
+					"$(inherited)",
+					"-fno-modules",
+				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lavcodec",

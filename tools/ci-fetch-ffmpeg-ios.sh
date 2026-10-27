@@ -61,6 +61,21 @@ for lib in "${LIBS[@]}"; do
   fi
 done
 
+# iOS：去掉 Clang modulemap；Windows 专用头改成空桩，避免 initguid.h
+find "$OUT/include" \( -name 'module.modulemap' -o -name '*.modulemap' \) -type f -print -delete || true
+while IFS= read -r -d '' f; do
+  echo "stub $f"
+  printf '%s\n' '#pragma once' '/* stubbed for iOS inject build */' > "$f"
+done < <(find "$OUT/include" \( \
+  -name 'hwcontext_d3d11va.h' -o \
+  -name 'hwcontext_d3d12va.h' -o \
+  -name 'hwcontext_dxva2.h' -o \
+  -name 'hwcontext_cuda.h' -o \
+  -name 'hwcontext_vdpau.h' -o \
+  -name 'hwcontext_qsv.h' -o \
+  -name 'hwcontext_opencl.h' \
+\) -type f -print0 2>/dev/null || true)
+
 echo ">> FFmpeg vendor ready:"
 ls -lh "$OUT/lib"
 ls "$OUT/include" | head
