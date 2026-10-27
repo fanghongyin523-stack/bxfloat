@@ -1,5 +1,4 @@
 import AVFoundation
-import CoreImage
 import CoreMedia
 import CoreVideo
 import ObjectiveC
@@ -28,14 +27,13 @@ func BXFloatRestoreSampleBufferDelegate(
     _ queue: DispatchQueue?
 )
 
-/// 真替换：包装 sample 回调，把推流画进采集缓冲；抖音 UI 仍在预览层之上，按钮可点。
-/// 规则：回调里绝不碰 UIKit；不改 videoSettings；重活在 CamFrameBlitter 后台做。
+/// 真替换（防冻帧版）：
+/// - 采集回调里只做像素拷贝，禁止 CI / UIKit
+/// - 关替换：先清 active 再 unwrap，保证后续帧立刻透传
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
     private static var trackedOutputs = NSHashTable<AVCaptureVideoDataOutput>.weakObjects()
-
-    /// 采集回调只读这个标志（加锁），禁止扫视图树。
     private static var replaceActive = false
 
     private(set) static var wrapCount: Int64 = 0
@@ -62,7 +60,7 @@ enum CameraReplaceHooks {
         swizzleSessionAddOutput()
         swizzleSessionStartRunning()
         swizzleSessionStopRunning()
-        NSLog("BXFloatCam hooks installed (true-replace)")
+        NSLog("BXFloatCam hooks installed (true-replace memcpy-only)")
     }
 
     static func applyReplaceMode(_ enabled: Bool) {
@@ -70,18 +68,20 @@ enum CameraReplaceHooks {
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
         let want = enabled && onCamera
 
+        // 先改标志：关的时候即使还没 unwrap，回调也立刻透传
         lock.lock()
         replaceActive = want
         lock.unlock()
 
         CamFrameBlitter.shared.setEnabled(want)
-        // 真替换不再用盖层窗（盖层会挡住开播按钮/标题）
         PreviewCover.stop()
 
         let outputs = trackedOutputs.allObjects
         for output in outputs {
             if want {
-                ensureWrapped(output)
+                // 在采集队列上换 delegate，减少和正在跑的回调打架
+                let q = output.sampleBufferCallbackQueue ?? DispatchQueue.main
+                q.async { ensureWrapped(output) }
             } else {
                 unwrap(output)
             }
@@ -139,7 +139,8 @@ enum CameraReplaceHooks {
             if let vout = output as? AVCaptureVideoDataOutput {
                 track(vout)
                 if isReplaceActive() {
-                    DispatchQueue.main.async { ensureWrapped(vout) }
+                    let q = vout.sampleBufferCallbackQueue ?? DispatchQueue.main
+                    q.async { ensureWrapped(vout) }
                 }
             }
         }
@@ -183,7 +184,7 @@ enum CameraReplaceHooks {
 
     private static func ensureWrapped(_ output: AVCaptureVideoDataOutput) {
         track(output)
-        // 不改 videoSettings
+        guard isReplaceActive() else { return }
         guard let delegate = output.sampleBufferDelegate else { return }
         if delegate is CamSampleBufferProxy { return }
         let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
@@ -226,7 +227,6 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         CameraReplaceHooks.noteCallback()
-        // 只看原子开关；禁止在此扫 UIKit
         if CameraReplaceHooks.isReplaceActive() {
             if CamBufferPainter.paintInPlace(sampleBuffer) {
                 CameraReplaceHooks.notePaintOK()
@@ -234,6 +234,7 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 CameraReplaceHooks.notePaintFail()
             }
         }
+        // 无论画没画上，都立刻转发，绝不堵采集队列
         BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
     }
 
@@ -246,14 +247,10 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
 }
 
+/// 采集回调专用：只拷贝像素，禁止 CI。
 enum CamBufferPainter {
-    private static let ci = CIContext(options: [
-        .useSoftwareRenderer: false,
-        .cacheIntermediates: false,
-    ])
     private static var loggedFormat = false
 
-    /// 把预缩放帧写入采集缓冲；同一 CMSampleBuffer 原样转发。
     @discardableResult
     static func paintInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
@@ -262,97 +259,61 @@ enum CamBufferPainter {
         guard dw > 0, dh > 0 else { return false }
 
         let fmt = CVPixelBufferGetPixelFormatType(dst)
-        CamFrameBlitter.shared.noteTarget(width: dw, height: dh)
+        CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
 
         if !loggedFormat {
             loggedFormat = true
-            NSLog("BXFloatCam paint dstFormat=%u %dx%d", fmt, dw, dh)
+            NSLog("BXFloatCam paint dstFormat=%u %dx%d (memcpy-only)", fmt, dw, dh)
         }
 
-        // 优先用后台预缩放好的 BGRA
-        if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh) {
-            return blit(prepared, into: dst, format: fmt, width: dw, height: dh)
+        guard let prepared = CamFrameBlitter.shared.copyPrepared(
+            width: dw, height: dh, format: fmt
+        ) else {
+            // 预渲染未就绪：透传真机帧，保持画面在动
+            return false
         }
-
-        // 预缩放还没好：直接从 store 画一帧（可能稍慢，仅兜底）
-        guard CamFrameStore.shared.hasFreshFrame,
-              let src = CamFrameStore.shared.copyLatest() else { return false }
-        return render(src, into: dst, width: dw, height: dh)
+        return copyPixels(from: prepared, to: dst)
     }
 
-    private static func blit(
-        _ src: CVPixelBuffer,
-        into dst: CVPixelBuffer,
-        format: OSType,
-        width: Int,
-        height: Int
-    ) -> Bool {
-        if format == kCVPixelFormatType_32BGRA {
-            return copyBGRA(src, to: dst)
-        }
-        // YUV 等：CI 一次写入（源已是目标尺寸，比整链路缩放轻）
-        let image = CIImage(cvPixelBuffer: src)
-        ci.render(
-            image,
-            to: dst,
-            bounds: CGRect(x: 0, y: 0, width: width, height: height),
-            colorSpace: CGColorSpaceCreateDeviceRGB()
-        )
-        return true
-    }
+    private static func copyPixels(from src: CVPixelBuffer, to dst: CVPixelBuffer) -> Bool {
+        let planes = CVPixelBufferGetPlaneCount(src)
+        let dstPlanes = CVPixelBufferGetPlaneCount(dst)
+        guard planes == dstPlanes else { return false }
 
-    private static func copyBGRA(_ src: CVPixelBuffer, to dst: CVPixelBuffer) -> Bool {
         CVPixelBufferLockBaseAddress(src, .readOnly)
         CVPixelBufferLockBaseAddress(dst, [])
         defer {
             CVPixelBufferUnlockBaseAddress(dst, [])
             CVPixelBufferUnlockBaseAddress(src, .readOnly)
         }
-        guard let s = CVPixelBufferGetBaseAddress(src),
-              let d = CVPixelBufferGetBaseAddress(dst) else { return false }
-        let sh = CVPixelBufferGetHeight(src)
-        let dh = CVPixelBufferGetHeight(dst)
-        let rows = min(sh, dh)
-        let sRow = CVPixelBufferGetBytesPerRow(src)
-        let dRow = CVPixelBufferGetBytesPerRow(dst)
-        let sW = CVPixelBufferGetWidth(src)
-        let dW = CVPixelBufferGetWidth(dst)
-        let bytes = min(sW, dW) * 4
-        for y in 0..<rows {
-            memcpy(d.advanced(by: y * dRow), s.advanced(by: y * sRow), bytes)
-        }
-        return true
-    }
 
-    private static func render(
-        _ src: CVPixelBuffer,
-        into dst: CVPixelBuffer,
-        width: Int,
-        height: Int
-    ) -> Bool {
-        let ciSrc = CIImage(cvPixelBuffer: src)
-        let sw = CGFloat(CVPixelBufferGetWidth(src))
-        let sh = CGFloat(CVPixelBufferGetHeight(src))
-        guard sw > 1, sh > 1 else { return false }
-        let scale = max(CGFloat(width) / sw, CGFloat(height) / sh)
-        let scaled = ciSrc.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let cropped = scaled.cropped(
-            to: CGRect(
-                x: (scaled.extent.width - CGFloat(width)) / 2,
-                y: (scaled.extent.height - CGFloat(height)) / 2,
-                width: CGFloat(width),
-                height: CGFloat(height)
+        if planes == 0 {
+            guard let s = CVPixelBufferGetBaseAddress(src),
+                  let d = CVPixelBufferGetBaseAddress(dst) else { return false }
+            let rows = min(CVPixelBufferGetHeight(src), CVPixelBufferGetHeight(dst))
+            let sRow = CVPixelBufferGetBytesPerRow(src)
+            let dRow = CVPixelBufferGetBytesPerRow(dst)
+            let n = min(sRow, dRow)
+            for y in 0..<rows {
+                memcpy(d.advanced(by: y * dRow), s.advanced(by: y * sRow), n)
+            }
+            return true
+        }
+
+        for p in 0..<planes {
+            guard let s = CVPixelBufferGetBaseAddressOfPlane(src, p),
+                  let d = CVPixelBufferGetBaseAddressOfPlane(dst, p) else { return false }
+            let rows = min(
+                CVPixelBufferGetHeightOfPlane(src, p),
+                CVPixelBufferGetHeightOfPlane(dst, p)
             )
-        )
-        let placed = cropped.transformed(
-            by: CGAffineTransform(translationX: -cropped.extent.origin.x, y: -cropped.extent.origin.y)
-        )
-        ci.render(
-            placed,
-            to: dst,
-            bounds: CGRect(x: 0, y: 0, width: width, height: height),
-            colorSpace: CGColorSpaceCreateDeviceRGB()
-        )
+            let sRow = CVPixelBufferGetBytesPerRowOfPlane(src, p)
+            let dRow = CVPixelBufferGetBytesPerRowOfPlane(dst, p)
+            let n = min(sRow, dRow)
+            for y in 0..<rows {
+                memcpy(d.advanced(by: y * dRow), s.advanced(by: y * sRow), n)
+            }
+        }
         return true
     }
 }

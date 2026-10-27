@@ -2,7 +2,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 
-/// 后台把推流预缩放到采集尺寸（BGRA），采集回调里只做轻量写入，避免冻帧。
+/// 后台按「采集缓冲」的宽高+像素格式预渲染好一帧；采集回调里只 memcpy，绝不跑 CI。
 final class CamFrameBlitter {
     static let shared = CamFrameBlitter()
 
@@ -17,9 +17,11 @@ final class CamFrameBlitter {
     private var prepared: CVPixelBuffer?
     private var prepW = 0
     private var prepH = 0
+    private var prepFmt: OSType = 0
     private var lastSrcID: Int64 = -1
     private var targetW = 0
     private var targetH = 0
+    private var targetFmt: OSType = 0
     private var ticking = false
 
     private init() {}
@@ -30,6 +32,9 @@ final class CamFrameBlitter {
         if !on {
             prepared = nil
             lastSrcID = -1
+            prepW = 0
+            prepH = 0
+            prepFmt = 0
         }
         let needTick = on && !ticking
         if needTick { ticking = true }
@@ -37,20 +42,31 @@ final class CamFrameBlitter {
         if needTick { queue.async { self.tick() } }
     }
 
-    /// 采集回调上报目标尺寸（仅记数，不碰 UIKit）。
-    func noteTarget(width: Int, height: Int) {
-        guard width > 0, height > 0 else { return }
+    /// 采集回调上报目标（只记数）。
+    func noteTarget(width: Int, height: Int, format: OSType) {
+        guard width > 0, height > 0, format != 0 else { return }
         lock.lock()
         targetW = width
         targetH = height
+        targetFmt = format
         lock.unlock()
     }
 
-    func copyPrepared(width: Int, height: Int) -> CVPixelBuffer? {
+    /// 尺寸+格式都匹配才返回，供回调 memcpy。
+    func copyPrepared(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
         lock.lock()
         defer { lock.unlock() }
-        guard let prepared, prepW == width, prepH == height else { return nil }
+        guard let prepared,
+              prepW == width,
+              prepH == height,
+              prepFmt == format else { return nil }
         return prepared
+    }
+
+    var hasPrepared: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return prepared != nil
     }
 
     private func tick() {
@@ -58,6 +74,7 @@ final class CamFrameBlitter {
         let on = enabled
         let tw = targetW
         let th = targetH
+        let tf = targetFmt
         if !on {
             ticking = false
             lock.unlock()
@@ -65,8 +82,8 @@ final class CamFrameBlitter {
         }
         lock.unlock()
 
-        if tw > 0, th > 0 {
-            prepareIfNeeded(width: tw, height: th)
+        if tw > 0, th > 0, tf != 0 {
+            prepareIfNeeded(width: tw, height: th, format: tf)
         }
 
         queue.asyncAfter(deadline: .now() + 0.033) { [weak self] in
@@ -74,13 +91,13 @@ final class CamFrameBlitter {
         }
     }
 
-    private func prepareIfNeeded(width: Int, height: Int) {
+    private func prepareIfNeeded(width: Int, height: Int, format: OSType) {
         let store = CamFrameStore.shared
         guard store.hasFreshFrame, let src = store.copyLatest() else { return }
         let fid = store.frameCount
 
         lock.lock()
-        let same = (fid == lastSrcID && prepW == width && prepH == height && prepared != nil)
+        let same = (fid == lastSrcID && prepW == width && prepH == height && prepFmt == format && prepared != nil)
         if same {
             lock.unlock()
             return
@@ -88,15 +105,15 @@ final class CamFrameBlitter {
         lastSrcID = fid
         lock.unlock()
 
-        var out: CVPixelBuffer?
+        // 统一先渲到 BGRA，再视目标格式决定是否二次写入
+        var bgra: CVPixelBuffer?
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true,
         ]
-        let st = CVPixelBufferCreate(
-            kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &out
-        )
-        guard st == kCVReturnSuccess, let out else { return }
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &bgra
+        ) == kCVReturnSuccess, let bgra else { return }
 
         let ciSrc = CIImage(cvPixelBuffer: src)
         let sw = CGFloat(CVPixelBufferGetWidth(src))
@@ -116,17 +133,28 @@ final class CamFrameBlitter {
         let placed = cropped.transformed(
             by: CGAffineTransform(translationX: -cropped.extent.origin.x, y: -cropped.extent.origin.y)
         )
-        ci.render(
-            placed,
-            to: out,
-            bounds: CGRect(x: 0, y: 0, width: width, height: height),
-            colorSpace: CGColorSpaceCreateDeviceRGB()
-        )
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        ci.render(placed, to: bgra, bounds: bounds, colorSpace: colorSpace)
+
+        let final: CVPixelBuffer
+        if format == kCVPixelFormatType_32BGRA {
+            final = bgra
+        } else {
+            var dst: CVPixelBuffer?
+            guard CVPixelBufferCreate(
+                kCFAllocatorDefault, width, height, format, attrs as CFDictionary, &dst
+            ) == kCVReturnSuccess, let dst else { return }
+            // 后台把 BGRA 转成采集格式（YUV 等）
+            ci.render(CIImage(cvPixelBuffer: bgra), to: dst, bounds: bounds, colorSpace: colorSpace)
+            final = dst
+        }
 
         lock.lock()
-        prepared = out
+        prepared = final
         prepW = width
         prepH = height
+        prepFmt = format
         lock.unlock()
     }
 }
