@@ -17,17 +17,26 @@ for lib in "${LIBS[@]}"; do
   rm -rf "${lib}_x"
   mkdir -p "${lib}_x"
   unzip -q "${lib}.zip" -d "${lib}_x"
-  # 优先 ios-arm64 静态库
-  AFILE="$(find "${lib}_x" -path '*ios-arm64*' -name '*.a' | head -n 1 || true)"
+  # 必须用真机 ios-arm64，绝不能拿 simulator 切片（否则 ld 报 built for iOS-simulator）
+  AFILE="$(find "${lib}_x" -path '*/ios-arm64/*' -name '*.a' ! -path '*simulator*' | head -n 1 || true)"
   if [[ -z "${AFILE}" ]]; then
-    AFILE="$(find "${lib}_x" -name "lib${lib}.a" | head -n 1 || true)"
+    AFILE="$(find "${lib}_x" -path '*/ios-arm64/*' -type f ! -path '*simulator*' \( -name "lib${lib}.a" -o -name "${lib}" \) | head -n 1 || true)"
   fi
   if [[ -z "${AFILE}" ]]; then
-    echo "ERROR: no static lib for $lib" >&2
-    find "${lib}_x" -maxdepth 4 -type f | head -n 50 >&2
+    echo "ERROR: no DEVICE ios-arm64 static lib for $lib" >&2
+    find "${lib}_x" -maxdepth 6 -type f | head -n 80 >&2
     exit 1
   fi
+  echo "using $AFILE"
+  # 若是无扩展名的 framework binary，仍拷成 .a 名供 -l 链接；xcframework 真机侧通常是 .a
   cp -f "$AFILE" "$OUT/lib/lib${lib}.a"
+  # 快速校验：真机库不应含 iOS-simulator 平台（用 lipo/otool 粗查）
+  if command -v otool >/dev/null 2>&1; then
+    if otool -hv "$OUT/lib/lib${lib}.a" 2>/dev/null | grep -qi 'IOSSIMULATOR\|iOS-simulator'; then
+      echo "ERROR: $lib looks like simulator slice: $AFILE" >&2
+      exit 1
+    fi
+  fi
   # headers
   HDIR="$(find "${lib}_x" -type d -name 'Headers' | head -n 1 || true)"
   if [[ -n "${HDIR}" ]]; then
