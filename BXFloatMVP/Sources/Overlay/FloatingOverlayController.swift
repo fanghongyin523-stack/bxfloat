@@ -99,16 +99,15 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
     /// 主 feed：不盖预览、不包装相机；仅摄像页开替换相关逻辑。
     private func syncReplaceForCurrentSurface() {
         let cfgOn = MediaConfigStore.shared.config.replaceCameraEnabled
-        // 未开替换时不必反复扫摄像页；关替换则确保 unwrap
-        let onCam = cfgOn ? ShootSurfaceDetector.isCameraSurfaceVisible() : false
-        CameraReplaceHooks.applyReplaceMode(cfgOn && onCam)
+        // 把配置原样交给 hooks：关替换必 unwrap；开了再内部判断摄像页
+        CameraReplaceHooks.applyReplaceMode(cfgOn)
 
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
         let host = scene?.windows.first { $0 !== floatWindow && !$0.isHidden }
 
-        if cfgOn, onCam {
+        if cfgOn, ShootSurfaceDetector.isCameraSurfaceVisible() {
             PreviewCover.refreshIfNeeded(in: host)
         } else {
             PreviewCover.stop()

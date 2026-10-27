@@ -28,15 +28,14 @@ func BXFloatRestoreSampleBufferDelegate(
     _ queue: DispatchQueue?
 )
 
-private var bxSavedVideoSettingsKey: UInt8 = 0
-
 /// 摄像头替换钩子。
-/// 关替换：还原 delegate + videoSettings，原样透传，避免黑屏。
+/// - 关替换：必须拆掉 proxy，且绝不改 videoSettings（改格式是真机黑屏主因）
+/// - 开替换：原地把推流画进原 CVPixelBuffer，保留同一 CMSampleBuffer（抖音依赖附件/格式）
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
     private static var trackedOutputs = NSHashTable<AVCaptureVideoDataOutput>.weakObjects()
-    /// 配置开关且当前在摄像页时才真正包装
+    /// 配置开替换且当前在摄像页时才包装
     private static var replaceActive = false
 
     private(set) static var wrapCount: Int64 = 0
@@ -60,11 +59,12 @@ enum CameraReplaceHooks {
         NSLog("BXFloatCam hooks installed")
     }
 
-    /// enabled=配置开替换；内部再结合摄像页决定是否包装。
+    /// `enabled` = 配置里的「替换摄像头」；内部再结合摄像页决定是否包装。
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
         let want = enabled && onCamera
+        let was = replaceActive
         replaceActive = want
         let outputs = trackedOutputs.allObjects
         for output in outputs {
@@ -74,13 +74,18 @@ enum CameraReplaceHooks {
                 unwrap(output)
             }
         }
-        NSLog(
-            "BXFloatCam applyReplaceMode cfg=%d cam=%d active=%d tracked=%d",
-            enabled ? 1 : 0,
-            onCamera ? 1 : 0,
-            want ? 1 : 0,
-            outputs.count
-        )
+        if was != want || !want {
+            NSLog(
+                "BXFloatCam applyReplaceMode cfg=%d cam=%d active=%d tracked=%d paintOK=%lld fail=%lld cb=%lld",
+                enabled ? 1 : 0,
+                onCamera ? 1 : 0,
+                want ? 1 : 0,
+                outputs.count,
+                paintCount,
+                paintFailCount,
+                callbackCount
+            )
+        }
     }
 
     private static func track(_ output: AVCaptureVideoDataOutput) {
@@ -146,7 +151,6 @@ enum CameraReplaceHooks {
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
             DispatchQueue.main.async {
-                // 进摄像页：若配置开了替换再包装
                 applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
             }
         }
@@ -163,7 +167,6 @@ enum CameraReplaceHooks {
             unsafeBitCast(original, to: Fn.self)(session, sel)
             ShootSurfaceDetector.invalidateCache()
             DispatchQueue.main.async {
-                // 会话停后按当前页面重算；离开摄像页会拆包装并停盖层
                 applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
                 if !ShootSurfaceDetector.isCameraSurfaceVisible() {
                     PreviewCover.stop()
@@ -175,53 +178,22 @@ enum CameraReplaceHooks {
 
     private static func ensureWrapped(_ output: AVCaptureVideoDataOutput) {
         track(output)
-        preferBGRA(output)
+        // 故意不改 videoSettings：强改 BGRA 会弄崩抖音美颜/预览，关替换后仍黑屏
         guard let delegate = output.sampleBufferDelegate else { return }
         if delegate is CamSampleBufferProxy { return }
         let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
         let proxy = CamSampleBufferProxy(target: delegate)
         output.setSampleBufferDelegate(proxy, queue: queue)
         wrapCount += 1
-        NSLog("BXFloatCam ensureWrapped")
+        NSLog("BXFloatCam ensureWrapped (no videoSettings touch)")
     }
 
     private static func unwrap(_ output: AVCaptureVideoDataOutput) {
-        restoreVideoSettings(output)
         if let proxy = output.sampleBufferDelegate as? CamSampleBufferProxy {
             let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
             BXFloatRestoreSampleBufferDelegate(output, proxy.originalTarget, queue)
             NSLog("BXFloatCam unwrapped")
         }
-    }
-
-    private static func preferBGRA(_ output: AVCaptureVideoDataOutput) {
-        let key = kCVPixelBufferPixelFormatTypeKey as String
-        let want = Int(kCVPixelFormatType_32BGRA)
-        if objc_getAssociatedObject(output, &bxSavedVideoSettingsKey) == nil {
-            // 保存原始 settings；nil 用 NSNull 占位，unwrap 时还原成 nil
-            let saved: Any = (output.videoSettings as NSDictionary?) ?? NSNull()
-            objc_setAssociatedObject(
-                output,
-                &bxSavedVideoSettingsKey,
-                saved,
-                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-            )
-        }
-        if let cur = output.videoSettings?[key] as? Int, cur == want { return }
-        output.videoSettings = [key: want]
-    }
-
-    private static func restoreVideoSettings(_ output: AVCaptureVideoDataOutput) {
-        guard let saved = objc_getAssociatedObject(output, &bxSavedVideoSettingsKey) else { return }
-        if saved is NSNull {
-            output.videoSettings = nil
-        } else if let dict = saved as? [String: Any] {
-            output.videoSettings = dict
-        } else if let dict = saved as? NSDictionary {
-            output.videoSettings = dict as? [String: Any]
-        }
-        objc_setAssociatedObject(output, &bxSavedVideoSettingsKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        NSLog("BXFloatCam restored videoSettings")
     }
 }
 
@@ -250,22 +222,20 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         CameraReplaceHooks.noteCallback()
-        // 关替换：100% 原帧透传
+        // 关替换或离开摄像页：100% 原帧透传
         guard MediaConfigStore.shared.config.replaceCameraEnabled,
               ShootSurfaceDetector.isCameraSurfaceVisible()
         else {
             BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
             return
         }
-        var forward = sampleBuffer
-        if let replaced = CamBufferPainter.makeReplacing(sampleBuffer) {
-            forward = replaced
+        // 原地绘制成功则仍转发「同一个」sampleBuffer（像素已被替换）
+        if CamBufferPainter.paintInPlace(sampleBuffer) {
             CameraReplaceHooks.notePaintOK()
         } else {
             CameraReplaceHooks.notePaintFail()
-            // 画失败时仍送原帧，避免整页黑
         }
-        BXFloatForwardDidOutput(originalTarget, output, forward, connection)
+        BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
     }
 
     func captureOutput(
@@ -282,32 +252,31 @@ enum CamBufferPainter {
         .useSoftwareRenderer: false,
         .cacheIntermediates: false,
     ])
+    private static var loggedFormat = false
 
-    static func makeReplacing(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+    /// 把推流画进采集缓冲的像素里，不新建 CMSampleBuffer（保留格式与附件）。
+    @discardableResult
+    static func paintInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard CamFrameStore.shared.hasFreshFrame,
-              let src = CamFrameStore.shared.copyLatest() else { return nil }
-        guard let dstProto = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-        let dw = CVPixelBufferGetWidth(dstProto)
-        let dh = CVPixelBufferGetHeight(dstProto)
-        guard dw > 0, dh > 0 else { return nil }
+              let src = CamFrameStore.shared.copyLatest() else { return false }
+        guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
 
-        var newPB: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            kCVPixelBufferMetalCompatibilityKey: true,
-        ]
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault, dw, dh, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &newPB
-        )
-        guard status == kCVReturnSuccess, let newPB else { return nil }
+        let dw = CVPixelBufferGetWidth(dst)
+        let dh = CVPixelBufferGetHeight(dst)
+        guard dw > 0, dh > 0 else { return false }
+
+        let fmt = CVPixelBufferGetPixelFormatType(dst)
+        if !loggedFormat {
+            loggedFormat = true
+            NSLog("BXFloatCam paint dstFormat=%u %dx%d", fmt, dw, dh)
+        }
 
         let ciSrc = CIImage(cvPixelBuffer: src)
         let sw = CGFloat(CVPixelBufferGetWidth(src))
         let sh = CGFloat(CVPixelBufferGetHeight(src))
-        guard sw > 0, sh > 0 else { return nil }
-        let sx = CGFloat(dw) / sw
-        let sy = CGFloat(dh) / sh
-        let scale = max(sx, sy)
+        guard sw > 0, sh > 0 else { return false }
+
+        let scale = max(CGFloat(dw) / sw, CGFloat(dh) / sh)
         let scaled = ciSrc.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let cropped = scaled.cropped(
             to: CGRect(
@@ -320,37 +289,47 @@ enum CamBufferPainter {
         let placed = cropped.transformed(
             by: CGAffineTransform(translationX: -cropped.extent.origin.x, y: -cropped.extent.origin.y)
         )
-        ci.render(
-            placed,
-            to: newPB,
-            bounds: CGRect(x: 0, y: 0, width: dw, height: dh),
-            colorSpace: CGColorSpaceCreateDeviceRGB()
-        )
+        let bounds = CGRect(x: 0, y: 0, width: dw, height: dh)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
 
-        var timing = CMSampleTimingInfo(
-            duration: CMSampleBufferGetDuration(sampleBuffer),
-            presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-            decodeTimeStamp: CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
+        // 优先直接渲到目标缓冲（BGRA / 部分 YUV 可用）
+        if canRenderDirectly(fmt) {
+            ci.render(placed, to: dst, bounds: bounds, colorSpace: colorSpace)
+            return true
+        }
+
+        // 其它格式：先渲到临时 BGRA，再经 CI 写入目标（尽量保原格式）
+        var tmp: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        let st = CVPixelBufferCreate(
+            kCFAllocatorDefault, dw, dh, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &tmp
         )
-        var formatDesc: CMFormatDescription?
-        CMVideoFormatDescriptionCreateForImageBuffer(
-            allocator: kCFAllocatorDefault,
-            imageBuffer: newPB,
-            formatDescriptionOut: &formatDesc
-        )
-        guard let formatDesc else { return nil }
-        var out: CMSampleBuffer?
-        let err = CMSampleBufferCreateForImageBuffer(
-            allocator: kCFAllocatorDefault,
-            imageBuffer: newPB,
-            dataReady: true,
-            makeDataReadyCallback: nil,
-            refcon: nil,
-            formatDescription: formatDesc,
-            sampleTiming: &timing,
-            sampleBufferOut: &out
-        )
-        return err == noErr ? out : nil
+        guard st == kCVReturnSuccess, let tmp else { return false }
+        ci.render(placed, to: tmp, bounds: bounds, colorSpace: colorSpace)
+        let tmpImage = CIImage(cvPixelBuffer: tmp)
+        ci.render(tmpImage, to: dst, bounds: bounds, colorSpace: colorSpace)
+        return true
+    }
+
+    private static func canRenderDirectly(_ fmt: OSType) -> Bool {
+        switch fmt {
+        case kCVPixelFormatType_32BGRA,
+             kCVPixelFormatType_32RGBA,
+             kCVPixelFormatType_64RGBAHalf,
+             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// 兼容旧调用名（已不再新建 sample）
+    static func makeReplacing(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+        paintInPlace(sampleBuffer) ? sampleBuffer : nil
     }
 }
 

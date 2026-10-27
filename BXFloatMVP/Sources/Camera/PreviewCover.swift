@@ -2,12 +2,13 @@ import AVFoundation
 import QuartzCore
 import UIKit
 
-/// 仅在「摄像页」且开启替换时，盖住 AVCaptureVideoPreviewLayer。
-/// 绝不在主 feed 用大面积黑底兜底（那会盖掉同城/关注里的视频）。
+/// 仅在「摄像页」且开启替换时，盖住预览层，显示推流画面。
+/// 绝不用空黑底盖住真机；等第一帧到位再显示。
 enum PreviewCover {
     private static var coverView: UIImageView?
     private static var hostView: UIView?
     private static var consumer: CoverConsumer?
+    private static var hasFrame = false
 
     static func start(in window: UIWindow?) {
         guard MediaConfigStore.shared.config.replaceCameraEnabled,
@@ -16,14 +17,9 @@ enum PreviewCover {
             stop()
             return
         }
-        // 只挂预览层宿主；找不到就不盖（避免 feed 误盖）
-        guard let target = ShootSurfaceDetector.findPreviewLayerHost(in: window) else {
-            stop()
-            return
-        }
-        // 已有 sample 绘制成功时不必盖
-        if CameraReplaceHooks.callbackCount > 30, CameraReplaceHooks.paintCount > 0 {
-            coverView?.isHidden = true
+
+        guard let target = resolveHost(in: window) else {
+            // 找不到预览宿主就不盖，避免误盖 feed；样本路径仍可替换
             return
         }
 
@@ -34,13 +30,19 @@ enum PreviewCover {
             v.contentMode = .scaleAspectFill
             v.clipsToBounds = true
             v.isUserInteractionEnabled = false
+            v.backgroundColor = .clear
+            v.isOpaque = false
+            v.isHidden = true // 有帧之前不盖，防止黑屏
             v.tag = 0x42584643
             target.addSubview(v)
             coverView = v
             hostView = target
+            hasFrame = false
         }
-        coverView?.isHidden = false
-        target.bringSubviewToFront(coverView!)
+        if hasFrame {
+            coverView?.isHidden = false
+            target.bringSubviewToFront(coverView!)
+        }
 
         if consumer == nil {
             let c = CoverConsumer()
@@ -57,6 +59,7 @@ enum PreviewCover {
         coverView?.removeFromSuperview()
         coverView = nil
         hostView = nil
+        hasFrame = false
     }
 
     static func refreshIfNeeded(in window: UIWindow?) {
@@ -70,7 +73,22 @@ enum PreviewCover {
     }
 
     fileprivate static func applyImage(_ image: CGImage) {
-        coverView?.image = UIImage(cgImage: image)
+        guard let cover = coverView else { return }
+        cover.image = UIImage(cgImage: image)
+        if !hasFrame {
+            hasFrame = true
+            cover.isHidden = false
+            cover.superview?.bringSubviewToFront(cover)
+            NSLog("BXFloatCam PreviewCover first frame %dx%d", image.width, image.height)
+        }
+    }
+
+    /// 优先 AVCaptureVideoPreviewLayer；找不到则找摄像页上最大的近似预览视图。
+    private static func resolveHost(in window: UIWindow?) -> UIView? {
+        if let host = ShootSurfaceDetector.findPreviewLayerHost(in: window) {
+            return host
+        }
+        return ShootSurfaceDetector.findLikelyPreviewHost(in: window)
     }
 }
 
