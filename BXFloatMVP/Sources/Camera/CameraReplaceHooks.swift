@@ -40,6 +40,10 @@ enum CameraReplaceHooks {
     private(set) static var paintCount: Int64 = 0
     private(set) static var paintFailCount: Int64 = 0
 
+    static func noteCallback() { callbackCount += 1 }
+    static func notePaintOK() { paintCount += 1 }
+    static func notePaintFail() { paintFailCount += 1 }
+
     static func installIfNeeded() {
         lock.lock()
         defer { lock.unlock() }
@@ -180,14 +184,14 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        CameraReplaceHooks.callbackCount += 1
+        CameraReplaceHooks.noteCallback()
         var forward = sampleBuffer
         if MediaConfigStore.shared.config.replaceCameraEnabled {
             if let replaced = CamBufferPainter.makeReplacing(sampleBuffer) {
                 forward = replaced
-                CameraReplaceHooks.paintCount += 1
+                CameraReplaceHooks.notePaintOK()
             } else {
-                CameraReplaceHooks.paintFailCount += 1
+                CameraReplaceHooks.notePaintFail()
             }
         }
         BXFloatForwardDidOutput(originalTarget, output, forward, connection)
