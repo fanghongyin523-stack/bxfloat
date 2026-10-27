@@ -282,11 +282,16 @@ final class RTSPVTPuller {
             },
             decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        ]
         let err = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             formatDescription: desc,
             decoderSpecification: nil,
-            imageBufferAttributes: nil,
+            imageBufferAttributes: attrs as CFDictionary,
             outputCallback: &callback,
             decompressionSessionOut: &session
         )

@@ -1,15 +1,26 @@
 import UIKit
 
-/// 小悬浮窗 ↔ 设置面板；局域网 RTSP；可选替换摄像头。
+/// 点击穿透：只让小窗/面板吃到触摸，其它交给下面的抖音窗口。
+private final class BXFloatPassthroughWindow: UIWindow {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let view = super.hitTest(point, with: event)
+        if view === self || view === rootViewController?.view { return nil }
+        return view
+    }
+}
+
+/// 小悬浮窗挂在独立 UIWindow 上，避免抖音切页把子视图拆掉。
 final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsPanelDelegate {
     static let shared = FloatingOverlayController()
 
-    private weak var hostWindow: UIWindow?
+    private var floatWindow: BXFloatPassthroughWindow?
     private var overlayView: FloatingOverlayView?
     private var settingsPanel: CamSettingsPanel?
     private var player: StreamPlayer?
     private var loadedURL: String?
     private var panelVisible = false
+    private var reattachTimer: Timer?
+    private var didMakeKeyOnce = false
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -18,20 +29,36 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
             name: .bxMediaConfigDidChange,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sceneActive),
+            name: UIScene.didActivateNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowVisible),
+            name: UIWindow.didBecomeVisibleNotification,
+            object: nil
+        )
     }
 
     func attach(to window: UIWindow) {
-        hostWindow = window
+        ensureFloatWindow(preferring: window.windowScene)
         CameraReplaceHooks.installIfNeeded()
+        CameraReplaceHooks.applyReplaceMode(MediaConfigStore.shared.config.replaceCameraEnabled)
         apply(MediaConfigStore.shared.config)
+        startReattachTimer()
     }
 
     func refreshSceneIfNeeded(_ scene: UIWindowScene?) {
-        guard let scene else { return }
-        if let existing = hostWindow, existing.windowScene === scene { return }
-        if let win = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
-            hostWindow = win
-        }
+        ensureFloatWindow(preferring: scene)
     }
 
     func show() {
@@ -48,12 +75,90 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         MediaConfigStore.shared.update(postNotification: false) { $0.opacity = clamped }
     }
 
-    @objc private func configChanged() {
-        apply(MediaConfigStore.shared.config)
+    @objc private func configChanged() { apply(MediaConfigStore.shared.config) }
+    @objc private func appActive() { reattachIfNeeded(reason: "active") }
+    @objc private func sceneActive() { reattachIfNeeded(reason: "scene") }
+    @objc private func windowVisible(_ note: Notification) {
+        guard let w = note.object as? UIWindow, w !== floatWindow else { return }
+        // 抖音切到摄像页常会新建全屏 window，立刻把浮窗顶回去
+        DispatchQueue.main.async { [weak self] in
+            self?.reattachIfNeeded(reason: "win")
+        }
+    }
+
+    private func startReattachTimer() {
+        reattachTimer?.invalidate()
+        reattachTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+            self?.reattachIfNeeded(reason: "timer")
+        }
+        if let t = reattachTimer {
+            RunLoop.main.add(t, forMode: .common)
+        }
+    }
+
+    private func reattachIfNeeded(reason: String) {
+        guard MediaConfigStore.shared.config.overlayEnabled else { return }
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        ensureFloatWindow(preferring: scene)
+        guard let fw = floatWindow else {
+            apply(MediaConfigStore.shared.config)
+            return
+        }
+        if overlayView == nil {
+            apply(MediaConfigStore.shared.config)
+        } else if let overlay = overlayView, overlay.superview !== fw {
+            NSLog("BXFloatCam reattach overlay reason=%@", reason)
+            fw.addSubview(overlay)
+        }
+        // 切页时抖音可能把我们的 window 藏掉 —— 只恢复显示，不要反复抢 key
+        fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
+        fw.isHidden = false
+        fw.alpha = 1
+        if !didMakeKeyOnce {
+            fw.makeKeyAndVisible()
+            didMakeKeyOnce = true
+            DispatchQueue.main.async {
+                scene?.windows.first { $0 !== fw && !$0.isHidden }?.makeKey()
+            }
+        }
+        if MediaConfigStore.shared.config.replaceCameraEnabled {
+            let host = scene?.windows.first { $0 !== fw && !$0.isHidden }
+            PreviewCover.start(in: host)
+            CameraReplaceHooks.applyReplaceMode(true)
+        }
+    }
+
+    private func ensureFloatWindow(preferring scene: UIWindowScene?) {
+        let activeScene = scene
+            ?? UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+
+        if let fw = floatWindow {
+            if let activeScene, fw.windowScene !== activeScene {
+                fw.windowScene = activeScene
+                fw.frame = activeScene.coordinateSpace.bounds
+            }
+            return
+        }
+        guard let activeScene else { return }
+        let fw = BXFloatPassthroughWindow(windowScene: activeScene)
+        fw.frame = activeScene.coordinateSpace.bounds
+        fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
+        fw.backgroundColor = .clear
+        let root = UIViewController()
+        root.view.backgroundColor = .clear
+        fw.rootViewController = root
+        fw.isHidden = false
+        floatWindow = fw
+        didMakeKeyOnce = false
     }
 
     private func apply(_ config: MediaConfig) {
-        guard let hostWindow else { return }
+        CameraReplaceHooks.applyReplaceMode(config.replaceCameraEnabled)
 
         if !config.overlayEnabled {
             USBStreamBridge.shared.stop()
@@ -65,8 +170,13 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
             overlayView?.removeFromSuperview()
             overlayView = nil
             hidePanel()
+            floatWindow?.isHidden = true
             return
         }
+
+        ensureFloatWindow(preferring: nil)
+        guard let host = floatWindow else { return }
+        host.isHidden = false
 
         if config.connectionMode == .usb {
             USBStreamBridge.shared.startAndWait()
@@ -77,24 +187,29 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         let overlay: FloatingOverlayView
         if let existing = overlayView {
             overlay = existing
-            hostWindow.bringSubviewToFront(existing)
+            if existing.superview !== host { host.addSubview(existing) }
+            host.bringSubviewToFront(existing)
         } else {
             let frame = CGRect(x: 24, y: 120, width: 168, height: 126)
             let created = FloatingOverlayView(frame: frame)
             created.delegate = self
-            hostWindow.addSubview(created)
+            host.addSubview(created)
             overlayView = created
             overlay = created
         }
 
         overlay.alpha = CGFloat(max(0.2, min(config.opacity, 1)))
         overlay.setConnectionHint(config)
-        if panelVisible {
-            hostWindow.bringSubviewToFront(settingsPanel ?? overlay)
+        if panelVisible, let panel = settingsPanel {
+            host.bringSubviewToFront(panel)
         }
 
         if config.replaceCameraEnabled {
-            PreviewCover.start(in: hostWindow)
+            let appWindow = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+                .first { $0 !== host && !$0.isHidden }
+            PreviewCover.start(in: appWindow)
         } else {
             PreviewCover.stop()
         }
@@ -109,14 +224,13 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
                     try self.startPlayback(urlString: url, muted: config.muted, into: overlay)
                     self.loadedURL = url
                 } catch {
-                    self.presentError(error.localizedDescription)
+                    NSLog("BXFloat overlay error: %@", error.localizedDescription)
                 }
             }
         } else if let player {
             player.isMuted = config.muted
             overlay.setPlaying(player.isPlaying)
-            // 替换开关变化时也确保 RTSP 在拉
-            if config.connectionMode == .lan, !url.isEmpty, url.hasPrefix("rtsp://") {
+            if config.connectionMode == .lan, url.hasPrefix("rtsp://") {
                 #if !canImport(MobileVLCKit)
                 RTSPVTPuller.shared.start(urlString: url)
                 #endif
@@ -125,10 +239,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
     }
 
     private func startPlayback(urlString: String, muted: Bool, into overlay: FloatingOverlayView) throws {
-        guard !urlString.isEmpty else {
-            throw StreamPlayerError.emptyURL
-        }
-
+        guard !urlString.isEmpty else { throw StreamPlayerError.emptyURL }
         let kind = StreamURLAnalyzer.kind(of: urlString)
         #if canImport(MobileVLCKit)
         let wantVLC = (kind == .rtsp)
@@ -144,15 +255,12 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
             player?.stop()
             player = try StreamPlayerFactory.makePlayer(for: urlString)
         }
-
         guard let player else { return }
         try player.load(urlString: urlString)
         player.isMuted = muted
         player.play()
         overlay.setPlayerView(player.view)
         overlay.setPlaying(true)
-
-        // 注入路径：额外保证拉流进 FrameStore（替换摄像头用）
         if kind == .rtsp {
             #if !canImport(MobileVLCKit)
             RTSPVTPuller.shared.start(urlString: urlString)
@@ -160,23 +268,20 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         }
     }
 
-    private func presentError(_ message: String) {
-        NSLog("BXFloat overlay error: %@", message)
-    }
-
     private func showPanel() {
-        guard let hostWindow else { return }
+        ensureFloatWindow(preferring: nil)
+        guard let host = floatWindow else { return }
         panelVisible = true
         if settingsPanel == nil {
-            let panel = CamSettingsPanel(frame: hostWindow.bounds)
+            let panel = CamSettingsPanel(frame: host.bounds)
             panel.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             panel.delegate = self
             settingsPanel = panel
-            hostWindow.addSubview(panel)
+            host.addSubview(panel)
         } else {
             settingsPanel?.reloadFromStore()
             settingsPanel?.isHidden = false
-            hostWindow.bringSubviewToFront(settingsPanel!)
+            host.bringSubviewToFront(settingsPanel!)
         }
         overlayView?.isHidden = true
     }
@@ -186,9 +291,6 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         settingsPanel?.removeFromSuperview()
         settingsPanel = nil
         overlayView?.isHidden = false
-        if let overlayView, let hostWindow {
-            hostWindow.bringSubviewToFront(overlayView)
-        }
     }
 
     func camSettingsPanelDidCollapse(_ panel: CamSettingsPanel) {
@@ -196,9 +298,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         apply(MediaConfigStore.shared.config)
     }
 
-    func floatingOverlayDidRequestClose(_ view: FloatingOverlayView) {
-        hide()
-    }
+    func floatingOverlayDidRequestClose(_ view: FloatingOverlayView) { hide() }
 
     func floatingOverlayDidRequestTogglePlay(_ view: FloatingOverlayView) {
         guard let player else { return }
@@ -211,7 +311,5 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         }
     }
 
-    func floatingOverlayDidRequestEditURL(_ view: FloatingOverlayView) {
-        showPanel()
-    }
+    func floatingOverlayDidRequestEditURL(_ view: FloatingOverlayView) { showPanel() }
 }

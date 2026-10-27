@@ -40,9 +40,11 @@
 		B10000000000000000000014 /* RTSPVTPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* RTSPVTPlayer.swift */; };
 		B10000000000000000000015 /* CamSettingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* CamSettingsPanel.swift */; };
 		B10000000000000000000016 /* PreviewCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* PreviewCover.swift */; };
+		B10000000000000000000017 /* CameraProxyForward.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000023 /* CameraProxyForward.m */; };
 		A1000000000000000000000E /* CamFrameStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* CamFrameStore.swift */; };
 		A1000000000000000000000F /* CameraReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001E /* CameraReplaceHooks.swift */; };
 		A10000000000000000000013 /* PreviewCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* PreviewCover.swift */; };
+		A10000000000000000000014 /* CameraProxyForward.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000023 /* CameraProxyForward.m */; };
 		A10000000000000000000010 /* RTSPVTPuller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001F /* RTSPVTPuller.swift */; };
 		A10000000000000000000011 /* RTSPVTPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* RTSPVTPlayer.swift */; };
 		A10000000000000000000012 /* CamSettingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* CamSettingsPanel.swift */; };
@@ -78,6 +80,8 @@
 		A2000000000000000000001D /* CamFrameStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamFrameStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000001E /* CameraReplaceHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraReplaceHooks.swift; sourceTree = "<group>"; };
 		A20000000000000000000022 /* PreviewCover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewCover.swift; sourceTree = "<group>"; };
+		A20000000000000000000023 /* CameraProxyForward.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CameraProxyForward.m; sourceTree = "<group>"; };
+		A20000000000000000000024 /* CameraProxyForward.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CameraProxyForward.h; sourceTree = "<group>"; };
 		A2000000000000000000001F /* RTSPVTPuller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPuller.swift; sourceTree = "<group>"; };
 		A20000000000000000000020 /* RTSPVTPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RTSPVTPlayer.swift; sourceTree = "<group>"; };
 		A20000000000000000000021 /* CamSettingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamSettingsPanel.swift; sourceTree = "<group>"; };
@@ -153,6 +157,8 @@
 				A2000000000000000000001D /* CamFrameStore.swift */,
 				A2000000000000000000001E /* CameraReplaceHooks.swift */,
 				A20000000000000000000022 /* PreviewCover.swift */,
+				A20000000000000000000024 /* CameraProxyForward.h */,
+				A20000000000000000000023 /* CameraProxyForward.m */,
 			);
 			path = Camera;
 			sourceTree = "<group>";
@@ -387,6 +393,7 @@
 				A1000000000000000000000E /* CamFrameStore.swift in Sources */,
 				A1000000000000000000000F /* CameraReplaceHooks.swift in Sources */,
 				A10000000000000000000013 /* PreviewCover.swift in Sources */,
+				A10000000000000000000014 /* CameraProxyForward.m in Sources */,
 				A10000000000000000000008 /* HomeViewController.swift in Sources */,
 				A1000000000000000000000D /* USBStreamBridge.swift in Sources */,
 			);
@@ -407,6 +414,7 @@
 				B10000000000000000000011 /* CamFrameStore.swift in Sources */,
 				B10000000000000000000012 /* CameraReplaceHooks.swift in Sources */,
 				B10000000000000000000016 /* PreviewCover.swift in Sources */,
+				B10000000000000000000017 /* CameraProxyForward.m in Sources */,
 				B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */,
 				B10000000000000000000007 /* BXInjectConstructor.m in Sources */,
 				B1000000000000000000000B /* USBStreamBridge.swift in Sources */,

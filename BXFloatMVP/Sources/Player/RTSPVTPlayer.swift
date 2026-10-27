@@ -1,10 +1,14 @@
+import CoreImage
+import CoreVideo
 import QuartzCore
 import UIKit
 
-/// 注入用 RTSP 播放器：拉流进 CamFrameStore，并用 CIImage 刷到 view 做小窗预览。
+/// 注入用 RTSP 播放器：拉流进 CamFrameStore，CIContext 刷 layer（避免 UIImage(ciImage:) 卡顿）。
 final class RTSPVTPlayer: NSObject, StreamPlayer {
     private let preview = RTSPPreviewView()
     private var displayLink: CADisplayLink?
+    private let ci = CIContext(options: [.useSoftwareRenderer: false, .cacheIntermediates: false])
+    private var lastFrameID: Int64 = -1
     private(set) var isPlaying = false
     var isMuted: Bool = true
 
@@ -23,6 +27,9 @@ final class RTSPVTPlayer: NSObject, StreamPlayer {
         isPlaying = true
         if displayLink == nil {
             let link = CADisplayLink(target: self, selector: #selector(tick))
+            if #available(iOS 10.0, *) {
+                link.preferredFramesPerSecond = 30
+            }
             link.add(to: .main, forMode: .common)
             displayLink = link
         }
@@ -37,31 +44,43 @@ final class RTSPVTPlayer: NSObject, StreamPlayer {
         displayLink?.invalidate()
         displayLink = nil
         RTSPVTPuller.shared.stop()
-        preview.image = nil
+        preview.setCGImage(nil)
+        lastFrameID = -1
     }
 
     @objc private func tick() {
-        guard isPlaying, let pb = CamFrameStore.shared.copyLatest() else { return }
-        preview.image = UIImage(ciImage: CIImage(cvPixelBuffer: pb))
+        guard isPlaying else { return }
+        let store = CamFrameStore.shared
+        let fid = store.frameCount
+        guard fid != lastFrameID, let pb = store.copyLatest() else { return }
+        lastFrameID = fid
+        let ciImage = CIImage(cvPixelBuffer: pb)
+        let rect = ciImage.extent
+        guard rect.width > 1, rect.height > 1,
+              let cg = ci.createCGImage(ciImage, from: rect)
+        else { return }
+        preview.setCGImage(cg)
     }
 }
 
 private final class RTSPPreviewView: UIView {
-    private let imageView = UIImageView()
-
-    var image: UIImage? {
-        get { imageView.image }
-        set { imageView.image = newValue }
-    }
+    private let imageLayer = CALayer()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-        imageView.contentMode = .scaleAspectFit
-        imageView.frame = bounds
-        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(imageView)
+        layer.addSublayer(imageLayer)
+        imageLayer.contentsGravity = .resizeAspect
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:)") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        imageLayer.frame = bounds
+    }
+
+    func setCGImage(_ image: CGImage?) {
+        imageLayer.contents = image
+    }
 }

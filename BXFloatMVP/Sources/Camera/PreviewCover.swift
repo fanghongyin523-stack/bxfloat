@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import QuartzCore
 import UIKit
 
@@ -8,6 +9,8 @@ enum PreviewCover {
     private static var coverView: UIImageView?
     private static var link: CADisplayLink?
     private static var hostWindow: UIWindow?
+    private static let ci = CIContext(options: [.useSoftwareRenderer: false, .cacheIntermediates: false])
+    private static var lastFrameID: Int64 = -1
 
     static func start(in window: UIWindow?) {
         hostWindow = window
@@ -29,6 +32,7 @@ enum PreviewCover {
         TickTarget.shared.onTick = nil
         coverView?.removeFromSuperview()
         coverView = nil
+        lastFrameID = -1
     }
 
     private static func tick() {
@@ -36,14 +40,22 @@ enum PreviewCover {
             stop()
             return
         }
-        guard let window = hostWindow ?? UIApplication.shared.windows.first(where: { $0.isKeyWindow }) else { return }
-        guard let pb = CamFrameStore.shared.copyLatest() else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = hostWindow
+            ?? scenes.flatMap(\.windows).first(where: { $0.isKeyWindow && !$0.isHidden })
+            ?? scenes.flatMap(\.windows).first(where: { !$0.isHidden })
+        guard let window else { return }
 
         // 已有 sample 回调时，不必盖预览（避免双画面）
         if CameraReplaceHooks.callbackCount > 30, CameraReplaceHooks.paintCount > 0 {
             coverView?.isHidden = true
             return
         }
+
+        let store = CamFrameStore.shared
+        let fid = store.frameCount
+        guard fid != lastFrameID, let pb = store.copyLatest() else { return }
+        lastFrameID = fid
 
         let target = findPreviewHost(in: window) ?? fallbackLargeView(in: window)
         guard let target else { return }
@@ -64,7 +76,10 @@ enum PreviewCover {
             cover = v
         }
         cover.isHidden = false
-        cover.image = UIImage(ciImage: CIImage(cvPixelBuffer: pb))
+        let img = CIImage(cvPixelBuffer: pb)
+        if let cg = ci.createCGImage(img, from: img.extent) {
+            cover.image = UIImage(cgImage: cg)
+        }
         target.bringSubviewToFront(cover)
     }
 

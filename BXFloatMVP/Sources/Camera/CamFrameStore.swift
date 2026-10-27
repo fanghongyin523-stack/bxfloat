@@ -15,6 +15,8 @@ final class CamFrameStore {
     private init() {}
 
     func publish(_ buffer: CVPixelBuffer) {
+        // 只强引用，不做每帧深拷贝（1080p memcpy 本身会造成小窗卡顿）。
+        // VT 未指定 pool 时每帧新 buffer；读侧在锁内 retain 即可。
         lock.lock()
         pixelBuffer = buffer
         width = CVPixelBufferGetWidth(buffer)
