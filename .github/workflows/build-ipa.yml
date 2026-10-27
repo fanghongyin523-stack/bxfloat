@@ -36,7 +36,7 @@ jobs:
           tools/ci-fetch-ffmpeg-ios.sh
           ls -lh BXFloatMVP/Vendor/FFmpeg/lib
           test -f BXFloatMVP/Vendor/FFmpeg/include/libavformat/avformat.h \
-            || test -f BXFloatMVP/Vendor/FFmpeg/include/libavformat/avformat.h
+            || find BXFloatMVP/Vendor/FFmpeg/include -name 'avformat.h' | head -n 1 | grep -q .
 
       - name: Build Inject dylib
         run: |
