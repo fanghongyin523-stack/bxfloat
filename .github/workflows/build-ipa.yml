@@ -12,7 +12,7 @@ on:
 jobs:
   # Inject only on push; app IPA is manual (saves scarce macos runners).
   inject:
-    runs-on: macos-14
+    runs-on: macos-13
     timeout-minutes: 40
     defaults:
       run:
