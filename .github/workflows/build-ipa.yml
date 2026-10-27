@@ -10,9 +10,9 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
-  # Single Mac runner to avoid queueing 3 inject jobs on scarce macos capacity.
+  # Inject only on push; app IPA is manual (saves scarce macos runners).
   inject:
-    runs-on: macos-15
+    runs-on: macos-14
     timeout-minutes: 40
     defaults:
       run:
@@ -80,6 +80,7 @@ jobs:
           if-no-files-found: error
 
   app:
+    if: github.event_name == 'workflow_dispatch'
     needs: []
     runs-on: macos-14
     timeout-minutes: 60
