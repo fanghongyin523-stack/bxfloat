@@ -22,6 +22,8 @@ final class RTSPVTPuller {
     private var sessionId: String?
     private var interleavedChannel = 0
     private var awaitingRTP = false
+    private var videoSetupURL: String = ""
+    private var aggregateURL: String = ""
 
     private init() {}
 
@@ -54,6 +56,8 @@ final class RTSPVTPuller {
         recvBuffer.removeAll(keepingCapacity: true)
         sessionId = nil
         cseq = 1
+        videoSetupURL = ""
+        aggregateURL = ""
     }
 
     private func connectAndPlay(_ urlString: String) {
@@ -95,8 +99,15 @@ final class RTSPVTPuller {
     }
 
     private func handshake(host: String, path: String) {
-        let base = "rtsp://\(host)\(path)"
-        // DESCRIBE
+        // MediaMTX: DESCRIBE aggregate, SETUP video trackID, PLAY aggregate
+        let portSuffix: String
+        if let u = URL(string: currentURL), let p = u.port {
+            portSuffix = ":\(p)"
+        } else {
+            portSuffix = ":18554"
+        }
+        let base = "rtsp://\(host)\(portSuffix)\(path.hasPrefix("/") ? path : "/" + path)"
+        aggregateURL = base
         sendRTSP(
             method: "DESCRIBE",
             url: base,
@@ -108,16 +119,19 @@ final class RTSPVTPuller {
                 self.scheduleReconnect()
                 return
             }
-            self.parseSDP(body)
-            // SETUP interleaved
+            let contentBase = (headers["content-base"] ?? headers["Content-Base"] ?? base)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\r\n "))
+            self.parseSDP(body, contentBase: contentBase, aggregate: base)
+            let setupURL = self.videoSetupURL.isEmpty ? "\(contentBase.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/trackID=0" : self.videoSetupURL
+            NSLog("BXFloatCam SETUP %@", setupURL)
             self.sendRTSP(
                 method: "SETUP",
-                url: base,
+                url: setupURL,
                 extra: ["Transport: RTP/AVP/TCP;unicast;interleaved=0-1"]
             ) { [weak self] status, headers, _ in
                 guard let self, self.running else { return }
                 guard status == 200 else {
-                    NSLog("BXFloatCam SETUP fail %d", status)
+                    NSLog("BXFloatCam SETUP fail %d url=%@", status, setupURL)
                     self.scheduleReconnect()
                     return
                 }
@@ -137,14 +151,15 @@ final class RTSPVTPuller {
                 if let sid = self.sessionId {
                     playExtra.append("Session: \(sid)")
                 }
-                self.sendRTSP(method: "PLAY", url: base, extra: playExtra) { [weak self] status, _, _ in
+                let playURL = self.aggregateURL.isEmpty ? base : self.aggregateURL
+                self.sendRTSP(method: "PLAY", url: playURL, extra: playExtra) { [weak self] status, _, _ in
                     guard let self, self.running else { return }
                     guard status == 200 else {
                         NSLog("BXFloatCam PLAY fail %d", status)
                         self.scheduleReconnect()
                         return
                     }
-                    NSLog("BXFloatCam RTSP playing %@", base)
+                    NSLog("BXFloatCam RTSP playing %@", playURL)
                     self.awaitingRTP = true
                     self.readLoop()
                 }
@@ -152,10 +167,23 @@ final class RTSPVTPuller {
         }
     }
 
-    private func parseSDP(_ sdp: String) {
-        // a=fmtp:... sprop-parameter-sets=Z...,a...
-        for line in sdp.split(whereSeparator: \.isNewline) {
-            let s = String(line)
+    private func parseSDP(_ sdp: String, contentBase: String, aggregate: String) {
+        aggregateURL = aggregate
+        var inVideo = false
+        var videoControl: String?
+        for raw in sdp.split(whereSeparator: \.isNewline) {
+            let s = String(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+            if s.hasPrefix("m=video") {
+                inVideo = true
+                continue
+            }
+            if s.hasPrefix("m=") {
+                inVideo = false
+                continue
+            }
+            if inVideo, s.hasPrefix("a=control:") {
+                videoControl = String(s.dropFirst("a=control:".count))
+            }
             guard s.contains("sprop-parameter-sets=") else { continue }
             guard let range = s.range(of: "sprop-parameter-sets=") else { continue }
             var value = String(s[range.upperBound...])
@@ -169,6 +197,16 @@ final class RTSPVTPuller {
                 pps = ppsData
                 rebuildFormat()
             }
+        }
+        let base = contentBase.hasSuffix("/") ? contentBase : contentBase + "/"
+        if let ctrl = videoControl, !ctrl.isEmpty {
+            if ctrl.lowercased().hasPrefix("rtsp://") {
+                videoSetupURL = ctrl
+            } else {
+                videoSetupURL = base + ctrl
+            }
+        } else {
+            videoSetupURL = base + "trackID=0"
         }
     }
 
