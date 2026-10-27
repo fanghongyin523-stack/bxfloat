@@ -8,8 +8,8 @@ import UIKit
 final class CamPreviewPresenter {
     static let shared = CamPreviewPresenter()
 
-    /// 预览最长边（像素）：FFmpeg 进帧稳定后可略高，兼顾清晰与性能
-    private let maxPreviewEdge: CGFloat = 720
+    /// 预览最长边：盖层+小窗共用；略降减轻 CI，减少「幻灯片」感
+    private let maxPreviewEdge: CGFloat = 640
     private let ci = CIContext(options: [
         .useSoftwareRenderer: false,
         .cacheIntermediates: false,
@@ -45,6 +45,7 @@ final class CamPreviewPresenter {
         if #available(iOS 10.0, *) {
             l.preferredFramesPerSecond = 30
         }
+        // 滚动/面板手势时也别掉帧
         l.add(to: .main, forMode: .common)
         link = l
     }

@@ -96,15 +96,16 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         }
     }
 
-    /// 替换摄像头：只走 PreviewCover 视觉盖层，不包装采集回调（防冻帧）。
+    /// 替换摄像头：独立盖层窗（PreviewCover），不包装采集回调（防冻帧）。
     private func syncReplaceForCurrentSurface() {
         let cfgOn = MediaConfigStore.shared.config.replaceCameraEnabled
         CameraReplaceHooks.applyReplaceMode(cfgOn)
 
-        let scene = UIApplication.shared.connectedScenes
+        let scene = floatWindow?.windowScene
+            ?? UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
-        let host = scene?.windows.first { $0 !== floatWindow && !$0.isHidden }
+        let host = scene?.windows.first { $0 !== floatWindow && !$0.isHidden } ?? floatWindow
 
         if cfgOn {
             PreviewCover.refreshIfNeeded(in: host)
