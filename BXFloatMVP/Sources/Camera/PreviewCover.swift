@@ -2,19 +2,17 @@ import AVFoundation
 import QuartzCore
 import UIKit
 
-/// 点击穿透窗：盖层全屏显示推流，触摸落到下面的抖音。
+/// 点击穿透窗：盖层显示推流，触摸落到下面的抖音。
 private final class BXCoverPassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let view = super.hitTest(point, with: event)
         if view === self || view === rootViewController?.view { return nil }
-        // 盖层本身也不吃触摸
         if view?.tag == 0x42584643 { return nil }
         return view
     }
 }
 
-/// 「替换摄像头」视觉实现：独立 UIWindow 盖在宿主 App 之上、小窗之下。
-/// 不再依赖在抖音视图树里找预览层（经常找不到 → 看起来像没替换）。
+/// 「替换摄像头」：独立窗盖在 App 上。只盖中间预览区，上下左右留白露出抖音按钮。
 enum PreviewCover {
     private static var coverWindow: BXCoverPassthroughWindow?
     private static var imageView: UIImageView?
@@ -41,6 +39,7 @@ enum PreviewCover {
         }
 
         ensureWindow(scene: scene)
+        layoutContentFrame()
 
         if consumer == nil {
             let c = CoverConsumer()
@@ -48,7 +47,6 @@ enum PreviewCover {
             CamPreviewPresenter.shared.addConsumer(c)
         }
 
-        // 已有缓存帧立刻亮起来
         if let cached = CamPreviewPresenter.shared.latestCGImage {
             applyImage(cached)
         }
@@ -60,7 +58,6 @@ enum PreviewCover {
             consumer = nil
         }
         coverWindow?.isHidden = true
-        imageView?.image = nil
         imageView?.layer.contents = nil
         hasFrame = false
         loggedAttach = false
@@ -74,10 +71,27 @@ enum PreviewCover {
         }
     }
 
+    /// 中间预览带：避开顶栏 / 底栏按钮 / 右侧工具条。
+    private static func previewRect(in bounds: CGRect) -> CGRect {
+        let top = max(bounds.height * 0.11, 88)
+        let bottom = max(bounds.height * 0.30, 230)
+        let right = max(bounds.width * 0.14, 52)
+        let left: CGFloat = 0
+        let h = max(bounds.height - top - bottom, 120)
+        let w = max(bounds.width - left - right, 120)
+        return CGRect(x: left, y: top, width: w, height: h)
+    }
+
+    private static func layoutContentFrame() {
+        guard let w = coverWindow, let iv = imageView else { return }
+        w.frame = w.windowScene?.coordinateSpace.bounds ?? w.frame
+        iv.frame = previewRect(in: w.bounds)
+    }
+
     private static func ensureWindow(scene: UIWindowScene) {
         if let w = coverWindow, w.windowScene === scene {
             w.frame = scene.coordinateSpace.bounds
-            imageView?.frame = w.bounds
+            layoutContentFrame()
             if hasFrame { w.isHidden = false }
             return
         }
@@ -89,15 +103,13 @@ enum PreviewCover {
 
         let w = BXCoverPassthroughWindow(windowScene: scene)
         w.frame = scene.coordinateSpace.bounds
-        // 低于小窗(statusBar+200)，高于普通 App 窗
         w.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 120)
         w.backgroundColor = .clear
-        w.isUserInteractionEnabled = true // hitTest 会穿透
+        w.isUserInteractionEnabled = true
 
         let root = UIViewController()
         root.view.backgroundColor = .clear
-        let iv = UIImageView(frame: w.bounds)
-        iv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        let iv = UIImageView(frame: previewRect(in: w.bounds))
         iv.contentMode = .scaleAspectFill
         iv.clipsToBounds = true
         iv.backgroundColor = .clear
@@ -113,18 +125,17 @@ enum PreviewCover {
 
         if !loggedAttach {
             loggedAttach = true
+            let r = iv.frame
             NSLog(
-                "BXFloatCam PreviewCover window ready level=%.0f size=%.0fx%.0f",
-                w.windowLevel.rawValue,
-                w.bounds.width,
-                w.bounds.height
+                "BXFloatCam PreviewCover inset frame=(%.0f,%.0f,%.0fx%.0f)",
+                r.origin.x, r.origin.y, r.width, r.height
             )
         }
     }
 
     fileprivate static func applyImage(_ image: CGImage) {
         guard let iv = imageView, let w = coverWindow else { return }
-        // 用 layer.contents 少一层 UIImage 开销
+        layoutContentFrame()
         iv.layer.contents = image
         iv.layer.contentsGravity = .resizeAspectFill
         if !hasFrame {

@@ -14,6 +14,7 @@
 		A10000000000000000000005 /* AVStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* AVStreamPlayer.swift */; };
 		A1000000000000000000000C /* VLCStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* VLCStreamPlayer.swift */; };
 		A10000000000000000000006 /* FloatingOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* FloatingOverlayView.swift */; };
+		A1000000000000000000001A /* FloatingBubbleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000034 /* FloatingBubbleView.swift */; };
 		A10000000000000000000007 /* FloatingOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* FloatingOverlayController.swift */; };
 		A10000000000000000000008 /* HomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* HomeViewController.swift */; };
 		A1000000000000000000000D /* USBStreamBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* USBStreamBridge.swift */; };
@@ -23,6 +24,7 @@
 		B10000000000000000000003 /* AVStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* AVStreamPlayer.swift */; };
 		B1000000000000000000000C /* VLCStreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* VLCStreamPlayer.swift */; };
 		B10000000000000000000004 /* FloatingOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* FloatingOverlayView.swift */; };
+		B1000000000000000000001D /* FloatingBubbleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000034 /* FloatingBubbleView.swift */; };
 		B10000000000000000000005 /* FloatingOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* FloatingOverlayController.swift */; };
 		B10000000000000000000006 /* BXInjectBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BXInjectBootstrap.swift */; };
 		B1000000000000000000000B /* USBStreamBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* USBStreamBridge.swift */; };
@@ -72,6 +74,7 @@
 		A20000000000000000000005 /* AVStreamPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVStreamPlayer.swift; sourceTree = "<group>"; };
 		A20000000000000000000017 /* VLCStreamPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VLCStreamPlayer.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* FloatingOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingOverlayView.swift; sourceTree = "<group>"; };
+		A20000000000000000000034 /* FloatingBubbleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingBubbleView.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* FloatingOverlayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingOverlayController.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* HomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewController.swift; sourceTree = "<group>"; };
 		A20000000000000000000018 /* USBStreamBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBStreamBridge.swift; sourceTree = "<group>"; };
@@ -246,6 +249,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000006 /* FloatingOverlayView.swift */,
+				A20000000000000000000034 /* FloatingBubbleView.swift */,
 				A20000000000000000000007 /* FloatingOverlayController.swift */,
 				A20000000000000000000021 /* CamSettingsPanel.swift */,
 			);
@@ -413,6 +417,7 @@
 				A10000000000000000000018 /* CamFramePublish.swift in Sources */,
 				A10000000000000000000019 /* FFRTSPController.swift in Sources */,
 				A10000000000000000000006 /* FloatingOverlayView.swift in Sources */,
+				A1000000000000000000001A /* FloatingBubbleView.swift in Sources */,
 				A10000000000000000000007 /* FloatingOverlayController.swift in Sources */,
 				A10000000000000000000012 /* CamSettingsPanel.swift in Sources */,
 				A1000000000000000000000E /* CamFrameStore.swift in Sources */,
@@ -439,6 +444,7 @@
 				B1000000000000000000001B /* CamFramePublish.swift in Sources */,
 				B1000000000000000000001C /* FFRTSPController.swift in Sources */,
 				B10000000000000000000004 /* FloatingOverlayView.swift in Sources */,
+				B1000000000000000000001D /* FloatingBubbleView.swift in Sources */,
 				B10000000000000000000005 /* FloatingOverlayController.swift in Sources */,
 				B10000000000000000000015 /* CamSettingsPanel.swift in Sources */,
 				B10000000000000000000011 /* CamFrameStore.swift in Sources */,

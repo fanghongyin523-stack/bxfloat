@@ -93,7 +93,7 @@ final class CamSettingsPanel: UIView {
         replaceSwitch.addTarget(self, action: #selector(replaceChanged), for: .valueChanged)
         replaceSwitch.onTintColor = UIColor(red: 0.2, green: 0.75, blue: 0.35, alpha: 1)
 
-        collapseButton.setTitle("收起设置 · 回到小窗", for: .normal)
+        collapseButton.setTitle("收起设置 · 回到悬浮球", for: .normal)
         collapseButton.setTitleColor(UIColor(red: 0.2, green: 0.75, blue: 0.35, alpha: 1), for: .normal)
         collapseButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
         collapseButton.addTarget(self, action: #selector(collapseTapped), for: .touchUpInside)
