@@ -58,6 +58,7 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         if !config.overlayEnabled {
             USBStreamBridge.shared.stop()
             RTSPVTPuller.shared.stop()
+            PreviewCover.stop()
             player?.stop()
             player = nil
             loadedURL = nil
@@ -92,6 +93,12 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
             hostWindow.bringSubviewToFront(settingsPanel ?? overlay)
         }
 
+        if config.replaceCameraEnabled {
+            PreviewCover.start(in: hostWindow)
+        } else {
+            PreviewCover.stop()
+        }
+
         let url = config.resolvedPlaybackURL()
         let needReload = loadedURL != url || player == nil
         if needReload {
@@ -108,6 +115,12 @@ final class FloatingOverlayController: FloatingOverlayViewDelegate, CamSettingsP
         } else if let player {
             player.isMuted = config.muted
             overlay.setPlaying(player.isPlaying)
+            // 替换开关变化时也确保 RTSP 在拉
+            if config.connectionMode == .lan, !url.isEmpty, url.hasPrefix("rtsp://") {
+                #if !canImport(MobileVLCKit)
+                RTSPVTPuller.shared.start(urlString: url)
+                #endif
+            }
         }
     }
 

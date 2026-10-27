@@ -181,7 +181,7 @@ final class CamSettingsPanel: UIView {
             store.frameCount == 0
                 ? "若收帧=0：检查电脑 MediaMTX/OBS 与 IP"
                 : (CameraReplaceHooks.callbackCount == 0
-                    ? "有收帧但无摄像头回调：请进入抖音拍摄页后再开替换"
+                    ? "回调=0：请点「试播」或进入拍摄页；已开预览层兜底"
                     : (CameraReplaceHooks.paintCount == 0 && replaceOn
                         ? "有回调但未写入：正在重试格式适配"
                         : "运行中")),

@@ -24,6 +24,11 @@ final class RTSPVTPuller {
     private var awaitingRTP = false
     private var videoSetupURL: String = ""
     private var aggregateURL: String = ""
+    private var lastSPS: Data?
+    private var lastPPS: Data?
+    private var ptsTicks: Int64 = 0
+    private var decodeOK: Int64 = 0
+    private var decodeFail: Int64 = 0
 
     private init() {}
 
@@ -58,6 +63,12 @@ final class RTSPVTPuller {
         cseq = 1
         videoSetupURL = ""
         aggregateURL = ""
+        lastSPS = nil
+        lastPPS = nil
+        ptsTicks = 0
+        decodeOK = 0
+        decodeFail = 0
+        fuBuffer.removeAll(keepingCapacity: false)
     }
 
     private func connectAndPlay(_ urlString: String) {
@@ -212,6 +223,12 @@ final class RTSPVTPuller {
 
     private func rebuildFormat() {
         guard let sps, let pps else { return }
+        // 关键：码流里反复出现 SPS/PPS 时不要重建 VT，否则参考帧丢失 → 只剩关键帧（幻灯片）
+        if sps == lastSPS, pps == lastPPS, decompressionSession != nil, formatDesc != nil {
+            return
+        }
+        lastSPS = sps
+        lastPPS = pps
         sps.withUnsafeBytes { spsRaw in
             pps.withUnsafeBytes { ppsRaw in
                 guard let spsPtr = spsRaw.bindMemory(to: UInt8.self).baseAddress,
@@ -236,6 +253,7 @@ final class RTSPVTPuller {
                 if status == noErr, let desc {
                     self.formatDesc = desc
                     self.createDecompression(desc)
+                    NSLog("BXFloatCam VT session ready sps=%d pps=%d", sps.count, pps.count)
                 } else {
                     NSLog("BXFloatCam format desc err %d", status)
                 }
@@ -249,11 +267,20 @@ final class RTSPVTPuller {
         }
         var session: VTDecompressionSession?
         var callback = VTDecompressionOutputCallbackRecord(
-            decompressionOutputCallback: { _, _, status, _, imageBuffer, _, _ in
-                guard status == noErr, let imageBuffer else { return }
-                CamFrameStore.shared.publish(imageBuffer)
+            decompressionOutputCallback: { refcon, _, status, _, imageBuffer, _, _ in
+                guard let refcon else { return }
+                let puller = Unmanaged<RTSPVTPuller>.fromOpaque(refcon).takeUnretainedValue()
+                if status == noErr, let imageBuffer {
+                    puller.decodeOK += 1
+                    CamFrameStore.shared.publish(imageBuffer)
+                } else {
+                    puller.decodeFail += 1
+                    if puller.decodeFail <= 5 || puller.decodeFail % 60 == 0 {
+                        NSLog("BXFloatCam VT decode status=%d fail=%lld ok=%lld", status, puller.decodeFail, puller.decodeOK)
+                    }
+                }
             },
-            decompressionOutputRefCon: nil
+            decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
         let err = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -386,6 +413,7 @@ final class RTSPVTPuller {
         guard packet.count > 12 else { return }
         let cc = Int(packet[0] & 0x0F)
         let hasExt = (packet[0] & 0x10) != 0
+        let hasPadding = (packet[0] & 0x20) != 0
         var offset = 12 + cc * 4
         guard packet.count > offset else { return }
         if hasExt {
@@ -393,36 +421,58 @@ final class RTSPVTPuller {
             let extLen = ((Int(packet[offset + 2]) << 8) | Int(packet[offset + 3])) * 4
             offset += 4 + extLen
         }
-        guard packet.count > offset else { return }
-        let payload = packet.subdata(in: offset..<packet.count)
-        // H264 NAL — FU-A or single
+        var end = packet.count
+        if hasPadding, end > offset {
+            let pad = Int(packet[end - 1])
+            if pad > 0, end - pad >= offset { end -= pad }
+        }
+        guard end > offset else { return }
+        let payload = packet.subdata(in: offset..<end)
         guard !payload.isEmpty else { return }
         let nalType = payload[0] & 0x1F
         if nalType == 28, payload.count > 1 {
             // FU-A
             let fuHeader = payload[1]
             let start = (fuHeader & 0x80) != 0
-            let end = (fuHeader & 0x40) != 0
+            let endBit = (fuHeader & 0x40) != 0
             let type = fuHeader & 0x1F
             let nri = payload[0] & 0x60
             if start {
                 fuBuffer = Data([nri | type])
                 fuBuffer.append(payload.subdata(in: 2..<payload.count))
-            } else {
+            } else if !fuBuffer.isEmpty {
                 fuBuffer.append(payload.subdata(in: 2..<payload.count))
             }
-            if end, !fuBuffer.isEmpty {
+            if endBit, !fuBuffer.isEmpty {
                 decodeNAL(fuBuffer)
                 fuBuffer.removeAll(keepingCapacity: true)
             }
-        } else if nalType == 7 {
-            sps = payload
+        } else if nalType == 24 {
+            // STAP-A: 16-bit size + NAL ...
+            var i = 1
+            while i + 2 <= payload.count {
+                let size = (Int(payload[i]) << 8) | Int(payload[i + 1])
+                i += 2
+                guard size > 0, i + size <= payload.count else { break }
+                handleNALUnit(payload.subdata(in: i..<(i + size)))
+                i += size
+            }
+        } else {
+            handleNALUnit(payload)
+        }
+    }
+
+    private func handleNALUnit(_ nal: Data) {
+        guard !nal.isEmpty else { return }
+        let nalType = nal[0] & 0x1F
+        if nalType == 7 {
+            sps = nal
             rebuildFormat()
         } else if nalType == 8 {
-            pps = payload
+            pps = nal
             rebuildFormat()
-        } else if nalType > 0 && nalType < 24 {
-            decodeNAL(payload)
+        } else if nalType == 5 || nalType == 1 || (nalType > 0 && nalType < 24) {
+            decodeNAL(nal)
         }
     }
 
@@ -430,56 +480,66 @@ final class RTSPVTPuller {
 
     private func decodeNAL(_ nal: Data) {
         guard let formatDesc, let session = decompressionSession else { return }
-        // AVCC length-prefixed
         var len = UInt32(nal.count).bigEndian
-        var packet = Data(bytes: &len, count: 4)
-        packet.append(nal)
-        packet.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
+        var avcc = Data(bytes: &len, count: 4)
+        avcc.append(nal)
+
+        let blockStatus: OSStatus = avcc.withUnsafeBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return -1 }
             var block: CMBlockBuffer?
-            guard CMBlockBufferCreateWithMemoryBlock(
+            var status = CMBlockBufferCreateWithMemoryBlock(
                 allocator: kCFAllocatorDefault,
                 memoryBlock: nil,
-                blockLength: packet.count,
+                blockLength: avcc.count,
                 blockAllocator: kCFAllocatorDefault,
                 customBlockSource: nil,
                 offsetToData: 0,
-                dataLength: packet.count,
+                dataLength: avcc.count,
                 flags: 0,
                 blockBufferOut: &block
-            ) == noErr,
-                let block
-            else { return }
-            CMBlockBufferReplaceDataBytes(
+            )
+            guard status == noErr, let block else { return status }
+            status = CMBlockBufferReplaceDataBytes(
                 with: base,
                 blockBuffer: block,
                 offsetIntoDestination: 0,
-                dataLength: packet.count
+                dataLength: avcc.count
             )
+            guard status == noErr else { return status }
+
+            ptsTicks += 3000 // 90kHz clock ~30fps
+            var timing = CMSampleTimingInfo(
+                duration: CMTime(value: 3000, timescale: 90000),
+                presentationTimeStamp: CMTime(value: ptsTicks, timescale: 90000),
+                decodeTimeStamp: .invalid
+            )
+            var sampleSize = avcc.count
             var sample: CMSampleBuffer?
-            var size = packet.count
-            guard CMSampleBufferCreateReady(
+            status = CMSampleBufferCreateReady(
                 allocator: kCFAllocatorDefault,
                 dataBuffer: block,
                 formatDescription: formatDesc,
                 sampleCount: 1,
-                sampleTimingEntryCount: 0,
-                sampleTimingArray: nil,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timing,
                 sampleSizeEntryCount: 1,
-                sampleSizeArray: &size,
+                sampleSizeArray: &sampleSize,
                 sampleBufferOut: &sample
-            ) == noErr,
-                let sample
-            else { return }
+            )
+            guard status == noErr, let sample else { return status }
 
             var flagsOut: VTDecodeInfoFlags = []
-            VTDecompressionSessionDecodeFrame(
+            // 实时优先，避免异步堆积造成幻灯片感
+            return VTDecompressionSessionDecodeFrame(
                 session,
                 sampleBuffer: sample,
                 flags: [._EnableAsynchronousDecompression],
                 frameRefcon: nil,
                 infoFlagsOut: &flagsOut
             )
+        }
+        if blockStatus != noErr, decodeFail < 8 {
+            NSLog("BXFloatCam decodeNAL prep/decode err %d", blockStatus)
         }
     }
 }
