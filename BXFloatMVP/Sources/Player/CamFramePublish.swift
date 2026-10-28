@@ -25,21 +25,29 @@ public func BXFloatPublishAudioPCM(
     )
 }
 
-/// AudioUnit / AudioQueue 钩子：按目标格式写入推流 PCM 或静音。mode 1=推流 2=静音
-@_cdecl("BXFloatMicPaintRaw")
-public func BXFloatMicPaintRaw(
+/// AudioUnit 钩子：按帧数写入推流 PCM / 静音。mode 1=推流 2=静音
+/// bytesPerSample: 2=Int16, 4=Float32（iOS 麦几乎都是 Float32）
+@_cdecl("BXFloatMicPaintFrames")
+public func BXFloatMicPaintFrames(
     _ dst: UnsafeMutableRawPointer,
-    _ byteCount: Int32,
-    _ sampleRate: Double,
+    _ frames: Int32,
     _ channels: Int32,
-    _ bitsPerChannel: Int32,
+    _ sampleRate: Double,
+    _ bytesPerSample: Int32,
     _ isFloat: Int32,
     _ mode: Int32
 ) {
-    let n = Int(byteCount)
-    guard n > 0 else { return }
+    let f = Int(frames)
+    let ch = max(1, Int(channels))
+    var bps = Int(bytesPerSample)
+    let floatMode = isFloat != 0
+    if floatMode, bps < 4 { bps = 4 }
+    if !floatMode, bps != 2, bps != 4 { bps = 2 }
+    guard f > 0, bps > 0 else { return }
+
+    let byteCount = f * ch * bps
     if mode == 2 {
-        CamAudioStore.silence(into: dst, byteCount: n)
+        CamAudioStore.silence(into: dst, byteCount: byteCount)
         return
     }
     guard mode == 1 else { return }
@@ -47,19 +55,20 @@ public func BXFloatMicPaintRaw(
     var asbd = AudioStreamBasicDescription()
     asbd.mSampleRate = sampleRate > 0 ? sampleRate : 48000
     asbd.mFormatID = kAudioFormatLinearPCM
-    asbd.mFormatFlags = isFloat != 0
+    asbd.mFormatFlags = floatMode
         ? (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked)
         : (kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked)
-    asbd.mBitsPerChannel = UInt32(max(8, bitsPerChannel))
-    asbd.mChannelsPerFrame = UInt32(max(1, channels))
-    asbd.mBytesPerFrame = (asbd.mBitsPerChannel / 8) * asbd.mChannelsPerFrame
+    asbd.mBitsPerChannel = UInt32(bps * 8)
+    asbd.mChannelsPerFrame = UInt32(ch)
+    asbd.mBytesPerFrame = UInt32(bps * ch)
     asbd.mFramesPerPacket = 1
     asbd.mBytesPerPacket = asbd.mBytesPerFrame
 
     if CamAudioStore.shared.hasFreshAudio {
-        _ = CamAudioStore.shared.fill(into: dst, byteCount: n, asbd: asbd)
+        if !CamAudioStore.shared.fill(into: dst, byteCount: byteCount, asbd: asbd) {
+            CamAudioStore.silence(into: dst, byteCount: byteCount)
+        }
     } else {
-        // 推流模式但暂无 PCM：静音，避免漏出原麦
-        CamAudioStore.silence(into: dst, byteCount: n)
+        CamAudioStore.silence(into: dst, byteCount: byteCount)
     }
 }

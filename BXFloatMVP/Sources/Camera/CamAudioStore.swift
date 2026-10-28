@@ -92,18 +92,37 @@ final class CamAudioStore {
             played = resampleLinear(Array(src.prefix(got)), from: storeRate, to: dstRate)
         }
 
-        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        var isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        // 防电流声：声明 float 却按 16bit 写
+        var sampleBytes = bytesPerSample
+        if isFloat, sampleBytes < 4 {
+            sampleBytes = 4
+        }
+        if !isFloat, sampleBytes == 4, (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) == 0 {
+            // 未标 integer 的 4 字节，按 float 处理（RemoteIO 常见）
+            isFloat = true
+        }
         let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
 
+        // 用实际 sampleBytes 重算帧数，避免 bpf 算错
+        let realFrameBytes = sampleBytes * channels
+        let realFrames = realFrameBytes > 0 ? byteCount / realFrameBytes : frames
+
         if isNonInterleaved {
-            // 少见：逐平面写同一 mono
-            let planeBytes = frames * bytesPerSample
+            let planeBytes = realFrames * sampleBytes
             for c in 0..<channels {
                 let plane = dst.advanced(by: c * planeBytes)
-                writePlane(plane, frames: frames, samples: played, isFloat: isFloat, bytesPerSample: bytesPerSample)
+                writePlane(plane, frames: realFrames, samples: played, isFloat: isFloat, bytesPerSample: sampleBytes)
             }
         } else {
-            writeInterleaved(dst, frames: frames, channels: channels, samples: played, isFloat: isFloat, bytesPerSample: bytesPerSample)
+            writeInterleaved(
+                dst,
+                frames: realFrames,
+                channels: channels,
+                samples: played,
+                isFloat: isFloat,
+                bytesPerSample: sampleBytes
+            )
         }
         return true
     }
