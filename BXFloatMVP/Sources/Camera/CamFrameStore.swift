@@ -1,7 +1,7 @@
 import CoreVideo
 import Foundation
 
-/// 带 PTS 的短历史帧：按 AVSyncClock.mediaTime 取最近画面，保证和声音同一时间轴。
+/// 带 PTS 的短历史（约 3 秒），按 AVSyncClock.mediaTime 取帧。
 final class CamFrameStore {
     static let shared = CamFrameStore()
 
@@ -12,7 +12,8 @@ final class CamFrameStore {
 
     private let lock = NSLock()
     private var frames: [TimedFrame] = []
-    private let maxFrames = 24 // ~0.8s @30fps
+    /// ~3s @30fps
+    private let maxFrames = 90
     private(set) var width: Int = 0
     private(set) var height: Int = 0
     private(set) var frameCount: Int64 = 0
@@ -22,9 +23,9 @@ final class CamFrameStore {
     private init() {}
 
     func publish(_ buffer: CVPixelBuffer, pts: Double = -1) {
-        let p = pts.isFinite ? pts : -1
+        let mapped = pts >= 0 ? AVSyncClock.shared.mapPTS(pts) : -1
         lock.lock()
-        frames.append(TimedFrame(buffer: buffer, pts: p))
+        frames.append(TimedFrame(buffer: buffer, pts: mapped))
         if frames.count > maxFrames {
             frames.removeFirst(frames.count - maxFrames)
         }
@@ -32,14 +33,14 @@ final class CamFrameStore {
         height = CVPixelBufferGetHeight(buffer)
         frameCount += 1
         lastUpdate = Date()
-        lastPTS = p
+        lastPTS = mapped
         lock.unlock()
-        if p >= 0 {
-            AVSyncClock.shared.noteVideoPTS(p)
+        if mapped >= 0 {
+            AVSyncClock.shared.noteVideoPTS(mapped)
         }
     }
 
-    /// 取最接近 mediaTime 的帧（优先 pts <= t）。
+    /// 取 pts ≤ t 的最近帧；没有则取最早一帧（仍是推流，绝不回退真机）。
     func copyForMediaTime(_ t: Double) -> CVPixelBuffer? {
         lock.lock()
         defer { lock.unlock() }
@@ -47,23 +48,18 @@ final class CamFrameStore {
         if t < 0 || frames.allSatisfy({ $0.pts < 0 }) {
             return frames.last?.buffer
         }
-        var best = frames[0]
-        var bestScore = Double.greatestFiniteMagnitude
-        for f in frames {
-            guard f.pts >= 0 else { continue }
+        var best: TimedFrame?
+        var bestLag = Double.greatestFiniteMagnitude
+        for f in frames where f.pts >= 0 {
             let lag = t - f.pts
-            let score: Double
-            if lag >= 0 {
-                score = lag // 已到达的帧，越近越好
-            } else {
-                score = -lag + 0.05 // 略罚超前
-            }
-            if score < bestScore {
-                bestScore = score
+            if lag >= 0, lag < bestLag {
+                bestLag = lag
                 best = f
             }
         }
-        return best.buffer
+        if let best { return best.buffer }
+        // t 还早于所有帧：用最早一帧
+        return frames.first(where: { $0.pts >= 0 })?.buffer ?? frames.first?.buffer
     }
 
     func copyLatest() -> CVPixelBuffer? {
@@ -82,6 +78,7 @@ final class CamFrameStore {
         lock.lock()
         frames.removeAll(keepingCapacity: true)
         lastPTS = -1
+        frameCount = 0
         lock.unlock()
         AVSyncClock.shared.reset()
     }

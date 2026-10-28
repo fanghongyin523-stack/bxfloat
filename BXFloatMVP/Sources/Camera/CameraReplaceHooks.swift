@@ -310,13 +310,42 @@ enum CamBufferPainter {
             NSLog("BXFloatCam paint dstFormat=%u %dx%d (memcpy-only)", fmt, dw, dh)
         }
 
-        guard let prepared = CamFrameBlitter.shared.copyPrepared(
+        if let prepared = CamFrameBlitter.shared.copyPrepared(
             width: dw, height: dh, format: fmt
-        ) else {
-            // 预渲染未就绪：透传真机帧，保持画面在动
-            return false
+        ) {
+            return copyPixels(from: prepared, to: dst)
         }
-        return copyPixels(from: prepared, to: dst)
+
+        // 预渲染未就绪：绝不能透传真机（会闪回原镜头）。
+        // 1) 同格式直接拷推流帧  2) 否则涂黑占位
+        let t = AVSyncClock.shared.mediaTime()
+        if let src = CamFrameStore.shared.copyForMediaTime(t) ?? CamFrameStore.shared.copyLatest(),
+           CVPixelBufferGetWidth(src) == dw,
+           CVPixelBufferGetHeight(src) == dh,
+           CVPixelBufferGetPixelFormatType(src) == fmt
+        {
+            return copyPixels(from: src, to: dst)
+        }
+        return fillBlack(dst)
+    }
+
+    private static func fillBlack(_ dst: CVPixelBuffer) -> Bool {
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer { CVPixelBufferUnlockBaseAddress(dst, []) }
+        let planes = CVPixelBufferGetPlaneCount(dst)
+        if planes == 0 {
+            guard let base = CVPixelBufferGetBaseAddress(dst) else { return false }
+            memset(base, 0, CVPixelBufferGetBytesPerRow(dst) * CVPixelBufferGetHeight(dst))
+            return true
+        }
+        for p in 0..<planes {
+            guard let base = CVPixelBufferGetBaseAddressOfPlane(dst, p) else { return false }
+            let rows = CVPixelBufferGetHeightOfPlane(dst, p)
+            let row = CVPixelBufferGetBytesPerRowOfPlane(dst, p)
+            let fill: UInt8 = (p == 0) ? 0 : 128 // Y=0, UV=128 → 黑
+            memset(base, Int32(fill), row * rows)
+        }
+        return true
     }
 
     private static func copyPixels(from src: CVPixelBuffer, to dst: CVPixelBuffer) -> Bool {

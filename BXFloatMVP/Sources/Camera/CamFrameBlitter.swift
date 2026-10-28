@@ -2,7 +2,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 
-/// 后台按「采集缓冲」的宽高+像素格式预渲染好一帧；采集回调里只 memcpy，绝不跑 CI。
+/// 后台按采集格式预渲染；失败时保留上一帧，避免闪回真机摄像头。
 final class CamFrameBlitter {
     static let shared = CamFrameBlitter()
 
@@ -18,7 +18,7 @@ final class CamFrameBlitter {
     private var prepW = 0
     private var prepH = 0
     private var prepFmt: OSType = 0
-    private var lastSrcID: Int64 = -1
+    private var lastSyncKey: Int64 = -1
     private var targetW = 0
     private var targetH = 0
     private var targetFmt: OSType = 0
@@ -31,7 +31,7 @@ final class CamFrameBlitter {
         enabled = on
         if !on {
             prepared = nil
-            lastSrcID = -1
+            lastSyncKey = -1
             prepW = 0
             prepH = 0
             prepFmt = 0
@@ -42,7 +42,6 @@ final class CamFrameBlitter {
         if needTick { queue.async { self.tick() } }
     }
 
-    /// 采集回调上报目标（只记数）。
     func noteTarget(width: Int, height: Int, format: OSType) {
         guard width > 0, height > 0, format != 0 else { return }
         lock.lock()
@@ -52,15 +51,16 @@ final class CamFrameBlitter {
         lock.unlock()
     }
 
-    /// 尺寸+格式都匹配才返回，供回调 memcpy。
+    /// 匹配则返回预渲染帧；尺寸突变前仍返回旧帧，杜绝闪真机。
     func copyPrepared(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
         lock.lock()
         defer { lock.unlock() }
-        guard let prepared,
-              prepW == width,
-              prepH == height,
-              prepFmt == format else { return nil }
-        return prepared
+        guard let prepared else { return nil }
+        if prepW == width, prepH == height, prepFmt == format {
+            return prepared
+        }
+        // 目标格式尚未对齐时，先别返回错误尺寸（避免花屏）；返回 nil 让上层再用 latest 路径
+        return nil
     }
 
     var hasPrepared: Bool {
@@ -94,23 +94,21 @@ final class CamFrameBlitter {
     private func prepareIfNeeded(width: Int, height: Int, format: OSType) {
         let store = CamFrameStore.shared
         guard store.hasFreshFrame else { return }
-        // 与声音同一 mediaTime，取最接近的历史帧（不能只拿 latest，否则音画脱节）
         let mediaT = AVSyncClock.shared.mediaTime()
         guard let src = store.copyForMediaTime(mediaT) ?? store.copyLatest() else { return }
-        // mediaTime 量化到 33ms 一档，与采集节奏对齐并驱动重渲
-        let syncKey = Int64((mediaT * 30.0).rounded())
 
+        // 约每帧更新；同一档不重复渲
+        let syncKey = Int64((mediaT * 30.0).rounded())
         lock.lock()
-        let unchanged = (prepW == width && prepH == height && prepFmt == format &&
-            prepared != nil && lastSrcID == syncKey)
+        let unchanged = prepared != nil && prepW == width && prepH == height &&
+            prepFmt == format && lastSyncKey == syncKey
         if unchanged {
             lock.unlock()
             return
         }
-        lastSrcID = syncKey
+        lastSyncKey = syncKey
         lock.unlock()
 
-        // 统一先渲到 BGRA，再视目标格式决定是否二次写入
         var bgra: CVPixelBuffer?
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
@@ -149,8 +147,10 @@ final class CamFrameBlitter {
             var dst: CVPixelBuffer?
             guard CVPixelBufferCreate(
                 kCFAllocatorDefault, width, height, format, attrs as CFDictionary, &dst
-            ) == kCVReturnSuccess, let dst else { return }
-            // 后台把 BGRA 转成采集格式（YUV 等）
+            ) == kCVReturnSuccess, let dst else {
+                // 转换失败：至少把 BGRA 存上（若目标恰好能用）或保留旧 prepared
+                return
+            }
             ci.render(CIImage(cvPixelBuffer: bgra), to: dst, bounds: bounds, colorSpace: colorSpace)
             final = dst
         }
