@@ -268,14 +268,12 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         CameraReplaceHooks.noteCallback()
+        // 替换开启时每一帧都必须盖掉真机像素；跳过 = 闪回原摄像头（实测键盘/桌面）。
         if CameraReplaceHooks.isReplaceActive() {
-            // 没素材时不算「写入失败」，避免收帧=0 时失败数狂涨误导排查
-            if CamFrameStore.shared.hasFreshFrame {
-                if CamBufferPainter.paintInPlace(sampleBuffer) {
-                    CameraReplaceHooks.notePaintOK()
-                } else {
-                    CameraReplaceHooks.notePaintFail()
-                }
+            if CamBufferPainter.paintInPlace(sampleBuffer) {
+                CameraReplaceHooks.notePaintOK()
+            } else {
+                CameraReplaceHooks.notePaintFail()
             }
         }
         BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
@@ -292,8 +290,14 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
 }
 
 /// 采集回调专用：只拷贝像素，禁止 CI。
+/// 失败时用上一成功帧或涂黑，绝不把真机画面交给下游。
 enum CamBufferPainter {
     private static var loggedFormat = false
+    private static let lock = NSLock()
+    private static var lastGood: CVPixelBuffer?
+    private static var lastGoodW = 0
+    private static var lastGoodH = 0
+    private static var lastGoodFmt: OSType = 0
 
     @discardableResult
     static func paintInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
@@ -312,21 +316,50 @@ enum CamBufferPainter {
 
         if let prepared = CamFrameBlitter.shared.copyPrepared(
             width: dw, height: dh, format: fmt
-        ) {
-            return copyPixels(from: prepared, to: dst)
+        ), copyPixels(from: prepared, to: dst) {
+            rememberGood(prepared, width: dw, height: dh, format: fmt)
+            return true
         }
 
-        // 预渲染未就绪：绝不能透传真机（会闪回原镜头）。
-        // 1) 同格式直接拷推流帧  2) 否则涂黑占位
+        // 预渲染未就绪 / 拷贝失败：同格式推流帧 → 上一成功帧 → 涂黑。绝不能透传真机。
         let t = AVSyncClock.shared.mediaTime()
         if let src = CamFrameStore.shared.copyForMediaTime(t) ?? CamFrameStore.shared.copyLatest(),
            CVPixelBufferGetWidth(src) == dw,
            CVPixelBufferGetHeight(src) == dh,
-           CVPixelBufferGetPixelFormatType(src) == fmt
+           CVPixelBufferGetPixelFormatType(src) == fmt,
+           copyPixels(from: src, to: dst)
         {
-            return copyPixels(from: src, to: dst)
+            rememberGood(src, width: dw, height: dh, format: fmt)
+            return true
         }
+
+        if let good = copyLastGood(width: dw, height: dh, format: fmt),
+           copyPixels(from: good, to: dst)
+        {
+            return true
+        }
+
         return fillBlack(dst)
+    }
+
+    private static func rememberGood(_ buf: CVPixelBuffer, width: Int, height: Int, format: OSType) {
+        lock.lock()
+        lastGood = buf
+        lastGoodW = width
+        lastGoodH = height
+        lastGoodFmt = format
+        lock.unlock()
+    }
+
+    private static func copyLastGood(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let lastGood,
+              lastGoodW == width,
+              lastGoodH == height,
+              lastGoodFmt == format
+        else { return nil }
+        return lastGood
     }
 
     private static func fillBlack(_ dst: CVPixelBuffer) -> Bool {
@@ -352,6 +385,10 @@ enum CamBufferPainter {
         let planes = CVPixelBufferGetPlaneCount(src)
         let dstPlanes = CVPixelBufferGetPlaneCount(dst)
         guard planes == dstPlanes else { return false }
+        guard CVPixelBufferGetWidth(src) == CVPixelBufferGetWidth(dst),
+              CVPixelBufferGetHeight(src) == CVPixelBufferGetHeight(dst),
+              CVPixelBufferGetPixelFormatType(src) == CVPixelBufferGetPixelFormatType(dst)
+        else { return false }
 
         CVPixelBufferLockBaseAddress(src, .readOnly)
         CVPixelBufferLockBaseAddress(dst, [])
