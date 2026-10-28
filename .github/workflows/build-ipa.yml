@@ -10,13 +10,9 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
-  # 单机构建：三机矩阵会挤爆排队、15 分钟未开跑就被取消。
+  # 单机：矩阵会互相抢配额，排队超 ~15 分钟就被取消。
   inject:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, macos-13]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     timeout-minutes: 40
     defaults:
       run:
@@ -79,7 +75,7 @@ jobs:
       - name: Upload Inject dylib
         uses: actions/upload-artifact@v4
         with:
-          name: BXFloatInject-dylib-${{ matrix.os }}
+          name: BXFloatInject-dylib
           path: dist/BXFloatInject.dylib
           if-no-files-found: error
 
@@ -176,6 +172,4 @@ jobs:
           name: BXFloatHost-ipa
           path: dist/BXFloatHost.ipa
 
-# retry 2026-10-28T15:48:09.9467952+08:00
-
-# retry 2026-10-28T15:48:31.8618601+08:00
+# retry 2026-10-29T00:35:00+08:00 single macos-latest
