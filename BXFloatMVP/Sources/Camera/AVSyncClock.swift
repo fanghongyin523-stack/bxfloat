@@ -1,9 +1,10 @@
 import Foundation
 import QuartzCore
 
-/// 音画共用呈现时钟。
-/// 策略：以「音画都已到达」的较慢一侧为直播沿（min），再统一落后 ~0.5s；
-/// 总延迟压在 3 秒内。这样声音不会被画面甩下几十秒。
+/// 音画共用呈现时钟（软跟随）。
+/// - 以音画都已到达的较慢一侧为直播沿（min）
+/// - 目标缓冲约 1.0s，总延迟压在 3s 内
+/// - 漂移时平滑靠拢，禁止硬跳（硬跳会造成 2～3 秒一卡）
 final class AVSyncClock {
     static let shared = AVSyncClock()
 
@@ -16,12 +17,14 @@ final class AVSyncClock {
     /// 音频块结束 PTS（最后一包起点 + 时长）
     private var lastAudioEndPTS: Double = -1
 
-    /// 相对直播沿的目标缓冲（秒）——可共同延迟，换稳定口型
-    private let targetDelay: Double = 0.55
-    /// 允许的最大落后（秒），留余量不超过用户说的 3 秒
-    private let maxDelay: Double = 2.5
-    /// 最小落后，避免追到毛刺沿
-    private let minDelay: Double = 0.25
+    /// 相对直播沿的目标缓冲（秒）——优先流畅，1～3s 可接受
+    private let targetDelay: Double = 1.0
+    /// 允许的最大落后（秒）
+    private let maxDelay: Double = 2.6
+    /// 最小落后，避免贴着毛刺沿
+    private let minDelay: Double = 0.45
+    /// 单次 mediaTime 调用最多纠正多少秒（软跟）
+    private let maxSlewPerCall: Double = 0.04
 
     private(set) var driftResyncCount: Int64 = 0
 
@@ -85,13 +88,18 @@ final class AVSyncClock {
         let maxT = max(0, live - minDelay)
 
         if t < minT {
-            // 落后过多（超过约 2.5s）：跳到目标点，音画一起跟
-            t = ideal
+            // 太慢：向目标软靠拢，不硬跳
+            let want = min(ideal, minT + 0.15)
+            let delta = min(maxSlewPerCall, max(0, want - t))
+            t += delta
             mediaAnchor = t
             wallAnchor = CACurrentMediaTime()
             driftResyncCount += 1
         } else if t > maxT {
-            t = maxT
+            // 太快：软拉回
+            let want = max(ideal, maxT - 0.05)
+            let delta = min(maxSlewPerCall, max(0, t - want))
+            t -= delta
             mediaAnchor = t
             wallAnchor = CACurrentMediaTime()
         }
@@ -118,7 +126,7 @@ final class AVSyncClock {
 
     private func liveEdgeLocked() -> Double {
         if lastVideoPTS >= 0, lastAudioEndPTS >= 0 {
-            // 关键：跟较慢的一侧，防止画面单飞、声音落后几十秒
+            // 跟较慢一侧，防止画面单飞、声音落后
             return min(lastVideoPTS, lastAudioEndPTS)
         }
         return max(lastVideoPTS, lastAudioEndPTS)

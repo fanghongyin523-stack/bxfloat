@@ -12,8 +12,8 @@ final class CamFrameStore {
 
     private let lock = NSLock()
     private var frames: [TimedFrame] = []
-    /// ~3s @30fps
-    private let maxFrames = 90
+    /// ~4s @30fps，给 1s 目标缓冲 + 网络抖动留余量
+    private let maxFrames = 120
     private(set) var width: Int = 0
     private(set) var height: Int = 0
     private(set) var frameCount: Int64 = 0

@@ -321,9 +321,10 @@ enum CamBufferPainter {
             return true
         }
 
-        // 预渲染未就绪 / 拷贝失败：同格式推流帧 → 上一成功帧 → 涂黑。绝不能透传真机。
+        // 预渲染未就绪 / 拷贝失败：同 mediaTime 推流帧 → 上一成功帧 → 涂黑。
+        // 禁止 copyLatest（会画快声慢）。
         let t = AVSyncClock.shared.mediaTime()
-        if let src = CamFrameStore.shared.copyForMediaTime(t) ?? CamFrameStore.shared.copyLatest(),
+        if let src = CamFrameStore.shared.copyForMediaTime(t),
            CVPixelBufferGetWidth(src) == dw,
            CVPixelBufferGetHeight(src) == dh,
            CVPixelBufferGetPixelFormatType(src) == fmt,

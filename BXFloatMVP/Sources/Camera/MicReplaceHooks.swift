@@ -274,13 +274,14 @@ enum MicBufferPainter {
             return true
         }
 
-        // stream：有推流 PCM 就写；没有则静音，避免漏出原麦
+        // stream：连续播放头取声；没有则静音，避免漏出原麦 / 电流声
         if CamAudioStore.shared.hasFreshAudio {
-            return CamAudioStore.shared.fill(
+            _ = CamAudioStore.shared.fillContinuous(
                 into: UnsafeMutableRawPointer(data),
                 byteCount: totalLength,
                 asbd: asbd
             )
+            return true
         }
         CamAudioStore.silence(into: UnsafeMutableRawPointer(data), byteCount: totalLength)
         return true

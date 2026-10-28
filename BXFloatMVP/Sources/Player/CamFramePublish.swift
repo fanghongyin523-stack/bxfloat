@@ -65,11 +65,9 @@ public func BXFloatMicPaintFrames(
     asbd.mFramesPerPacket = 1
     asbd.mBytesPerPacket = asbd.mBytesPerFrame
 
-    let t = AVSyncClock.shared.mediaTime()
+    // 连续播放头取声（与画面共用时钟软跟）；失败/无包 → 静音，禁止破音垫末样
     if CamAudioStore.shared.hasFreshAudio {
-        if !CamAudioStore.shared.fill(into: dst, byteCount: byteCount, asbd: asbd, startPTS: t) {
-            CamAudioStore.silence(into: dst, byteCount: byteCount)
-        }
+        _ = CamAudioStore.shared.fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
     } else {
         CamAudioStore.silence(into: dst, byteCount: byteCount)
     }

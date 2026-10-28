@@ -59,7 +59,7 @@ final class CamFrameBlitter {
         if prepW == width, prepH == height, prepFmt == format {
             return prepared
         }
-        // 目标格式尚未对齐时，先别返回错误尺寸（避免花屏）；返回 nil 让上层再用 latest 路径
+        // 尺寸/格式未对齐：返回 nil，上层用 lastGood/黑帧，禁止 latest
         return nil
     }
 
@@ -95,7 +95,8 @@ final class CamFrameBlitter {
         let store = CamFrameStore.shared
         guard store.hasFreshFrame else { return }
         let mediaT = AVSyncClock.shared.mediaTime()
-        guard let src = store.copyForMediaTime(mediaT) ?? store.copyLatest() else { return }
+        // 禁止 copyLatest：最新帧会让画面单飞、声音落后
+        guard let src = store.copyForMediaTime(mediaT) else { return }
 
         // 约每帧更新；同一档不重复渲
         let syncKey = Int64((mediaT * 30.0).rounded())
