@@ -208,15 +208,15 @@ final class CamSettingsPanel: UIView {
         statusLabel.text = [
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
-            "麦：\(audioName) · 挂钩 \(MicReplaceHooks.wrapCount)/回调 \(MicReplaceHooks.callbackCount)/写 \(MicReplaceHooks.paintCount)",
+            "麦：\(audioName) · AU回调 \(BXFloatMicAUCallbackCount())/写 \(BXFloatMicAUPaintCount()) · AV \(MicReplaceHooks.callbackCount)",
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"
                     : "若收帧=0：检查电脑 MediaMTX/OBS 与 IP")
                 : (cfg.audioCaptureMode == .stream && audioPkts == 0
                     ? "有画面无音频包：OBS 推流需勾选音频轨"
-                    : (replaceOn && CameraReplaceHooks.callbackCount == 0
-                        ? "回调=0：杀抖音重进拍摄页后再开替换"
+                    : (cfg.audioCaptureMode != .microphone && BXFloatMicAUPaintCount() == 0 && MicReplaceHooks.paintCount == 0
+                        ? "麦未写入：进「开直播」页试麦，或杀抖音重进"
                         : "运行中")),
         ].joined(separator: "\n")
     }

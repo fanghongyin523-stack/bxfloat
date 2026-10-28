@@ -41,19 +41,33 @@ enum MicReplaceHooks {
         installed = true
         swizzleAudioDataOutput()
         swizzleSessionAddOutput()
-        NSLog("BXFloatMic hooks installed")
+        BXFloatMicAUInstall()
+        NSLog("BXFloatMic hooks installed (AVCapture + AudioUnit)")
     }
 
     /// mode=推流/静音时注入；原麦则 unwrap 透传。
     static func applyAudioMode(_ mode: AudioCaptureMode) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
-        let want = onCamera && (mode == .stream || mode == .mute)
+        // 直播麦：拍摄页 / 开播页都要能改；视频已替换时同样开启
+        let replaceOn = MediaConfigStore.shared.config.replaceCameraEnabled
+        let want = (onCamera || replaceOn) && (mode == .stream || mode == .mute)
 
         lock.lock()
         currentMode = mode
         injectActive = want
         lock.unlock()
+
+        // AudioUnit 路径（抖音直播主路径）
+        let auMode: Int32
+        if !want {
+            auMode = 0
+        } else if mode == .mute {
+            auMode = 2
+        } else {
+            auMode = 1
+        }
+        BXFloatMicAUSetMode(auMode)
 
         let outputs = trackedOutputs.allObjects
         for output in outputs {
@@ -66,12 +80,14 @@ enum MicReplaceHooks {
         }
         retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatMic apply mode=%@ cam=%d active=%d tracked=%d retain=%d",
+            "BXFloatMic apply mode=%@ cam=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld",
             mode.rawValue,
             onCamera ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
-            retainedProxyCount
+            retainedProxyCount,
+            auMode,
+            BXFloatMicAUPaintCount()
         )
     }
 
@@ -273,6 +289,18 @@ func BXFloatRestoreSampleBufferDelegateAny(
     _ delegate: AnyObject?,
     _ queue: DispatchQueue?
 )
+
+@_silgen_name("BXFloatMicAUInstall")
+func BXFloatMicAUInstall()
+
+@_silgen_name("BXFloatMicAUSetMode")
+func BXFloatMicAUSetMode(_ mode: Int32)
+
+@_silgen_name("BXFloatMicAUPaintCount")
+func BXFloatMicAUPaintCount() -> Int64
+
+@_silgen_name("BXFloatMicAUCallbackCount")
+func BXFloatMicAUCallbackCount() -> Int64
 
 @_cdecl("BXFloatInstallMicHooks")
 public func BXFloatInstallMicHooks() {
