@@ -114,6 +114,20 @@ void BXFloatFFStop(void) {
     int audioIdx = -1;
     uint8_t *audioOutBuf = NULL;
     int audioOutBufSamples = 0;
+    // __block 必须在任何 goto cleanup 之前声明（Clang 不能跨越初始化跳转）
+    __block struct SwsContext *swsBlock = NULL;
+    __block struct SwrContext *swrBlock = NULL;
+    __block uint8_t *audioOutBufBlock = NULL;
+    __block int audioOutBufSamplesBlock = 0;
+    __block AVFrame *vframe = NULL;
+    __block AVFrame *aframe = NULL;
+    __block AVCodecContext *vctx = NULL;
+    __block AVCodecContext *actx = NULL;
+    dispatch_semaphore_t slots = NULL;
+    BOOL startedDecodeSplit = NO;
+    uint64_t gen = 0;
+    AVRational videoTB = {1, 1};
+    AVRational audioTB = {1, 1};
 
     avformat_network_init();
 
@@ -224,27 +238,23 @@ void BXFloatFFStop(void) {
     NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d (read∥decode ring)",
           urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0);
 
-    AVRational videoTB = fmt->streams[videoIdx]->time_base;
-    AVRational audioTB = {1, 1};
+    videoTB = fmt->streams[videoIdx]->time_base;
     if (audioIdx >= 0) {
         audioTB = fmt->streams[audioIdx]->time_base;
     }
 
     // 读包与解码分离：读线程继续收，解码在 decodeQueue；槽位≈抗网络抖动
-    const uint64_t gen = self.sessionGen;
-    dispatch_semaphore_t slots = dispatch_semaphore_create(48);
-    __block struct SwsContext *swsBlock = NULL;
-    __block struct SwrContext *swrBlock = swr;
+    gen = self.sessionGen;
+    slots = dispatch_semaphore_create(48);
+    swrBlock = swr;
     swr = NULL; // 所有权交给 decode 路径，cleanup 前 sync 回收
-    __block uint8_t *audioOutBufBlock = NULL;
-    __block int audioOutBufSamplesBlock = 0;
-    __block AVFrame *vframe = frame;
-    __block AVFrame *aframe = audioFrame;
+    vframe = frame;
+    aframe = audioFrame;
     frame = NULL;
     audioFrame = NULL;
-    __block AVCodecContext *vctx = codecCtx;
-    __block AVCodecContext *actx = audioCtx;
-    // codecCtx/audioCtx 仍在 cleanup 释放；解码期间勿并行释放
+    vctx = codecCtx;
+    actx = audioCtx;
+    startedDecodeSplit = YES;
 
     while (self.running) {
         ret = av_read_frame(fmt, packet);
@@ -353,26 +363,28 @@ void BXFloatFFStop(void) {
         });
     }
 
-    // 等解码排空再释放 codec / sws / swr
-    dispatch_sync(self.decodeQueue, ^{
-        if (swsBlock) {
-            sws_freeContext(swsBlock);
-            swsBlock = NULL;
-        }
-        if (swrBlock) {
-            swr_free(&swrBlock);
-            swrBlock = NULL;
-        }
-        av_freep(&audioOutBufBlock);
-        if (vframe) {
-            av_frame_free(&vframe);
-            vframe = NULL;
-        }
-        if (aframe) {
-            av_frame_free(&aframe);
-            aframe = NULL;
-        }
-    });
+    if (startedDecodeSplit) {
+        // 等解码排空再释放 codec / sws / swr
+        dispatch_sync(self.decodeQueue, ^{
+            if (swsBlock) {
+                sws_freeContext(swsBlock);
+                swsBlock = NULL;
+            }
+            if (swrBlock) {
+                swr_free(&swrBlock);
+                swrBlock = NULL;
+            }
+            av_freep(&audioOutBufBlock);
+            if (vframe) {
+                av_frame_free(&vframe);
+                vframe = NULL;
+            }
+            if (aframe) {
+                av_frame_free(&aframe);
+                aframe = NULL;
+            }
+        });
+    }
 
 cleanup:
     if (sws) sws_freeContext(sws);
