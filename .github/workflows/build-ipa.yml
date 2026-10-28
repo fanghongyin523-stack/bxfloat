@@ -10,9 +10,13 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
-  # 单机排队，避免三份 macos 占坑更慢。
+  # 三机抢跑：谁先拿到 runner 谁出包（最近单机排队常被 15 分钟取消）。
   inject:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
       run:
@@ -75,7 +79,7 @@ jobs:
       - name: Upload Inject dylib
         uses: actions/upload-artifact@v4
         with:
-          name: BXFloatInject-dylib
+          name: BXFloatInject-dylib-${{ matrix.os }}
           path: dist/BXFloatInject.dylib
           if-no-files-found: error
 
