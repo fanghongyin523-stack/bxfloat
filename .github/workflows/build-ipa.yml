@@ -172,6 +172,6 @@ jobs:
           name: BXFloatHost-ipa
           path: dist/BXFloatHost.ipa
 
-# retry 2026-10-29T00:35:00+08:00 single macos-latest
+# retry 2026-10-29T01:36:48
 
-# retry 2026-10-29T01:21:00+08:00 keep trying macos capacity
+# retry 2026-10-29T01:36:48
