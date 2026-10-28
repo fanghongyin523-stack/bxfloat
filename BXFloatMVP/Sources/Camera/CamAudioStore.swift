@@ -1,8 +1,7 @@
 import AudioToolbox
 import Foundation
 
-/// 带 PTS 的 PCM（mono Int16 @ 48k）。
-/// 用连续播放头取声：按写出帧数推进，向 mediaTime 软靠拢；欠载只填静音，禁止重复末样造成电流声。
+/// 音频 ring + 连续播放头。欠载静音；视频恢复中冻结播放头（对标 freeze-audio）。
 final class CamAudioStore {
     static let shared = CamAudioStore()
 
@@ -16,10 +15,8 @@ final class CamAudioStore {
     private let maxSeconds: Double = 3.5
     let storeRate = 48_000
 
-    /// 连续播放头（媒体秒）。AU 每次写出后 += duration，并轻微向 mediaTime 校正。
     private var playhead: Double = -1
-    /// 单次回调最多纠正的播放头漂移（秒）
-    private let maxPlayheadSlew: Double = 0.02
+    private let maxPlayheadSlew: Double = 0.015
 
     private(set) var packetCount: Int64 = 0
     private(set) var lastUpdate = Date.distantPast
@@ -30,7 +27,15 @@ final class CamAudioStore {
     var hasFreshAudio: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return !chunks.isEmpty && Date().timeIntervalSince(lastUpdate) < 2.5
+        return !chunks.isEmpty && Date().timeIntervalSince(lastUpdate) < 3.0
+    }
+
+    func bufferedSeconds() -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let first = chunks.first, let last = chunks.last else { return 0 }
+        let end = last.pts + Double(last.samples.count) / Double(storeRate)
+        return max(0, end - first.pts)
     }
 
     func reset() {
@@ -91,7 +96,6 @@ final class CamAudioStore {
         publish(samples: samples, frames: frames, channels: channels, sampleRate: sampleRate, pts: -1)
     }
 
-    /// 按连续播放头取声（推荐：AU 路径）。duration 由目标采样率与帧数决定。
     @discardableResult
     func fillContinuous(
         into dst: UnsafeMutableRawPointer,
@@ -115,35 +119,31 @@ final class CamAudioStore {
         let duration = Double(frames) / Double(dstRate)
         let needStore = max(1, Int((duration * Double(storeRate)).rounded(.up)) + 2)
 
+        // 先刷新 AVSYNC；视频空窗则冻音频（静音且不推进播放头）
         let target = AVSyncClock.shared.mediaTime()
+        if AVSyncClock.shared.shouldFreezeAudio() {
+            Self.silence(into: dst, byteCount: byteCount)
+            return false
+        }
         let startPTS = advancePlayhead(target: target, duration: duration)
 
         var src = [Int16](repeating: 0, count: needStore)
         let got = peekStarting(at: startPTS, into: &src, frames: needStore)
-        // 欠载：保持 0（静音），不要用末样填充 → 电流声根因之一
 
-        let played: [Int16]
+        var out: [Int16]
         if dstRate == storeRate {
-            played = Array(src.prefix(frames))
-            // src 已按 needStore 取；截到 frames，不足部分已是 0
+            out = Array(src.prefix(frames))
+        } else if got == 0 {
+            out = [Int16](repeating: 0, count: frames)
         } else {
-            let raw = Array(src.prefix(max(got, 1)))
-            // 有数据才重采样；全静音则直接静音缓冲
-            if got == 0 {
-                played = [Int16](repeating: 0, count: frames)
-            } else {
-                var rs = resampleLinear(raw, from: storeRate, to: dstRate)
-                if rs.count < frames {
-                    rs.append(contentsOf: repeatElement(0, count: frames - rs.count))
-                } else if rs.count > frames {
-                    rs = Array(rs.prefix(frames))
-                }
-                played = rs
+            var rs = resampleLinear(Array(src.prefix(max(got, 1))), from: storeRate, to: dstRate)
+            if rs.count < frames {
+                rs.append(contentsOf: repeatElement(0, count: frames - rs.count))
+            } else if rs.count > frames {
+                rs = Array(rs.prefix(frames))
             }
+            out = rs
         }
-
-        // 保证长度
-        var out = played
         if out.count < frames {
             out.append(contentsOf: repeatElement(Int16(0), count: frames - out.count))
         }
@@ -180,7 +180,6 @@ final class CamAudioStore {
         asbd: AudioStreamBasicDescription,
         startPTS: Double
     ) -> Bool {
-        // 兼容旧调用：仍走连续头（忽略外部 startPTS 硬跳）
         _ = startPTS
         return fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
     }
@@ -196,7 +195,6 @@ final class CamAudioStore {
 
     // MARK: - private
 
-    /// 取本次读取起点，并把播放头向前推 duration；向 target 软校正。
     private func advancePlayhead(target: Double, duration: Double) -> Double {
         lock.lock()
         defer { lock.unlock() }
@@ -204,11 +202,10 @@ final class CamAudioStore {
             playhead = max(0, target)
         } else {
             let err = target - playhead
-            if abs(err) > 0.35 {
-                // 严重脱节：一次靠拢一部分，避免整段跳变破音
-                playhead += max(-0.12, min(0.12, err * 0.35))
-            } else if abs(err) > 0.04 {
-                playhead += max(-maxPlayheadSlew, min(maxPlayheadSlew, err * 0.25))
+            if abs(err) > 0.4 {
+                playhead += max(-0.08, min(0.08, err * 0.3))
+            } else if abs(err) > 0.05 {
+                playhead += max(-maxPlayheadSlew, min(maxPlayheadSlew, err * 0.2))
             }
         }
         let start = playhead
@@ -216,7 +213,6 @@ final class CamAudioStore {
         return start
     }
 
-    /// 只读不砍块；欠载返回已写帧数，其余保持 0。
     private func peekStarting(at startPTS: Double, into buffer: inout [Int16], frames: Int) -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -234,20 +230,12 @@ final class CamAudioStore {
             if written >= frames { break }
             let chunkEnd = chunk.pts + Double(chunk.samples.count) / Double(storeRate)
             if chunkEnd <= cursor { continue }
-            if chunk.pts > cursor + 0.02, written == 0 {
-                // 开头空洞：跳到块起点（中间已是静音 0）
-                let gapFrames = min(frames - written, Int(((chunk.pts - cursor) * Double(storeRate)).rounded(.down)))
-                if gapFrames > 0 {
-                    written += gapFrames
-                    cursor += Double(gapFrames) / Double(storeRate)
-                } else {
-                    cursor = chunk.pts
-                }
-            }
-            if chunk.pts > cursor + 0.0001, written > 0, written < frames {
-                // 中间空洞：静音推进
-                let gapFrames = min(frames - written, Int(((chunk.pts - cursor) * Double(storeRate)).rounded(.up)))
-                written += max(0, gapFrames)
+            if chunk.pts > cursor + 0.02 {
+                let gapFrames = min(
+                    frames - written,
+                    max(0, Int(((chunk.pts - cursor) * Double(storeRate)).rounded(.down)))
+                )
+                written += gapFrames
                 cursor = chunk.pts
                 if written >= frames { break }
             }
@@ -310,7 +298,6 @@ final class CamAudioStore {
         bytesPerSample: Int
     ) {
         for i in 0..<frames {
-            // 不足 → 0，禁止复用末样（会变成电流声）
             let s = i < samples.count ? samples[i] : 0
             for c in 0..<channels {
                 writeSample(

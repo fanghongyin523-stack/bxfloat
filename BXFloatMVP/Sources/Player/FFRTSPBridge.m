@@ -34,8 +34,10 @@ void BXFloatFFStop(void) {
 @property (nonatomic, assign) BOOL running;
 @property (nonatomic, copy) NSString *currentURL;
 @property (nonatomic, strong) dispatch_queue_t queue;
+@property (nonatomic, strong) dispatch_queue_t decodeQueue;
 @property (nonatomic, assign) int64_t frameOK;
 @property (nonatomic, assign) int64_t frameFail;
+@property (nonatomic, assign) uint64_t sessionGen;
 @end
 
 @implementation FFRTSPBridge
@@ -61,6 +63,8 @@ void BXFloatFFStop(void) {
     self = [super init];
     if (self) {
         _queue = dispatch_queue_create("com.baixiang.ffrtsp", DISPATCH_QUEUE_SERIAL);
+        _decodeQueue = dispatch_queue_create("com.baixiang.ffrtsp.decode", DISPATCH_QUEUE_SERIAL);
+        _sessionGen = 0;
     }
     return self;
 }
@@ -92,6 +96,7 @@ void BXFloatFFStop(void) {
 - (void)stopLocked {
     self.running = NO;
     self.currentURL = nil;
+    self.sessionGen += 1;
 }
 
 #if BXFLOAT_HAS_FFMPEG
@@ -112,14 +117,15 @@ void BXFloatFFStop(void) {
 
     avformat_network_init();
 
+    // 抗抖靠 ring(1.5～2s)，不再用 nobuffer 硬扛（一抖就空窗导致音画双卡）
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "rtsp_transport", "tcp", 0);
     av_dict_set(&opts, "stimeout", "5000000", 0); // us
-    av_dict_set(&opts, "max_delay", "500000", 0);
-    av_dict_set(&opts, "fflags", "nobuffer", 0);
+    av_dict_set(&opts, "max_delay", "1500000", 0);
+    av_dict_set(&opts, "fflags", "discardcorrupt", 0);
     av_dict_set(&opts, "flags", "low_delay", 0);
-    av_dict_set(&opts, "probesize", "32768", 0);
-    av_dict_set(&opts, "analyzeduration", "500000", 0);
+    av_dict_set(&opts, "probesize", "65536", 0);
+    av_dict_set(&opts, "analyzeduration", "800000", 0);
 
     const char *url = urlString.UTF8String;
     int ret = avformat_open_input(&fmt, url, NULL, &opts);
@@ -215,7 +221,7 @@ void BXFloatFFStop(void) {
     packet = av_packet_alloc();
     if (!frame || !packet) goto cleanup;
 
-    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d",
+    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d (read∥decode ring)",
           urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0);
 
     AVRational videoTB = fmt->streams[videoIdx]->time_base;
@@ -223,6 +229,22 @@ void BXFloatFFStop(void) {
     if (audioIdx >= 0) {
         audioTB = fmt->streams[audioIdx]->time_base;
     }
+
+    // 读包与解码分离：读线程继续收，解码在 decodeQueue；槽位≈抗网络抖动
+    const uint64_t gen = self.sessionGen;
+    dispatch_semaphore_t slots = dispatch_semaphore_create(48);
+    __block struct SwsContext *swsBlock = NULL;
+    __block struct SwrContext *swrBlock = swr;
+    swr = NULL; // 所有权交给 decode 路径，cleanup 前 sync 回收
+    __block uint8_t *audioOutBufBlock = NULL;
+    __block int audioOutBufSamplesBlock = 0;
+    __block AVFrame *vframe = frame;
+    __block AVFrame *aframe = audioFrame;
+    frame = NULL;
+    audioFrame = NULL;
+    __block AVCodecContext *vctx = codecCtx;
+    __block AVCodecContext *actx = audioCtx;
+    // codecCtx/audioCtx 仍在 cleanup 释放；解码期间勿并行释放
 
     while (self.running) {
         ret = av_read_frame(fmt, packet);
@@ -232,79 +254,125 @@ void BXFloatFFStop(void) {
             }
             break;
         }
-        if (packet->stream_index == videoIdx) {
-            ret = avcodec_send_packet(codecCtx, packet);
+        const int si = packet->stream_index;
+        const BOOL isVideo = (si == videoIdx);
+        const BOOL isAudio = (audioIdx >= 0 && si == audioIdx && actx && swrBlock && aframe);
+        if (!isVideo && !isAudio) {
             av_packet_unref(packet);
-            if (ret < 0) {
-                self.frameFail++;
-                continue;
-            }
-            while (ret >= 0 && self.running) {
-                ret = avcodec_receive_frame(codecCtx, frame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
-                if (ret < 0) {
-                    self.frameFail++;
-                    break;
-                }
-                int64_t ts = frame->best_effort_timestamp;
-                if (ts == AV_NOPTS_VALUE) ts = frame->pts;
-                double pts = -1;
-                if (ts != AV_NOPTS_VALUE) {
-                    pts = ts * av_q2d(videoTB);
-                }
-                if (![self publishFrame:frame codecCtx:codecCtx sws:&sws pts:pts]) {
-                    self.frameFail++;
-                } else {
-                    self.frameOK++;
-                }
-            }
-        } else if (audioIdx >= 0 && packet->stream_index == audioIdx && audioCtx && swr && audioFrame) {
-            ret = avcodec_send_packet(audioCtx, packet);
-            av_packet_unref(packet);
-            if (ret < 0) continue;
-            while (ret >= 0 && self.running) {
-                ret = avcodec_receive_frame(audioCtx, audioFrame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
-                if (ret < 0) break;
+            continue;
+        }
 
-                int outSamples = (int)av_rescale_rnd(
-                    swr_get_delay(swr, audioCtx->sample_rate) + audioFrame->nb_samples,
-                    48000,
-                    audioCtx->sample_rate,
-                    AV_ROUND_UP
-                );
-                if (outSamples <= 0) outSamples = audioFrame->nb_samples;
-                if (outSamples > audioOutBufSamples) {
-                    av_freep(&audioOutBuf);
-                    if (av_samples_alloc(&audioOutBuf, NULL, 1, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
-                        audioOutBuf = NULL;
-                        audioOutBufSamples = 0;
+        AVPacket *owned = av_packet_clone(packet);
+        av_packet_unref(packet);
+        if (!owned) continue;
+
+        // 槽满则丢包，避免读线程堵死把 RTSP 撑爆
+        if (dispatch_semaphore_wait(slots, dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC)) != 0) {
+            av_packet_free(&owned);
+            continue;
+        }
+
+        dispatch_async(self.decodeQueue, ^{
+            if (self.sessionGen != gen || !self.running) {
+                av_packet_free(&owned);
+                dispatch_semaphore_signal(slots);
+                return;
+            }
+            if (isVideo && vctx && vframe) {
+                int dr = avcodec_send_packet(vctx, owned);
+                av_packet_free(&owned);
+                if (dr < 0) {
+                    self.frameFail++;
+                    dispatch_semaphore_signal(slots);
+                    return;
+                }
+                while (dr >= 0 && self.running && self.sessionGen == gen) {
+                    dr = avcodec_receive_frame(vctx, vframe);
+                    if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
+                    if (dr < 0) {
+                        self.frameFail++;
                         break;
                     }
-                    audioOutBufSamples = outSamples;
-                }
-                uint8_t *outPlanes[1] = { audioOutBuf };
-                int converted = swr_convert(
-                    swr,
-                    outPlanes,
-                    outSamples,
-                    (const uint8_t **)audioFrame->data,
-                    audioFrame->nb_samples
-                );
-                if (converted > 0) {
-                    int64_t ts = audioFrame->best_effort_timestamp;
-                    if (ts == AV_NOPTS_VALUE) ts = audioFrame->pts;
+                    int64_t ts = vframe->best_effort_timestamp;
+                    if (ts == AV_NOPTS_VALUE) ts = vframe->pts;
                     double pts = -1;
-                    if (ts != AV_NOPTS_VALUE) {
-                        pts = ts * av_q2d(audioTB);
+                    if (ts != AV_NOPTS_VALUE) pts = ts * av_q2d(videoTB);
+                    if (![self publishFrame:vframe codecCtx:vctx sws:&swsBlock pts:pts]) {
+                        self.frameFail++;
+                    } else {
+                        self.frameOK++;
                     }
-                    BXFloatPublishAudioPCM((const int16_t *)audioOutBuf, converted, 1, 48000, pts);
                 }
+            } else if (isAudio && actx && swrBlock && aframe) {
+                int dr = avcodec_send_packet(actx, owned);
+                av_packet_free(&owned);
+                if (dr < 0) {
+                    dispatch_semaphore_signal(slots);
+                    return;
+                }
+                while (dr >= 0 && self.running && self.sessionGen == gen) {
+                    dr = avcodec_receive_frame(actx, aframe);
+                    if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
+                    if (dr < 0) break;
+                    int outSamples = (int)av_rescale_rnd(
+                        swr_get_delay(swrBlock, actx->sample_rate) + aframe->nb_samples,
+                        48000,
+                        actx->sample_rate,
+                        AV_ROUND_UP
+                    );
+                    if (outSamples <= 0) outSamples = aframe->nb_samples;
+                    if (outSamples > audioOutBufSamplesBlock) {
+                        av_freep(&audioOutBufBlock);
+                        if (av_samples_alloc(&audioOutBufBlock, NULL, 1, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
+                            audioOutBufBlock = NULL;
+                            audioOutBufSamplesBlock = 0;
+                            break;
+                        }
+                        audioOutBufSamplesBlock = outSamples;
+                    }
+                    uint8_t *outPlanes[1] = { audioOutBufBlock };
+                    int converted = swr_convert(
+                        swrBlock,
+                        outPlanes,
+                        outSamples,
+                        (const uint8_t **)aframe->data,
+                        aframe->nb_samples
+                    );
+                    if (converted > 0) {
+                        int64_t ts = aframe->best_effort_timestamp;
+                        if (ts == AV_NOPTS_VALUE) ts = aframe->pts;
+                        double pts = -1;
+                        if (ts != AV_NOPTS_VALUE) pts = ts * av_q2d(audioTB);
+                        BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, 1, 48000, pts);
+                    }
+                }
+            } else {
+                av_packet_free(&owned);
             }
-        } else {
-            av_packet_unref(packet);
-        }
+            dispatch_semaphore_signal(slots);
+        });
     }
+
+    // 等解码排空再释放 codec / sws / swr
+    dispatch_sync(self.decodeQueue, ^{
+        if (swsBlock) {
+            sws_freeContext(swsBlock);
+            swsBlock = NULL;
+        }
+        if (swrBlock) {
+            swr_free(&swrBlock);
+            swrBlock = NULL;
+        }
+        av_freep(&audioOutBufBlock);
+        if (vframe) {
+            av_frame_free(&vframe);
+            vframe = NULL;
+        }
+        if (aframe) {
+            av_frame_free(&aframe);
+            aframe = NULL;
+        }
+    });
 
 cleanup:
     if (sws) sws_freeContext(sws);
@@ -320,6 +388,7 @@ cleanup:
     BOOL shouldReconnect = self.running;
     NSString *urlCopy = [urlString copy];
     self.running = NO;
+    self.sessionGen += 1;
     if (shouldReconnect) {
         [self scheduleReconnect:urlCopy];
     }
