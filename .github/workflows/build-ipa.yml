@@ -10,12 +10,12 @@ on:
       - ".github/workflows/build-ipa.yml"
 
 jobs:
-  # 三机抢跑：谁先拿到 runner 谁出包（最近单机排队常被 15 分钟取消）。
+  # 单机构建：三机矩阵会挤爆排队、15 分钟未开跑就被取消。
   inject:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14, macos-15]
+        os: [macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
