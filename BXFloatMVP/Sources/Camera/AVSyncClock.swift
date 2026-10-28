@@ -1,8 +1,8 @@
 import Foundation
 import QuartzCore
 
-/// 音画共用呈现引擎（对标 VCamTang AVSYNC 动作表）。
-/// 目标缓冲 1.5～2.0s，总延迟封顶约 2.6s。
+/// 音画呈现：先把 ring 养到约 1.5～2s，再 play。
+/// 源不够时 hold-last，禁止靠猛 drop-old 追赶（会把卡顿放大）。
 final class AVSyncClock {
     static let shared = AVSyncClock()
 
@@ -18,6 +18,7 @@ final class AVSyncClock {
     private let lock = NSLock()
     private var epoch: Double = -1
     private var hasAnchor = false
+    private var warmedUp = false
     private var wallAnchor: CFTimeInterval = 0
     private var mediaAnchor: Double = 0
     private var lastVideoPTS: Double = -1
@@ -26,13 +27,14 @@ final class AVSyncClock {
     private var lastAudioWall: CFTimeInterval = 0
     private var frozenForVideo = false
 
-    /// 目标延迟（秒）— 用户选定 1.5～2s 居中
+    /// 目标缓冲（用户选 1.5～2s）
     private let targetDelay: Double = 1.7
-    private let maxDelay: Double = 2.6
-    private let minDelay: Double = 1.35
-    private let maxSlewPerCall: Double = 0.03
-    /// 视频超过该时间无新帧 → hold / freeze-audio
-    private let videoStallSec: Double = 0.18
+    /// 只有 ring 过大才丢旧
+    private let maxDelay: Double = 2.8
+    /// 低于此就 hold，不再往直播沿贴
+    private let minPlayBuffer: Double = 1.1
+    private let maxSlewPerCall: Double = 0.025
+    private let videoStallSec: Double = 0.25
 
     private(set) var driftResyncCount: Int64 = 0
     private(set) var lastAction: Action = .play
@@ -45,6 +47,7 @@ final class AVSyncClock {
         lock.lock()
         epoch = -1
         hasAnchor = false
+        warmedUp = false
         wallAnchor = 0
         mediaAnchor = 0
         lastVideoPTS = -1
@@ -72,7 +75,6 @@ final class AVSyncClock {
         lastVideoPTS = pts
         lastVideoWall = CACurrentMediaTime()
         if frozenForVideo { frozenForVideo = false }
-        anchorIfNeededLocked()
         lock.unlock()
     }
 
@@ -81,11 +83,9 @@ final class AVSyncClock {
         lock.lock()
         lastAudioEndPTS = pts
         lastAudioWall = CACurrentMediaTime()
-        anchorIfNeededLocked()
         lock.unlock()
     }
 
-    /// 当前应呈现的媒体时间；副作用：更新 action / skew / buffered。
     func mediaTime() -> Double {
         lock.lock()
         defer { lock.unlock() }
@@ -93,64 +93,80 @@ final class AVSyncClock {
         let live = liveEdgeLocked()
         guard live >= 0 else {
             lastAction = .waitVideo
-            return 0
+            lastBufferedMs = 0
+            return max(0, mediaAnchor)
         }
 
-        let ideal = max(0, live - targetDelay)
-        if !hasAnchor {
+        // 暖机：直播沿还没攒够目标缓冲 → hold，不开追
+        if !warmedUp {
+            if live < targetDelay * 0.85 {
+                lastAction = .waitVideo
+                lastBufferedMs = live * 1000
+                refreshSkewLocked()
+                return 0
+            }
+            warmedUp = true
             hasAnchor = true
-            mediaAnchor = ideal
+            mediaAnchor = max(0, live - targetDelay)
             wallAnchor = now
             lastAction = .play
-            return ideal
+            refreshMetricsLocked(present: mediaAnchor, live: live)
+            return mediaAnchor
         }
 
-        let videoStalled = lastVideoPTS >= 0 && (now - lastVideoWall) > videoStallSec
-        if videoStalled {
-            // 对标 VCam：视频空窗 hold 画面，冻住呈现时钟与音频消费
+        if !hasAnchor {
+            hasAnchor = true
+            mediaAnchor = max(0, live - targetDelay)
+            wallAnchor = now
+        }
+
+        // 视频空窗：冻时钟 + 冻音频
+        if lastVideoPTS >= 0, (now - lastVideoWall) > videoStallSec {
             frozenForVideo = true
             lastAction = .freezeAudio
-            let t = mediaAnchor + max(0, (lastVideoWall > 0 ? lastVideoWall : wallAnchor) - wallAnchor)
-            refreshMetricsLocked(present: t, live: live, now: now)
-            return max(0, mediaAnchor) // 不往前走
+            refreshMetricsLocked(present: mediaAnchor, live: live)
+            return mediaAnchor
         }
 
         var t = mediaAnchor + (now - wallAnchor)
-        let minT = max(0, live - maxDelay)
-        let maxT = max(0, live - minDelay)
+        let buffered = live - t
 
-        if t < minT {
-            let want = min(ideal, minT + 0.1)
-            t += min(maxSlewPerCall, max(0, want - t))
+        if buffered < minPlayBuffer {
+            // ring 变薄：hold 上一帧，等源把缓冲养回来（绝不 drop-old 硬追）
+            lastAction = .holdLast
+            refreshMetricsLocked(present: mediaAnchor, live: live)
+            // 轻微把 wall 对齐，避免恢复时一次性猛冲
+            wallAnchor = now
+            mediaAnchor = min(mediaAnchor, max(0, live - minPlayBuffer))
+            return mediaAnchor
+        }
+
+        if buffered > maxDelay {
+            // 只有明显积压才丢掉过旧呈现点
+            let ideal = max(0, live - targetDelay)
+            let delta = min(maxSlewPerCall, max(0, ideal - t))
+            t += delta
             mediaAnchor = t
             wallAnchor = now
             driftResyncCount += 1
             lastAction = .dropOld
-        } else if t > maxT {
-            // 缓冲过大：丢掉过旧呈现点，靠向目标
-            let want = max(ideal, maxT - 0.05)
-            t -= min(maxSlewPerCall * 1.5, max(0, t - want))
-            mediaAnchor = t
-            wallAnchor = now
-            lastAction = .dropOld
-        } else {
-            let buffered = live - t
-            if buffered < minDelay - 0.15 {
-                lastAction = .waitVideo
-            } else {
-                lastAction = .play
-            }
+            refreshMetricsLocked(present: t, live: live)
+            return t
         }
 
-        refreshMetricsLocked(present: t, live: live, now: now)
+        // 正常播放：时钟跟墙钟走
+        mediaAnchor = t
+        wallAnchor = now
+        lastAction = .play
+        refreshMetricsLocked(present: t, live: live)
         return t
     }
 
-    /// 音频是否应冻结（视频恢复中）
     func shouldFreezeAudio() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return frozenForVideo || lastAction == .freezeAudio || lastAction == .waitVideo
+        // 仅视频真停时冻声；hold-last 时仍按播放头出声，避免无故静音
+        return frozenForVideo || lastAction == .freezeAudio
     }
 
     func latencySeconds() -> Double {
@@ -158,8 +174,7 @@ final class AVSyncClock {
         defer { lock.unlock() }
         let live = liveEdgeLocked()
         guard live >= 0, hasAnchor else { return 0 }
-        let t = mediaAnchor + (CACurrentMediaTime() - wallAnchor)
-        return max(0, live - t)
+        return max(0, live - mediaAnchor)
     }
 
     func estimatedAVDelta() -> Double {
@@ -170,21 +185,20 @@ final class AVSyncClock {
     }
 
     func actionName() -> String { lastAction.rawValue }
-
     func skewMs() -> Double { lastSkewMs }
-
     func bufferedMs() -> Double { lastBufferedMs }
 
-    // MARK: - private
-
-    private func refreshMetricsLocked(present: Double, live: Double, now: CFTimeInterval) {
+    private func refreshSkewLocked() {
         if lastVideoPTS >= 0, lastAudioEndPTS >= 0 {
             lastSkewMs = (lastAudioEndPTS - lastVideoPTS) * 1000.0
         } else {
             lastSkewMs = 0
         }
+    }
+
+    private func refreshMetricsLocked(present: Double, live: Double) {
+        refreshSkewLocked()
         lastBufferedMs = max(0, (live - present) * 1000.0)
-        _ = now
     }
 
     private func liveEdgeLocked() -> Double {
@@ -192,15 +206,5 @@ final class AVSyncClock {
             return min(lastVideoPTS, lastAudioEndPTS)
         }
         return max(lastVideoPTS, lastAudioEndPTS)
-    }
-
-    private func anchorIfNeededLocked() {
-        if !hasAnchor {
-            let live = liveEdgeLocked()
-            guard live >= 0 else { return }
-            hasAnchor = true
-            mediaAnchor = max(0, live - targetDelay)
-            wallAnchor = CACurrentMediaTime()
-        }
     }
 }

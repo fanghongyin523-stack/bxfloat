@@ -243,9 +243,9 @@ void BXFloatFFStop(void) {
         audioTB = fmt->streams[audioIdx]->time_base;
     }
 
-    // 读包与解码分离：读线程继续收，解码在 decodeQueue；槽位≈抗网络抖动
+    // 读包与解码分离。解码慢时用背压堵住读侧，禁止丢包（丢包→收帧少→drop-old→卡顿）。
     gen = self.sessionGen;
-    slots = dispatch_semaphore_create(48);
+    slots = dispatch_semaphore_create(96);
     swrBlock = swr;
     swr = NULL; // 所有权交给 decode 路径，cleanup 前 sync 回收
     vframe = frame;
@@ -276,10 +276,15 @@ void BXFloatFFStop(void) {
         av_packet_unref(packet);
         if (!owned) continue;
 
-        // 槽满则丢包，避免读线程堵死把 RTSP 撑爆
-        if (dispatch_semaphore_wait(slots, dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC)) != 0) {
+        // 一直等到有解码槽：宁可延迟涨，也不丢 OBS 已稳定推来的包
+        while (self.running) {
+            if (dispatch_semaphore_wait(slots, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) == 0) {
+                break;
+            }
+        }
+        if (!self.running) {
             av_packet_free(&owned);
-            continue;
+            break;
         }
 
         dispatch_async(self.decodeQueue, ^{
