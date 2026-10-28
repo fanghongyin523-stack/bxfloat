@@ -8,9 +8,10 @@
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
+#include <sys/types.h>
 
 #ifdef __LP64__
 typedef struct mach_header_64 mach_header_t;
@@ -77,7 +78,7 @@ static void perform_rebinding_with_section(
     if (!make_writable(indirect_symbol_bindings, (size_t)section->size)) {
         return;
     }
-    for (uint i = 0; i < section->size / sizeof(void *); i++) {
+    for (uint32_t i = 0; i < section->size / sizeof(void *); i++) {
         uint32_t symtab_index = indirect_symbol_indices[i];
         if (symtab_index == INDIRECT_SYMBOL_ABS || symtab_index == INDIRECT_SYMBOL_LOCAL ||
             symtab_index == (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
@@ -132,7 +133,7 @@ static void rebind_symbols_for_image(
     struct dysymtab_command *dysymtab_cmd = NULL;
 
     uintptr_t cur = (uintptr_t)header + sizeof(mach_header_t);
-    for (uint i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
+    for (uint32_t i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
         cur_seg_cmd = (segment_command_t *)cur;
         if (cur_seg_cmd->cmd == LC_SEGMENT_ARCH) {
             if (strcmp(cur_seg_cmd->segname, SEG_LINKEDIT) == 0) {
@@ -155,7 +156,7 @@ static void rebind_symbols_for_image(
     uint32_t *indirect_symtab = (uint32_t *)(linkedit_base + dysymtab_cmd->indirectsymoff);
 
     cur = (uintptr_t)header + sizeof(mach_header_t);
-    for (uint i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
+    for (uint32_t i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
         cur_seg_cmd = (segment_command_t *)cur;
         if (cur_seg_cmd->cmd != LC_SEGMENT_ARCH) continue;
         if (strcmp(cur_seg_cmd->segname, SEG_DATA) != 0 &&
@@ -163,7 +164,7 @@ static void rebind_symbols_for_image(
             strcmp(cur_seg_cmd->segname, "__AUTH_CONST") != 0) {
             continue;
         }
-        for (uint j = 0; j < cur_seg_cmd->nsects; j++) {
+        for (uint32_t j = 0; j < cur_seg_cmd->nsects; j++) {
             section_t *sect = (section_t *)(cur + sizeof(segment_command_t)) + j;
             uint32_t type = sect->flags & SECTION_TYPE;
             if (type == S_LAZY_SYMBOL_POINTERS || type == S_NON_LAZY_SYMBOL_POINTERS) {
