@@ -2,31 +2,32 @@ import AudioToolbox
 import CoreVideo
 import Foundation
 
-/// ObjC FFmpeg 桥回调：写入共享帧库，供小窗预览与摄像替换共用。
+/// ObjC FFmpeg 桥回调：写入共享帧库（带 PTS）。
 @_cdecl("BXFloatPublishVideoFrame")
-public func BXFloatPublishVideoFrame(_ buffer: CVPixelBuffer) {
-    CamFrameStore.shared.publish(buffer)
+public func BXFloatPublishVideoFrame(_ buffer: CVPixelBuffer, _ pts: Double) {
+    CamFrameStore.shared.publish(buffer, pts: pts)
 }
 
-/// ObjC FFmpeg 桥回调：PCM → 麦克风替换环缓。
+/// ObjC FFmpeg 桥回调：PCM + PTS → 麦克风环缓。
 @_cdecl("BXFloatPublishAudioPCM")
 public func BXFloatPublishAudioPCM(
     _ samples: UnsafePointer<Int16>,
     _ frames: Int32,
     _ channels: Int32,
-    _ sampleRate: Int32
+    _ sampleRate: Int32,
+    _ pts: Double
 ) {
     guard frames > 0, channels > 0 else { return }
     CamAudioStore.shared.publish(
         samples: samples,
         frames: Int(frames),
         channels: Int(channels),
-        sampleRate: Int(sampleRate)
+        sampleRate: Int(sampleRate),
+        pts: pts
     )
 }
 
-/// AudioUnit 钩子：按帧数写入推流 PCM / 静音。mode 1=推流 2=静音
-/// bytesPerSample: 2=Int16, 4=Float32（iOS 麦几乎都是 Float32）
+/// AudioUnit：按共用 mediaTime 写入推流 PCM / 静音。
 @_cdecl("BXFloatMicPaintFrames")
 public func BXFloatMicPaintFrames(
     _ dst: UnsafeMutableRawPointer,
@@ -64,8 +65,9 @@ public func BXFloatMicPaintFrames(
     asbd.mFramesPerPacket = 1
     asbd.mBytesPerPacket = asbd.mBytesPerFrame
 
+    let t = AVSyncClock.shared.mediaTime()
     if CamAudioStore.shared.hasFreshAudio {
-        if !CamAudioStore.shared.fill(into: dst, byteCount: byteCount, asbd: asbd) {
+        if !CamAudioStore.shared.fill(into: dst, byteCount: byteCount, asbd: asbd, startPTS: t) {
             CamAudioStore.silence(into: dst, byteCount: byteCount)
         }
     } else {

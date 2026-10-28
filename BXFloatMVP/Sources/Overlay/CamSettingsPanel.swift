@@ -208,7 +208,7 @@ final class CamSettingsPanel: UIView {
         statusLabel.text = [
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
-            "麦：\(audioName) · AU回调 \(BXFloatMicAUCallbackCount())/写 \(BXFloatMicAUPaintCount()) · AV \(MicReplaceHooks.callbackCount)",
+            "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · 音画差 \(String(format: "%.0f", AVSyncClock.shared.estimatedAVDelta() * 1000))ms",
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"

@@ -16,6 +16,9 @@ enum FFRTSPController {
     static func start(urlString: String) {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        CamFrameStore.shared.reset()
+        CamAudioStore.shared.reset()
+        AVSyncClock.shared.reset()
         if isAvailable {
             trimmed.withCString { BXFloatFFStartUTF8($0) }
             NSLog("BXFloatCam puller=ffmpeg url=%@", trimmed)
@@ -30,5 +33,7 @@ enum FFRTSPController {
             BXFloatFFStop()
         }
         RTSPVTPuller.shared.stop()
+        CamAudioStore.shared.reset()
+        AVSyncClock.shared.reset()
     }
 }

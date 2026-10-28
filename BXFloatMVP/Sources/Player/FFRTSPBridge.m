@@ -218,6 +218,12 @@ void BXFloatFFStop(void) {
     NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d",
           urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0);
 
+    AVRational videoTB = fmt->streams[videoIdx]->time_base;
+    AVRational audioTB = {1, 1};
+    if (audioIdx >= 0) {
+        audioTB = fmt->streams[audioIdx]->time_base;
+    }
+
     while (self.running) {
         ret = av_read_frame(fmt, packet);
         if (ret < 0) {
@@ -240,7 +246,13 @@ void BXFloatFFStop(void) {
                     self.frameFail++;
                     break;
                 }
-                if (![self publishFrame:frame codecCtx:codecCtx sws:&sws]) {
+                int64_t ts = frame->best_effort_timestamp;
+                if (ts == AV_NOPTS_VALUE) ts = frame->pts;
+                double pts = -1;
+                if (ts != AV_NOPTS_VALUE) {
+                    pts = ts * av_q2d(videoTB);
+                }
+                if (![self publishFrame:frame codecCtx:codecCtx sws:&sws pts:pts]) {
                     self.frameFail++;
                 } else {
                     self.frameOK++;
@@ -280,7 +292,13 @@ void BXFloatFFStop(void) {
                     audioFrame->nb_samples
                 );
                 if (converted > 0) {
-                    BXFloatPublishAudioPCM((const int16_t *)audioOutBuf, converted, 1, 48000);
+                    int64_t ts = audioFrame->best_effort_timestamp;
+                    if (ts == AV_NOPTS_VALUE) ts = audioFrame->pts;
+                    double pts = -1;
+                    if (ts != AV_NOPTS_VALUE) {
+                        pts = ts * av_q2d(audioTB);
+                    }
+                    BXFloatPublishAudioPCM((const int16_t *)audioOutBuf, converted, 1, 48000, pts);
                 }
             }
         } else {
@@ -309,7 +327,8 @@ cleanup:
 
 - (BOOL)publishFrame:(AVFrame *)frame
             codecCtx:(AVCodecContext *)codecCtx
-                 sws:(struct SwsContext **)swsInOut {
+                 sws:(struct SwsContext **)swsInOut
+                 pts:(double)pts {
     (void)codecCtx;
     int w = frame->width;
     int h = frame->height;
@@ -341,7 +360,7 @@ cleanup:
               0, h, dstPlanes, dstStrides);
     CVPixelBufferUnlockBaseAddress(pb, 0);
 
-    BXFloatPublishVideoFrame(pb);
+    BXFloatPublishVideoFrame(pb, pts);
     CVPixelBufferRelease(pb);
     return YES;
 }

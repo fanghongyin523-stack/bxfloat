@@ -4,7 +4,6 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /// 单文件注入用：内嵌 FFmpeg 拉 RTSP（TCP），解码后回调 CVPixelBuffer。
-/// 对标参考版 BXFloat：播放引擎打进 dylib，无需再拷 Framework。
 @interface FFRTSPBridge : NSObject
 
 + (instancetype)shared;
@@ -18,18 +17,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-/// 由 Swift 侧实现：把帧写入 CamFrameStore
-FOUNDATION_EXPORT void BXFloatPublishVideoFrame(CVPixelBufferRef buffer);
+/// pts：流媒体时间（秒）；未知时传 -1
+FOUNDATION_EXPORT void BXFloatPublishVideoFrame(CVPixelBufferRef buffer, double pts);
 
-/// 由 Swift 侧实现：PCM Int16 interleaved → CamAudioStore（frames=每声道采样数）
 FOUNDATION_EXPORT void BXFloatPublishAudioPCM(
     const int16_t *samples,
     int frames,
     int channels,
-    int sampleRate
+    int sampleRate,
+    double pts
 );
 
-/// C 入口（免 bridging header，供 Swift @_silgen_name 调用）
 FOUNDATION_EXPORT BOOL BXFloatFFIsAvailable(void);
 FOUNDATION_EXPORT void BXFloatFFStartUTF8(const char * _Nonnull urlUTF8);
 FOUNDATION_EXPORT void BXFloatFFStop(void);

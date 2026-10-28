@@ -49,6 +49,8 @@
 		A1000000000000000000001B /* CamFrameBlitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000035 /* CamFrameBlitter.swift */; };
 		B1000000000000000000001F /* CamAudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000036 /* CamAudioStore.swift */; };
 		B10000000000000000000020 /* MicReplaceHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000037 /* MicReplaceHooks.swift */; };
+		B10000000000000000000023 /* AVSyncClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000003C /* AVSyncClock.swift */; };
+		A10000000000000000000020 /* AVSyncClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000003C /* AVSyncClock.swift */; };
 		B10000000000000000000021 /* fishhook.c in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000038 /* fishhook.c */; };
 		B10000000000000000000022 /* MicAudioUnitHook.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000039 /* MicAudioUnitHook.m */; };
 		A1000000000000000000001C /* CamAudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000036 /* CamAudioStore.swift */; };
@@ -110,6 +112,7 @@
 		A20000000000000000000035 /* CamFrameBlitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamFrameBlitter.swift; sourceTree = "<group>"; };
 		A20000000000000000000036 /* CamAudioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamAudioStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000037 /* MicReplaceHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicReplaceHooks.swift; sourceTree = "<group>"; };
+		A2000000000000000000003C /* AVSyncClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVSyncClock.swift; sourceTree = "<group>"; };
 		A20000000000000000000038 /* fishhook.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = fishhook.c; sourceTree = "<group>"; };
 		A2000000000000000000003A /* fishhook.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = fishhook.h; sourceTree = "<group>"; };
 		A20000000000000000000039 /* MicAudioUnitHook.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MicAudioUnitHook.m; sourceTree = "<group>"; };
@@ -199,6 +202,7 @@
 				A20000000000000000000026 /* CamPreviewPresenter.swift */,
 				A20000000000000000000035 /* CamFrameBlitter.swift */,
 				A20000000000000000000036 /* CamAudioStore.swift */,
+				A2000000000000000000003C /* AVSyncClock.swift */,
 				A20000000000000000000037 /* MicReplaceHooks.swift */,
 				A2000000000000000000003A /* fishhook.h */,
 				A20000000000000000000038 /* fishhook.c */,
@@ -452,6 +456,7 @@
 				A10000000000000000000016 /* CamPreviewPresenter.swift in Sources */,
 				A1000000000000000000001B /* CamFrameBlitter.swift in Sources */,
 				A1000000000000000000001C /* CamAudioStore.swift in Sources */,
+				A10000000000000000000020 /* AVSyncClock.swift in Sources */,
 				A1000000000000000000001D /* MicReplaceHooks.swift in Sources */,
 				A1000000000000000000001E /* fishhook.c in Sources */,
 				A1000000000000000000001F /* MicAudioUnitHook.m in Sources */,
@@ -484,6 +489,7 @@
 				B10000000000000000000019 /* CamPreviewPresenter.swift in Sources */,
 				B1000000000000000000001E /* CamFrameBlitter.swift in Sources */,
 				B1000000000000000000001F /* CamAudioStore.swift in Sources */,
+				B10000000000000000000023 /* AVSyncClock.swift in Sources */,
 				B10000000000000000000020 /* MicReplaceHooks.swift in Sources */,
 				B10000000000000000000021 /* fishhook.c in Sources */,
 				B10000000000000000000022 /* MicAudioUnitHook.m in Sources */,

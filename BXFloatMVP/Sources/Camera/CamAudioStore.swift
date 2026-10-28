@@ -1,41 +1,43 @@
 import AudioToolbox
 import Foundation
 
-/// RTSP 解码后的 PCM 环缓（固定 mono Int16 @ 48k），供麦克风替换读取。
+/// 带 PTS 的 PCM 块队列（mono Int16 @ 48k），按 mediaTime 取声，与画面共用时钟。
 final class CamAudioStore {
     static let shared = CamAudioStore()
 
+    private struct Chunk {
+        var pts: Double
+        var samples: [Int16]
+    }
+
     private let lock = NSLock()
-    private let capacity = 48_000 * 2 // 2s @ 48k mono
-    private var ring: [Int16]
-    private var writeIdx = 0
-    private var available = 0
+    private var chunks: [Chunk] = []
+    private let maxSeconds: Double = 1.5
+    let storeRate = 48_000
 
     private(set) var packetCount: Int64 = 0
     private(set) var lastUpdate = Date.distantPast
-    let storeRate = 48_000
+    private(set) var lastPTS: Double = -1
 
-    private init() {
-        ring = [Int16](repeating: 0, count: capacity)
-    }
+    private init() {}
 
     var hasFreshAudio: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return available > 0 && Date().timeIntervalSince(lastUpdate) < 2.5
+        return !chunks.isEmpty && Date().timeIntervalSince(lastUpdate) < 2.5
     }
 
     func reset() {
         lock.lock()
-        writeIdx = 0
-        available = 0
+        chunks.removeAll(keepingCapacity: true)
         packetCount = 0
         lastUpdate = .distantPast
+        lastPTS = -1
         lock.unlock()
     }
 
-    /// frames = 每声道采样数；多声道会混成 mono。
-    func publish(samples: UnsafePointer<Int16>, frames: Int, channels: Int, sampleRate: Int) {
+    /// frames = 每声道采样数；pts = 该块起始媒体时间（秒）
+    func publish(samples: UnsafePointer<Int16>, frames: Int, channels: Int, sampleRate: Int, pts: Double) {
         guard frames > 0, channels > 0 else { return }
         let ch = max(1, channels)
         var mono = [Int16](repeating: 0, count: frames)
@@ -54,65 +56,78 @@ final class CamAudioStore {
         }
 
         let rate = sampleRate > 0 ? sampleRate : storeRate
+        let pcm: [Int16]
+        let outPts: Double
         if rate == storeRate {
-            append(mono)
+            pcm = mono
+            outPts = pts
         } else {
-            append(resampleLinear(mono, from: rate, to: storeRate))
+            pcm = resampleLinear(mono, from: rate, to: storeRate)
+            outPts = pts
+        }
+        guard !pcm.isEmpty else { return }
+
+        lock.lock()
+        chunks.append(Chunk(pts: outPts.isFinite && outPts >= 0 ? outPts : nextAppendPTS(), samples: pcm))
+        packetCount += 1
+        lastUpdate = Date()
+        lastPTS = chunks.last!.pts + Double(pcm.count) / Double(storeRate)
+        pruneLocked(before: lastPTS - maxSeconds)
+        lock.unlock()
+
+        if outPts.isFinite, outPts >= 0 {
+            AVSyncClock.shared.noteAudioPTS(outPts)
         }
     }
 
-    /// 按目标 ASBD 写入（静音或推流）；返回是否写入成功。
+    /// 兼容旧调用（无 PTS）
+    func publish(samples: UnsafePointer<Int16>, frames: Int, channels: Int, sampleRate: Int) {
+        publish(samples: samples, frames: frames, channels: channels, sampleRate: sampleRate, pts: -1)
+    }
+
+    /// 从 startPTS 起填充目标格式；与画面同一 mediaTime。
     @discardableResult
-    func fill(into dst: UnsafeMutableRawPointer, byteCount: Int, asbd: AudioStreamBasicDescription) -> Bool {
+    func fill(into dst: UnsafeMutableRawPointer, byteCount: Int, asbd: AudioStreamBasicDescription, startPTS: Double) -> Bool {
         guard byteCount > 0 else { return false }
         let channels = max(1, Int(asbd.mChannelsPerFrame))
-        let bits = Int(asbd.mBitsPerChannel)
-        let bytesPerSample = max(1, bits / 8)
-        let frameBytes = bytesPerSample * channels
+        var isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        var sampleBytes = max(1, Int(asbd.mBitsPerChannel) / 8)
+        if isFloat, sampleBytes < 4 { sampleBytes = 4 }
+        if !isFloat, sampleBytes == 4, (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) == 0 {
+            isFloat = true
+        }
+        let frameBytes = sampleBytes * channels
         guard frameBytes > 0 else { return false }
         let frames = byteCount / frameBytes
         guard frames > 0 else { return false }
 
         let dstRate = asbd.mSampleRate > 0 ? Int(asbd.mSampleRate) : storeRate
-        let needStoreFrames: Int
-        if dstRate == storeRate {
-            needStoreFrames = frames
-        } else {
-            needStoreFrames = max(1, frames * storeRate / dstRate)
-        }
+        let duration = Double(frames) / Double(dstRate)
+        let needStore = max(1, Int((duration * Double(storeRate)).rounded(.up)))
 
-        var src = [Int16](repeating: 0, count: needStoreFrames)
-        let got = read(into: &src, frames: needStoreFrames)
+        var src = [Int16](repeating: 0, count: needStore)
+        let got = readStarting(at: startPTS, into: &src, frames: needStore)
         if got == 0 { return false }
 
         let played: [Int16]
         if dstRate == storeRate {
-            played = src
+            played = Array(src.prefix(got))
         } else {
             played = resampleLinear(Array(src.prefix(got)), from: storeRate, to: dstRate)
         }
 
-        var isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        // 防电流声：声明 float 却按 16bit 写
-        var sampleBytes = bytesPerSample
-        if isFloat, sampleBytes < 4 {
-            sampleBytes = 4
-        }
-        if !isFloat, sampleBytes == 4, (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) == 0 {
-            // 未标 integer 的 4 字节，按 float 处理（RemoteIO 常见）
-            isFloat = true
-        }
         let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-
-        // 用实际 sampleBytes 重算帧数，避免 bpf 算错
-        let realFrameBytes = sampleBytes * channels
-        let realFrames = realFrameBytes > 0 ? byteCount / realFrameBytes : frames
-
+        let realFrames = frameBytes > 0 ? byteCount / frameBytes : frames
         if isNonInterleaved {
             let planeBytes = realFrames * sampleBytes
             for c in 0..<channels {
-                let plane = dst.advanced(by: c * planeBytes)
-                writePlane(plane, frames: realFrames, samples: played, isFloat: isFloat, bytesPerSample: sampleBytes)
+                writePlane(
+                    dst.advanced(by: c * planeBytes),
+                    frames: realFrames,
+                    samples: played,
+                    isFloat: isFloat,
+                    bytesPerSample: sampleBytes
+                )
             }
         } else {
             writeInterleaved(
@@ -127,38 +142,81 @@ final class CamAudioStore {
         return true
     }
 
+    @discardableResult
+    func fill(into dst: UnsafeMutableRawPointer, byteCount: Int, asbd: AudioStreamBasicDescription) -> Bool {
+        fill(into: dst, byteCount: byteCount, asbd: asbd, startPTS: AVSyncClock.shared.mediaTime())
+    }
+
     static func silence(into dst: UnsafeMutableRawPointer, byteCount: Int) {
         memset(dst, 0, byteCount)
     }
 
     // MARK: - private
 
-    private func append(_ samples: [Int16]) {
-        guard !samples.isEmpty else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        for s in samples {
-            ring[writeIdx] = s
-            writeIdx = (writeIdx + 1) % capacity
-            if available < capacity {
-                available += 1
-            }
+    private func nextAppendPTS() -> Double {
+        if let last = chunks.last {
+            return last.pts + Double(last.samples.count) / Double(storeRate)
         }
-        packetCount += 1
-        lastUpdate = Date()
+        return 0
     }
 
-    private func read(into buffer: inout [Int16], frames: Int) -> Int {
+    private func pruneLocked(before pts: Double) {
+        while let first = chunks.first {
+            let end = first.pts + Double(first.samples.count) / Double(storeRate)
+            if end < pts {
+                chunks.removeFirst()
+            } else {
+                break
+            }
+        }
+    }
+
+    private func readStarting(at startPTS: Double, into buffer: inout [Int16], frames: Int) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        let n = min(frames, available)
-        guard n > 0 else { return 0 }
-        let start = (writeIdx - available + capacity) % capacity
-        for i in 0..<n {
-            buffer[i] = ring[(start + i) % capacity]
+        guard frames > 0, !chunks.isEmpty else { return 0 }
+
+        var t = startPTS
+        if !startPTS.isFinite || startPTS < 0 {
+            t = chunks.first!.pts
         }
-        available -= n
-        return n
+
+        // 丢弃过时块
+        pruneLocked(before: t - 0.02)
+
+        var written = 0
+        while written < frames {
+            guard let idx = chunks.firstIndex(where: { chunk in
+                let end = chunk.pts + Double(chunk.samples.count) / Double(storeRate)
+                return end > t
+            }) else { break }
+
+            if idx > 0 {
+                chunks.removeFirst(idx)
+            }
+            let chunk = chunks[0]
+            let offsetSec = max(0, t - chunk.pts)
+            var sampleIdx = Int(offsetSec * Double(storeRate))
+            if sampleIdx >= chunk.samples.count {
+                chunks.removeFirst()
+                continue
+            }
+            let n = min(frames - written, chunk.samples.count - sampleIdx)
+            for i in 0..<n {
+                buffer[written + i] = chunk.samples[sampleIdx + i]
+            }
+            written += n
+            sampleIdx += n
+            t += Double(n) / Double(storeRate)
+            if sampleIdx >= chunk.samples.count {
+                chunks.removeFirst()
+            } else {
+                // 缩块头，避免重复读
+                let left = Array(chunk.samples[sampleIdx...])
+                chunks[0] = Chunk(pts: t, samples: left)
+            }
+        }
+        return written
     }
 
     private func resampleLinear(_ input: [Int16], from srcRate: Int, to dstRate: Int) -> [Int16] {

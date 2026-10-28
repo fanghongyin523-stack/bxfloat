@@ -93,16 +93,21 @@ final class CamFrameBlitter {
 
     private func prepareIfNeeded(width: Int, height: Int, format: OSType) {
         let store = CamFrameStore.shared
-        guard store.hasFreshFrame, let src = store.copyLatest() else { return }
-        let fid = store.frameCount
+        guard store.hasFreshFrame else { return }
+        // 与声音同一 mediaTime，取最接近的历史帧（不能只拿 latest，否则音画脱节）
+        let mediaT = AVSyncClock.shared.mediaTime()
+        guard let src = store.copyForMediaTime(mediaT) ?? store.copyLatest() else { return }
+        // mediaTime 量化到 33ms 一档，与采集节奏对齐并驱动重渲
+        let syncKey = Int64((mediaT * 30.0).rounded())
 
         lock.lock()
-        let same = (fid == lastSrcID && prepW == width && prepH == height && prepFmt == format && prepared != nil)
-        if same {
+        let unchanged = (prepW == width && prepH == height && prepFmt == format &&
+            prepared != nil && lastSrcID == syncKey)
+        if unchanged {
             lock.unlock()
             return
         }
-        lastSrcID = fid
+        lastSrcID = syncKey
         lock.unlock()
 
         // 统一先渲到 BGRA，再视目标格式决定是否二次写入
