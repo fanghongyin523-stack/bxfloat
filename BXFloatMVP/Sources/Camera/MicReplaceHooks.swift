@@ -41,24 +41,23 @@ enum MicReplaceHooks {
         installed = true
         swizzleAudioDataOutput()
         swizzleSessionAddOutput()
-        BXFloatMicAUInstall()
-        NSLog("BXFloatMic hooks installed (AVCapture + AudioUnit)")
+        // 注意：不在启动时 fishhook，避免只读 GOT 写崩导致抖音闪退
+        NSLog("BXFloatMic AVCapture hooks installed (AU deferred)")
     }
 
     /// mode=推流/静音时注入；原麦则 unwrap 透传。
     static func applyAudioMode(_ mode: AudioCaptureMode) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
-        // 直播麦：拍摄页 / 开播页都要能改；视频已替换时同样开启
-        let replaceOn = MediaConfigStore.shared.config.replaceCameraEnabled
-        let want = (onCamera || replaceOn) && (mode == .stream || mode == .mute)
+        // 仅在拍摄/开播界面注入，避免启动首页就 fishhook
+        let want = onCamera && (mode == .stream || mode == .mute)
 
         lock.lock()
         currentMode = mode
         injectActive = want
         lock.unlock()
 
-        // AudioUnit 路径（抖音直播主路径）
+        // AudioUnit 路径：仅在需要推流/静音时才 fishhook（且延迟到主线程空闲）
         let auMode: Int32
         if !want {
             auMode = 0
@@ -68,6 +67,11 @@ enum MicReplaceHooks {
             auMode = 1
         }
         BXFloatMicAUSetMode(auMode)
+        if want {
+            DispatchQueue.main.async {
+                BXFloatMicAUInstall()
+            }
+        }
 
         let outputs = trackedOutputs.allObjects
         for output in outputs {

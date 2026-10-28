@@ -1,15 +1,16 @@
 // Copyright (c) 2013, Facebook, Inc. All rights reserved.
-// Minimal fishhook for iOS arm64 (BSD) — rebind absolute symbols in already-loaded images.
+// fishhook for iOS arm64 — with vm_protect for read-only __DATA_CONST / __AUTH_CONST.
 #include "fishhook.h"
 
 #include <dlfcn.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/sysctl.h>
+#include <sys/mman.h>
 
 #ifdef __LP64__
 typedef struct mach_header_64 mach_header_t;
@@ -48,6 +49,21 @@ static int prepend_rebindings(struct rebindings_entry **entries, struct rebindin
     return 0;
 }
 
+static bool make_writable(void *addr, size_t size) {
+    if (!addr || size == 0) return false;
+    vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
+    vm_size_t len = ((vm_address_t)addr + size + vm_page_size - 1) & ~(vm_page_size - 1);
+    len -= page;
+    kern_return_t kr = vm_protect(
+        mach_task_self(),
+        page,
+        len,
+        false,
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
+    );
+    return kr == KERN_SUCCESS;
+}
+
 static void perform_rebinding_with_section(
     struct rebindings_entry *rebindings,
     section_t *section,
@@ -58,6 +74,9 @@ static void perform_rebinding_with_section(
 ) {
     uint32_t *indirect_symbol_indices = indirect_symtab + section->reserved1;
     void **indirect_symbol_bindings = (void **)((uintptr_t)slide + section->addr);
+    if (!make_writable(indirect_symbol_bindings, (size_t)section->size)) {
+        return;
+    }
     for (uint i = 0; i < section->size / sizeof(void *); i++) {
         uint32_t symtab_index = indirect_symbol_indices[i];
         if (symtab_index == INDIRECT_SYMBOL_ABS || symtab_index == INDIRECT_SYMBOL_LOCAL ||
@@ -66,19 +85,22 @@ static void perform_rebinding_with_section(
         }
         uint32_t strtab_offset = symtab[symtab_index].n_un.n_strx;
         char *symbol_name = strtab + strtab_offset;
-        bool symbol_name_longer_than_1 = symbol_name[0] && symbol_name[1];
+        if (!symbol_name[0] || !symbol_name[1]) continue;
         struct rebindings_entry *cur = rebindings;
         while (cur) {
             for (size_t j = 0; j < cur->rebindings_nel; j++) {
-                if (symbol_name_longer_than_1 &&
-                    strcmp(&symbol_name[1], cur->rebindings[j].name) == 0) {
-                    if (cur->rebindings[j].replaced != NULL &&
-                        *(cur->rebindings[j].replaced) == NULL) {
-                        *(cur->rebindings[j].replaced) = indirect_symbol_bindings[i];
-                    }
-                    indirect_symbol_bindings[i] = cur->rebindings[j].replacement;
+                if (strcmp(&symbol_name[1], cur->rebindings[j].name) != 0) continue;
+                void *current = indirect_symbol_bindings[i];
+                if (current == cur->rebindings[j].replacement) {
                     goto next_symbol;
                 }
+                if (cur->rebindings[j].replaced != NULL &&
+                    *(cur->rebindings[j].replaced) == NULL &&
+                    current != NULL) {
+                    *(cur->rebindings[j].replaced) = current;
+                }
+                indirect_symbol_bindings[i] = cur->rebindings[j].replacement;
+                goto next_symbol;
             }
             cur = cur->next;
         }
@@ -86,9 +108,23 @@ static void perform_rebinding_with_section(
     }
 }
 
-static void rebind_symbols_for_image(struct rebindings_entry *rebindings, const struct mach_header *header, intptr_t slide) {
+static void rebind_symbols_for_image(
+    struct rebindings_entry *rebindings,
+    const struct mach_header *header,
+    intptr_t slide
+) {
     Dl_info info;
     if (dladdr(header, &info) == 0) return;
+
+    // 跳过系统 dyld 共享缓存路径，降低写坏系统 GOT 的风险；主程序/App 内框架仍会重绑
+    if (info.dli_fname) {
+        if (strstr(info.dli_fname, "/usr/lib/") ||
+            strstr(info.dli_fname, "/System/Library/") ||
+            strstr(info.dli_fname, "libswift") ||
+            strstr(info.dli_fname, "BXFloatInject")) {
+            return;
+        }
+    }
 
     segment_command_t *cur_seg_cmd;
     segment_command_t *linkedit_segment = NULL;
@@ -121,18 +157,17 @@ static void rebind_symbols_for_image(struct rebindings_entry *rebindings, const 
     cur = (uintptr_t)header + sizeof(mach_header_t);
     for (uint i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
         cur_seg_cmd = (segment_command_t *)cur;
-        if (cur_seg_cmd->cmd == LC_SEGMENT_ARCH) {
-            if (strcmp(cur_seg_cmd->segname, SEG_DATA) != 0 &&
-                strcmp(cur_seg_cmd->segname, "__DATA_CONST") != 0 &&
-                strcmp(cur_seg_cmd->segname, "__AUTH_CONST") != 0) {
-                continue;
-            }
-            for (uint j = 0; j < cur_seg_cmd->nsects; j++) {
-                section_t *sect = (section_t *)(cur + sizeof(segment_command_t)) + j;
-                if ((sect->flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS ||
-                    (sect->flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
-                    perform_rebinding_with_section(rebindings, sect, slide, symtab, strtab, indirect_symtab);
-                }
+        if (cur_seg_cmd->cmd != LC_SEGMENT_ARCH) continue;
+        if (strcmp(cur_seg_cmd->segname, SEG_DATA) != 0 &&
+            strcmp(cur_seg_cmd->segname, "__DATA_CONST") != 0 &&
+            strcmp(cur_seg_cmd->segname, "__AUTH_CONST") != 0) {
+            continue;
+        }
+        for (uint j = 0; j < cur_seg_cmd->nsects; j++) {
+            section_t *sect = (section_t *)(cur + sizeof(segment_command_t)) + j;
+            uint32_t type = sect->flags & SECTION_TYPE;
+            if (type == S_LAZY_SYMBOL_POINTERS || type == S_NON_LAZY_SYMBOL_POINTERS) {
+                perform_rebinding_with_section(rebindings, sect, slide, symtab, strtab, indirect_symtab);
             }
         }
     }
@@ -145,13 +180,16 @@ static void _rebind_symbols_for_image(const struct mach_header *header, intptr_t
 int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) {
     int retval = prepend_rebindings(&_rebindings_head, rebindings, rebindings_nel);
     if (retval < 0) return retval;
-    if (!_rebindings_head->next) {
+
+    uint32_t c = _dyld_image_count();
+    for (uint32_t i = 0; i < c; i++) {
+        _rebind_symbols_for_image(_dyld_get_image_header(i), _dyld_get_image_vmaddr_slide(i));
+    }
+    // 后续新加载的镜像也重绑（如晚加载的直播组件）
+    static bool registered = false;
+    if (!registered) {
+        registered = true;
         _dyld_register_func_for_add_image(_rebind_symbols_for_image);
-    } else {
-        uint32_t c = _dyld_image_count();
-        for (uint32_t i = 0; i < c; i++) {
-            _rebind_symbols_for_image(_dyld_get_image_header(i), _dyld_get_image_vmaddr_slide(i));
-        }
     }
     return retval;
 }
