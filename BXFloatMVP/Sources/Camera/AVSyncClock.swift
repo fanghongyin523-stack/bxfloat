@@ -1,8 +1,9 @@
 import Foundation
 import QuartzCore
 
-/// 音画呈现：先把 ring 养到约 1.5～2s，再 play。
-/// 源不够时 hold-last，禁止靠猛 drop-old 追赶（会把卡顿放大）。
+/// 音画呈现：按实际能攒到的 ring（约 0.6～1.0s）开播。
+/// 禁止长时间 wait-video 钉在 pts=0（会整段冻住第一帧）。
+/// 源不够时 hold-last；只有明显积压才 drop-old。
 final class AVSyncClock {
     static let shared = AVSyncClock()
 
@@ -26,13 +27,18 @@ final class AVSyncClock {
     private var lastVideoWall: CFTimeInterval = 0
     private var lastAudioWall: CFTimeInterval = 0
     private var frozenForVideo = false
+    private var warmupWallStart: CFTimeInterval = 0
 
-    /// 目标缓冲（用户选 1.5～2s）
-    private let targetDelay: Double = 1.7
+    /// 目标呈现滞后。实测解码 ring 常只有 ~0.8～1.0s，1.7 会永远养不满。
+    private let targetDelay: Double = 0.85
     /// 只有 ring 过大才丢旧
-    private let maxDelay: Double = 2.8
-    /// 低于此就 hold，不再往直播沿贴
-    private let minPlayBuffer: Double = 1.1
+    private let maxDelay: Double = 1.8
+    /// 低于此 hold；须明显低于 targetDelay，否则一开播就 hold 冻死
+    private let minPlayBuffer: Double = 0.35
+    /// 暖机需要的直播沿（秒）
+    private let warmupNeed: Double = 0.55
+    /// 墙钟超时强制开播，避免 wait-video 永久钉第一帧
+    private let maxWarmupWall: Double = 0.65
     private let maxSlewPerCall: Double = 0.025
     private let videoStallSec: Double = 0.25
 
@@ -55,6 +61,7 @@ final class AVSyncClock {
         lastVideoWall = 0
         lastAudioWall = 0
         frozenForVideo = false
+        warmupWallStart = 0
         lastAction = .play
         lastSkewMs = 0
         lastBufferedMs = 0
@@ -97,9 +104,11 @@ final class AVSyncClock {
             return max(0, mediaAnchor)
         }
 
-        // 暖机：直播沿还没攒够目标缓冲 → hold，不开追
+        // 暖机：凑够一小段缓冲就开播；超时也强制开，避免永久 return 0 冻第一帧
         if !warmedUp {
-            if live < targetDelay * 0.85 {
+            if warmupWallStart <= 0 { warmupWallStart = now }
+            let waited = now - warmupWallStart
+            if live < warmupNeed, waited < maxWarmupWall {
                 lastAction = .waitVideo
                 lastBufferedMs = live * 1000
                 refreshSkewLocked()
@@ -107,7 +116,8 @@ final class AVSyncClock {
             }
             warmedUp = true
             hasAnchor = true
-            mediaAnchor = max(0, live - targetDelay)
+            let delay = min(targetDelay, max(0.2, live * 0.7))
+            mediaAnchor = max(0, live - delay)
             wallAnchor = now
             lastAction = .play
             refreshMetricsLocked(present: mediaAnchor, live: live)
@@ -132,17 +142,15 @@ final class AVSyncClock {
         let buffered = live - t
 
         if buffered < minPlayBuffer {
-            // ring 变薄：hold 上一帧，等源把缓冲养回来（绝不 drop-old 硬追）
+            // ring 变薄：hold 上一帧，等源把缓冲养回来
             lastAction = .holdLast
             refreshMetricsLocked(present: mediaAnchor, live: live)
-            // 轻微把 wall 对齐，避免恢复时一次性猛冲
             wallAnchor = now
             mediaAnchor = min(mediaAnchor, max(0, live - minPlayBuffer))
             return mediaAnchor
         }
 
         if buffered > maxDelay {
-            // 只有明显积压才丢掉过旧呈现点
             let ideal = max(0, live - targetDelay)
             let delta = min(maxSlewPerCall, max(0, ideal - t))
             t += delta
@@ -154,7 +162,6 @@ final class AVSyncClock {
             return t
         }
 
-        // 正常播放：时钟跟墙钟走
         mediaAnchor = t
         wallAnchor = now
         lastAction = .play
@@ -165,7 +172,6 @@ final class AVSyncClock {
     func shouldFreezeAudio() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        // 仅视频真停时冻声；hold-last 时仍按播放头出声，避免无故静音
         return frozenForVideo || lastAction == .freezeAudio
     }
 
