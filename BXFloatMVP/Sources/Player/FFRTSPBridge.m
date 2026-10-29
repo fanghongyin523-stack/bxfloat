@@ -35,6 +35,7 @@ void BXFloatFFStop(void) {
 @property (nonatomic, copy) NSString *currentURL;
 @property (nonatomic, strong) dispatch_queue_t queue;
 @property (nonatomic, strong) dispatch_queue_t decodeQueue;
+@property (nonatomic, strong) dispatch_queue_t audioDecodeQueue;
 @property (nonatomic, assign) int64_t frameOK;
 @property (nonatomic, assign) int64_t frameFail;
 @property (nonatomic, assign) uint64_t sessionGen;
@@ -64,6 +65,8 @@ void BXFloatFFStop(void) {
     if (self) {
         _queue = dispatch_queue_create("com.baixiang.ffrtsp", DISPATCH_QUEUE_SERIAL);
         _decodeQueue = dispatch_queue_create("com.baixiang.ffrtsp.decode", DISPATCH_QUEUE_SERIAL);
+        // 音画分队：关键帧解码不再堵住音频（约 2s GOP 时尤其明显）
+        _audioDecodeQueue = dispatch_queue_create("com.baixiang.ffrtsp.audio", DISPATCH_QUEUE_SERIAL);
         _sessionGen = 0;
     }
     return self;
@@ -287,7 +290,8 @@ void BXFloatFFStop(void) {
             break;
         }
 
-        dispatch_async(self.decodeQueue, ^{
+        dispatch_queue_t q = isAudio ? self.audioDecodeQueue : self.decodeQueue;
+        dispatch_async(q, ^{
             if (self.sessionGen != gen || !self.running) {
                 av_packet_free(&owned);
                 dispatch_semaphore_signal(slots);
@@ -369,21 +373,23 @@ void BXFloatFFStop(void) {
     }
 
     if (startedDecodeSplit) {
-        // 等解码排空再释放 codec / sws / swr
+        // 等音画解码排空再释放
         dispatch_sync(self.decodeQueue, ^{
             if (swsBlock) {
                 sws_freeContext(swsBlock);
                 swsBlock = NULL;
             }
+            if (vframe) {
+                av_frame_free(&vframe);
+                vframe = NULL;
+            }
+        });
+        dispatch_sync(self.audioDecodeQueue, ^{
             if (swrBlock) {
                 swr_free(&swrBlock);
                 swrBlock = NULL;
             }
             av_freep(&audioOutBufBlock);
-            if (vframe) {
-                av_frame_free(&vframe);
-                vframe = NULL;
-            }
             if (aframe) {
                 av_frame_free(&aframe);
                 aframe = NULL;
@@ -421,8 +427,8 @@ cleanup:
     if (w <= 0 || h <= 0) return NO;
 
     enum AVPixelFormat srcFmt = (enum AVPixelFormat)frame->format;
-    *swsInOut = sws_getCachedContext(
-        *swsInOut, w, h, srcFmt, w, h, AV_PIX_FMT_BGRA, SWS_BILINEAR, NULL, NULL, NULL
+        *swsInOut = sws_getCachedContext(
+        *swsInOut, w, h, srcFmt, w, h, AV_PIX_FMT_BGRA, SWS_FAST_BILINEAR, NULL, NULL, NULL
     );
     if (!*swsInOut) return NO;
 
