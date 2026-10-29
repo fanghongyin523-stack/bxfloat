@@ -82,6 +82,10 @@ final class CamAudioStore {
             lock.unlock()
         }
         let endPTS = startPTS + Double(pcm.count) / Double(storeRate)
+        // 视频还没跟上：丢掉超前音频，防止沿差涨到数秒
+        if mapped >= 0, !AVSyncClock.shared.shouldAcceptAudioEndPTS(endPTS) {
+            return
+        }
 
         lock.lock()
         chunks.append(Chunk(pts: startPTS, samples: pcm))
