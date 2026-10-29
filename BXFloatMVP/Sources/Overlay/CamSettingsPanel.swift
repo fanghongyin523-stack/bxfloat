@@ -222,7 +222,7 @@ final class CamSettingsPanel: UIView {
                     ? "有画面无音频包：OBS 推流需勾选音频轨"
                     : (cfg.audioCaptureMode != .microphone && BXFloatMicAUPaintCount() == 0 && MicReplaceHooks.paintCount == 0
                         ? "麦未写入：进「开直播」页试麦，或杀抖音重进"
-                        : "运行中 · 目标缓冲≈0.85s")),
+                        : "运行中 · 软变速跟 ring")),
         ].joined(separator: "\n")
     }
 
