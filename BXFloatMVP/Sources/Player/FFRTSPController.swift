@@ -26,6 +26,7 @@ enum FFRTSPController {
         CamFrameStore.shared.reset()
         CamAudioStore.shared.reset()
         AVSyncClock.shared.reset()
+        CamPipelineDiag.shared.reset()
         activePullURL = trimmed
         if isAvailable {
             trimmed.withCString { BXFloatFFStartUTF8($0) }

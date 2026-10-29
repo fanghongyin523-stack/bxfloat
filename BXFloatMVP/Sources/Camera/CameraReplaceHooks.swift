@@ -46,8 +46,14 @@ enum CameraReplaceHooks {
     private(set) static var retainedProxyCount: Int = 0
 
     static func noteCallback() { callbackCount += 1 }
-    static func notePaintOK() { paintCount += 1 }
-    static func notePaintFail() { paintFailCount += 1 }
+    static func notePaintOK() {
+        paintCount += 1
+        CamPipelineDiag.shared.noteVideoReplaceOK()
+    }
+    static func notePaintFail() {
+        paintFailCount += 1
+        CamPipelineDiag.shared.noteVideoReplaceFail()
+    }
 
     static func isReplaceActive() -> Bool {
         lock.lock()

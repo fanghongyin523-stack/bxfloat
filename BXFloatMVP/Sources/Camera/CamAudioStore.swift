@@ -84,7 +84,14 @@ final class CamAudioStore {
         let endPTS = startPTS + Double(pcm.count) / Double(storeRate)
         // 视频还没跟上：丢掉超前音频，防止沿差涨到数秒
         if mapped >= 0, !AVSyncClock.shared.shouldAcceptAudioEndPTS(endPTS) {
+            CamPipelineDiag.shared.noteAudioClockDiscard()
             return
+        }
+
+        pcm.withUnsafeBufferPointer { buf in
+            if let base = buf.baseAddress {
+                CamPipelineDiag.shared.noteAudioInput(samples: base, count: buf.count)
+            }
         }
 
         lock.lock()
@@ -128,6 +135,7 @@ final class CamAudioStore {
         // 先刷新 AVSYNC；硬 hold / 视频空窗：冻播放头，用末样延持（避免硬切零电流声）
         let target = AVSyncClock.shared.mediaTime()
         if AVSyncClock.shared.shouldFreezeAudio() {
+            CamPipelineDiag.shared.noteAudioUnderrun()
             fillHoldSample(into: dst, frames: frames, channels: channels, isFloat: isFloat, sampleBytes: sampleBytes)
             return false
         }
@@ -138,6 +146,7 @@ final class CamAudioStore {
 
         var out: [Int16]
         if got <= 0 {
+            CamPipelineDiag.shared.noteAudioUnderrun()
             out = [Int16](repeating: lastSample, count: frames)
         } else if dstRate == storeRate {
             out = Array(src.prefix(frames))
@@ -176,6 +185,9 @@ final class CamAudioStore {
             sampleBytes: sampleBytes,
             nonInterleaved: isNonInterleaved
         )
+        if got > 0 {
+            CamPipelineDiag.shared.noteAudioOutput(samples: out)
+        }
         return got > 0
     }
 

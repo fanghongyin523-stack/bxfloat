@@ -116,7 +116,7 @@ final class CamSettingsPanel: UIView {
 
         statusLabel.textColor = UIColor.white.withAlphaComponent(0.55)
         statusLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        statusLabel.numberOfLines = 4
+        statusLabel.numberOfLines = 0
 
         [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, audioLabel, audioControl, collapseButton, statusLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
@@ -209,11 +209,14 @@ final class CamSettingsPanel: UIView {
         _ = clock.mediaTime() // 刷新 action / buffered
         let vBuf = Int(store.bufferedSeconds() * 1000)
         let aBuf = Int(CamAudioStore.shared.bufferedSeconds() * 1000)
+        let diag = CamPipelineDiag.shared.panelLines()
         statusLabel.text = [
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
             "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · 延迟 \(String(format: "%.1f", clock.latencySeconds()))s · 沿差 \(String(format: "%.0f", clock.estimatedAVDelta() * 1000))ms",
             "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionName())",
+            diag.0,
+            diag.1,
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"

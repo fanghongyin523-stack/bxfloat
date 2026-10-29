@@ -1,5 +1,9 @@
 #import "FFRTSPBridge.h"
 
+extern void BXFloatDiagVideoDecodeOK(void);
+extern void BXFloatDiagVideoDecodeFail(void);
+extern void BXFloatDiagVideoSlotWait(void);
+
 #if BXFLOAT_HAS_FFMPEG
 
 #include <libavformat/avformat.h>
@@ -289,6 +293,9 @@ void BXFloatFFStop(void) {
             if (dispatch_semaphore_wait(slot, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) == 0) {
                 break;
             }
+            if (isVideo) {
+                BXFloatDiagVideoSlotWait();
+            }
         }
         if (!self.running) {
             av_packet_free(&owned);
@@ -307,6 +314,7 @@ void BXFloatFFStop(void) {
                 av_packet_free(&owned);
                 if (dr < 0) {
                     self.frameFail++;
+                    BXFloatDiagVideoDecodeFail();
                     dispatch_semaphore_signal(slot);
                     return;
                 }
@@ -315,6 +323,7 @@ void BXFloatFFStop(void) {
                     if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
                     if (dr < 0) {
                         self.frameFail++;
+                        BXFloatDiagVideoDecodeFail();
                         break;
                     }
                     int64_t ts = vframe->best_effort_timestamp;
@@ -323,8 +332,10 @@ void BXFloatFFStop(void) {
                     if (ts != AV_NOPTS_VALUE) pts = ts * av_q2d(videoTB);
                     if (![self publishFrame:vframe codecCtx:vctx sws:&swsBlock pts:pts]) {
                         self.frameFail++;
+                        BXFloatDiagVideoDecodeFail();
                     } else {
                         self.frameOK++;
+                        BXFloatDiagVideoDecodeOK();
                     }
                 }
             } else if (isAudio && actx && swrBlock && aframe) {

@@ -26,10 +26,13 @@ final class CamFrameStore {
 
     func publish(_ buffer: CVPixelBuffer, pts: Double = -1) {
         let mapped = pts >= 0 ? AVSyncClock.shared.mapPTS(pts) : -1
+        var pruned = 0
         lock.lock()
         frames.append(TimedFrame(buffer: buffer, pts: mapped))
         if frames.count > maxFrames {
-            frames.removeFirst(frames.count - maxFrames)
+            let n = frames.count - maxFrames
+            frames.removeFirst(n)
+            pruned += n
         }
         lastHeld = buffer
         width = CVPixelBufferGetWidth(buffer)
@@ -42,9 +45,12 @@ final class CamFrameStore {
             let floorPTS = mapped - 3.2
             while let first = frames.first, first.pts >= 0, first.pts < floorPTS {
                 frames.removeFirst()
+                pruned += 1
             }
         }
         lock.unlock()
+        CamPipelineDiag.shared.noteVideoCacheWrite()
+        CamPipelineDiag.shared.noteVideoCachePrune(pruned)
         if mapped >= 0 {
             AVSyncClock.shared.noteVideoPTS(mapped)
         }
