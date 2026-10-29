@@ -1,14 +1,14 @@
 import Foundation
 import QuartzCore
 
-/// 音画呈现：按实际能攒到的 ring（约 0.6～1.0s）开播。
-/// 禁止长时间 wait-video 钉在 pts=0（会整段冻住第一帧）。
-/// 源不够时 hold-last；只有明显积压才 drop-old。
+/// 音画呈现：软变速跟 ring，禁止周期性硬 hold（会两秒一卡）。
+/// 仅在真正空窗时 hold；缓冲偏低时放慢时钟而不是冻死画面。
 final class AVSyncClock {
     static let shared = AVSyncClock()
 
     enum Action: String {
         case play
+        case slow = "slow"
         case holdLast = "hold-last"
         case freezeAudio = "freeze-audio"
         case dropOld = "drop-old"
@@ -29,18 +29,20 @@ final class AVSyncClock {
     private var frozenForVideo = false
     private var warmupWallStart: CFTimeInterval = 0
 
-    /// 目标呈现滞后。实测解码 ring 常只有 ~0.8～1.0s，1.7 会永远养不满。
-    private let targetDelay: Double = 0.85
-    /// 只有 ring 过大才丢旧
-    private let maxDelay: Double = 1.8
-    /// 低于此 hold；须明显低于 targetDelay，否则一开播就 hold 冻死
-    private let minPlayBuffer: Double = 0.35
-    /// 暖机需要的直播沿（秒）
+    /// 目标呈现滞后
+    private let targetDelay: Double = 1.0
+    /// 缓冲过高才加速追
+    private let maxDelay: Double = 2.2
+    /// 低于此开始放慢（不再硬 hold）
+    private let lowWater: Double = 0.45
+    /// 仅低于此才硬 hold（真欠载）
+    private let criticalLow: Double = 0.06
+    /// 高于此略加速消耗积压
+    private let highWater: Double = 1.55
     private let warmupNeed: Double = 0.55
-    /// 墙钟超时强制开播，避免 wait-video 永久钉第一帧
     private let maxWarmupWall: Double = 0.65
-    private let maxSlewPerCall: Double = 0.025
-    private let videoStallSec: Double = 0.25
+    private let maxSlewPerCall: Double = 0.04
+    private let videoStallSec: Double = 0.35
 
     private(set) var driftResyncCount: Int64 = 0
     private(set) var lastAction: Action = .play
@@ -104,7 +106,6 @@ final class AVSyncClock {
             return max(0, mediaAnchor)
         }
 
-        // 暖机：凑够一小段缓冲就开播；超时也强制开，避免永久 return 0 冻第一帧
         if !warmedUp {
             if warmupWallStart <= 0 { warmupWallStart = now }
             let waited = now - warmupWallStart
@@ -116,7 +117,7 @@ final class AVSyncClock {
             }
             warmedUp = true
             hasAnchor = true
-            let delay = min(targetDelay, max(0.2, live * 0.7))
+            let delay = min(targetDelay, max(0.25, live * 0.75))
             mediaAnchor = max(0, live - delay)
             wallAnchor = now
             lastAction = .play
@@ -130,41 +131,74 @@ final class AVSyncClock {
             wallAnchor = now
         }
 
-        // 视频空窗：冻时钟 + 冻音频
+        // 视频真停：冻时钟 + 冻音频（短空窗用 soft 即可，阈值略放宽）
         if lastVideoPTS >= 0, (now - lastVideoWall) > videoStallSec {
             frozenForVideo = true
             lastAction = .freezeAudio
-            refreshMetricsLocked(present: mediaAnchor, live: live)
-            return mediaAnchor
-        }
-
-        var t = mediaAnchor + (now - wallAnchor)
-        let buffered = live - t
-
-        if buffered < minPlayBuffer {
-            // ring 变薄：hold 上一帧，等源把缓冲养回来
-            lastAction = .holdLast
-            refreshMetricsLocked(present: mediaAnchor, live: live)
             wallAnchor = now
-            mediaAnchor = min(mediaAnchor, max(0, live - minPlayBuffer))
+            refreshMetricsLocked(present: mediaAnchor, live: live)
             return mediaAnchor
         }
 
+        let wallDelta = max(0, now - wallAnchor)
+        var rate = 1.0
+        var action: Action = .play
+
+        // 先按 1x 估缓冲，决定变速
+        var tentative = mediaAnchor + wallDelta
+        var buffered = live - tentative
+
+        if buffered < criticalLow {
+            // 真欠载：钉住，等源。音频侧应同步冻播放头，避免电流声
+            lastAction = .holdLast
+            wallAnchor = now
+            mediaAnchor = min(mediaAnchor, max(0, live - criticalLow))
+            refreshMetricsLocked(present: mediaAnchor, live: live)
+            return mediaAnchor
+        }
+
+        if buffered < lowWater {
+            // 放慢：0.55～0.9，缓冲越薄越慢，平滑过渡，不两秒一卡
+            let span = max(0.001, lowWater - criticalLow)
+            let x = min(1.0, max(0.0, (buffered - criticalLow) / span))
+            rate = 0.55 + 0.35 * x
+            action = .slow
+        } else if buffered > maxDelay {
+            rate = 1.12
+            action = .dropOld
+            driftResyncCount += 1
+        } else if buffered > highWater {
+            rate = 1.06
+            action = .play
+        } else {
+            // 朝目标缓冲微调
+            let err = buffered - targetDelay
+            if err < -0.12 {
+                rate = 0.92
+                action = .slow
+            } else if err > 0.25 {
+                rate = 1.04
+            }
+        }
+
+        var t = mediaAnchor + wallDelta * rate
+        // 软钳：不要冲过直播沿
+        let maxT = max(0, live - criticalLow)
+        if t > maxT {
+            t = maxT
+            if action == .play { action = .slow }
+        }
+        // 积压过大时允许小幅快进（有限）
         if buffered > maxDelay {
             let ideal = max(0, live - targetDelay)
             let delta = min(maxSlewPerCall, max(0, ideal - t))
             t += delta
-            mediaAnchor = t
-            wallAnchor = now
-            driftResyncCount += 1
-            lastAction = .dropOld
-            refreshMetricsLocked(present: t, live: live)
-            return t
+            action = .dropOld
         }
 
         mediaAnchor = t
         wallAnchor = now
-        lastAction = .play
+        lastAction = action
         refreshMetricsLocked(present: t, live: live)
         return t
     }
@@ -172,7 +206,10 @@ final class AVSyncClock {
     func shouldFreezeAudio() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return frozenForVideo || lastAction == .freezeAudio
+        // 画面硬 hold / 视频空窗：音频也冻，避免播放头空转再拽回产生电流声
+        return frozenForVideo
+            || lastAction == .freezeAudio
+            || lastAction == .holdLast
     }
 
     func latencySeconds() -> Double {
