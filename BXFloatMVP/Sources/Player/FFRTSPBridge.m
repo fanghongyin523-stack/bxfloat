@@ -246,9 +246,11 @@ void BXFloatFFStop(void) {
         audioTB = fmt->streams[audioIdx]->time_base;
     }
 
-    // 读包与解码分离。解码慢时用背压堵住读侧，禁止丢包（丢包→收帧少→drop-old→卡顿）。
+    // 读包与解码分离。音画分槽背压，禁止互相抢名额。
     gen = self.sessionGen;
-    slots = dispatch_semaphore_create(96);
+    dispatch_semaphore_t vSlots = dispatch_semaphore_create(48);
+    dispatch_semaphore_t aSlots = dispatch_semaphore_create(24);
+    slots = vSlots;
     swrBlock = swr;
     swr = NULL; // 所有权交给 decode 路径，cleanup 前 sync 回收
     vframe = frame;
@@ -279,9 +281,10 @@ void BXFloatFFStop(void) {
         av_packet_unref(packet);
         if (!owned) continue;
 
+        dispatch_semaphore_t slot = isAudio ? aSlots : vSlots;
         // 一直等到有解码槽：宁可延迟涨，也不丢 OBS 已稳定推来的包
         while (self.running) {
-            if (dispatch_semaphore_wait(slots, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) == 0) {
+            if (dispatch_semaphore_wait(slot, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) == 0) {
                 break;
             }
         }
@@ -294,7 +297,7 @@ void BXFloatFFStop(void) {
         dispatch_async(q, ^{
             if (self.sessionGen != gen || !self.running) {
                 av_packet_free(&owned);
-                dispatch_semaphore_signal(slots);
+                dispatch_semaphore_signal(slot);
                 return;
             }
             if (isVideo && vctx && vframe) {
@@ -302,7 +305,7 @@ void BXFloatFFStop(void) {
                 av_packet_free(&owned);
                 if (dr < 0) {
                     self.frameFail++;
-                    dispatch_semaphore_signal(slots);
+                    dispatch_semaphore_signal(slot);
                     return;
                 }
                 while (dr >= 0 && self.running && self.sessionGen == gen) {
@@ -326,7 +329,7 @@ void BXFloatFFStop(void) {
                 int dr = avcodec_send_packet(actx, owned);
                 av_packet_free(&owned);
                 if (dr < 0) {
-                    dispatch_semaphore_signal(slots);
+                    dispatch_semaphore_signal(slot);
                     return;
                 }
                 while (dr >= 0 && self.running && self.sessionGen == gen) {
@@ -368,7 +371,7 @@ void BXFloatFFStop(void) {
             } else {
                 av_packet_free(&owned);
             }
-            dispatch_semaphore_signal(slots);
+            dispatch_semaphore_signal(slot);
         });
     }
 
