@@ -107,14 +107,36 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
+
+        let fwBefore = floatWindow
+        let sceneMismatch = fwBefore != nil && scene != nil && fwBefore?.windowScene !== scene
+        let missingWindow = floatWindow == nil
+
         ensureFloatWindow(preferring: scene)
         guard let fw = floatWindow else {
             apply(MediaConfigStore.shared.config)
             return
         }
-        if bubbleView == nil {
+
+        let bubbleMissing = bubbleView == nil
+        let bubbleOrphan = bubbleView.map { $0.superview !== fw } ?? false
+
+        // 定时器：窗口/场景/气泡都正常时不做整套同步（避免每秒 syncPuller）
+        if reason == "timer",
+           !missingWindow,
+           !sceneMismatch,
+           !bubbleMissing,
+           !bubbleOrphan,
+           !fw.isHidden
+        {
+            return
+        }
+
+        if bubbleMissing {
             apply(MediaConfigStore.shared.config)
-        } else if let bubble = bubbleView, bubble.superview !== fw {
+            return
+        }
+        if bubbleOrphan, let bubble = bubbleView {
             NSLog("BXFloatCam reattach bubble reason=%@", reason)
             fw.addSubview(bubble)
         }
