@@ -1,7 +1,7 @@
 import AudioToolbox
 import Foundation
 
-/// 音频 ring + 连续播放头。欠载静音；视频恢复中冻结播放头（对标 freeze-audio）。
+/// 音频 ring + 连续播放头。欠载用末样延持（非硬切零），避免电流声/爆音。
 final class CamAudioStore {
     static let shared = CamAudioStore()
 
@@ -16,7 +16,8 @@ final class CamAudioStore {
     let storeRate = 48_000
 
     private var playhead: Double = -1
-    private let maxPlayheadSlew: Double = 0.015
+    private let maxPlayheadSlew: Double = 0.012
+    private var lastSample: Int16 = 0
 
     private(set) var packetCount: Int64 = 0
     private(set) var lastUpdate = Date.distantPast
@@ -45,6 +46,7 @@ final class CamAudioStore {
         lastUpdate = .distantPast
         lastPTS = -1
         playhead = -1
+        lastSample = 0
         lock.unlock()
     }
 
@@ -119,10 +121,10 @@ final class CamAudioStore {
         let duration = Double(frames) / Double(dstRate)
         let needStore = max(1, Int((duration * Double(storeRate)).rounded(.up)) + 2)
 
-        // 先刷新 AVSYNC；视频空窗则冻音频（静音且不推进播放头）
+        // 先刷新 AVSYNC；硬 hold / 视频空窗：冻播放头，用末样延持（避免硬切零电流声）
         let target = AVSyncClock.shared.mediaTime()
         if AVSyncClock.shared.shouldFreezeAudio() {
-            Self.silence(into: dst, byteCount: byteCount)
+            fillHoldSample(into: dst, frames: frames, channels: channels, isFloat: isFloat, sampleBytes: sampleBytes)
             return false
         }
         let startPTS = advancePlayhead(target: target, duration: duration)
@@ -131,45 +133,45 @@ final class CamAudioStore {
         let got = peekStarting(at: startPTS, into: &src, frames: needStore)
 
         var out: [Int16]
-        if dstRate == storeRate {
+        if got <= 0 {
+            out = [Int16](repeating: lastSample, count: frames)
+        } else if dstRate == storeRate {
             out = Array(src.prefix(frames))
-        } else if got == 0 {
-            out = [Int16](repeating: 0, count: frames)
+            if out.count < frames {
+                let pad = lastSampleOf(out) ?? lastSample
+                out.append(contentsOf: repeatElement(pad, count: frames - out.count))
+            }
         } else {
             var rs = resampleLinear(Array(src.prefix(max(got, 1))), from: storeRate, to: dstRate)
             if rs.count < frames {
-                rs.append(contentsOf: repeatElement(0, count: frames - rs.count))
+                let pad = lastSampleOf(rs) ?? lastSample
+                rs.append(contentsOf: repeatElement(pad, count: frames - rs.count))
             } else if rs.count > frames {
                 rs = Array(rs.prefix(frames))
             }
             out = rs
         }
-        if out.count < frames {
-            out.append(contentsOf: repeatElement(Int16(0), count: frames - out.count))
+        let prevSample = lastSample
+        // 短淡入：从延持恢复时压掉台阶，减爆音/电流声
+        if got > 0, !out.isEmpty, abs(Int(out[0]) - Int(prevSample)) > 10000 {
+            let fade = min(48, out.count)
+            for i in 0..<fade {
+                let a = Double(i) / Double(fade)
+                out[i] = Int16(clamping: Int(Double(prevSample) * (1 - a) + Double(out[i]) * a))
+            }
         }
+        if let s = lastSampleOf(out) { lastSample = s }
 
         let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        if isNonInterleaved {
-            let planeBytes = frames * sampleBytes
-            for c in 0..<channels {
-                writePlane(
-                    dst.advanced(by: c * planeBytes),
-                    frames: frames,
-                    samples: out,
-                    isFloat: isFloat,
-                    bytesPerSample: sampleBytes
-                )
-            }
-        } else {
-            writeInterleaved(
-                dst,
-                frames: frames,
-                channels: channels,
-                samples: out,
-                isFloat: isFloat,
-                bytesPerSample: sampleBytes
-            )
-        }
+        writePCM(
+            dst,
+            frames: frames,
+            channels: channels,
+            samples: out,
+            isFloat: isFloat,
+            sampleBytes: sampleBytes,
+            nonInterleaved: isNonInterleaved
+        )
         return got > 0
     }
 
@@ -202,15 +204,73 @@ final class CamAudioStore {
             playhead = max(0, target)
         } else {
             let err = target - playhead
-            if abs(err) > 0.4 {
-                playhead += max(-0.08, min(0.08, err * 0.3))
-            } else if abs(err) > 0.05 {
-                playhead += max(-maxPlayheadSlew, min(maxPlayheadSlew, err * 0.2))
+            // 大跳只缓拉，禁止一次跳几十毫秒（会出电流声）
+            if abs(err) > 0.35 {
+                playhead += max(-0.04, min(0.04, err * 0.15))
+            } else if abs(err) > 0.04 {
+                playhead += max(-maxPlayheadSlew, min(maxPlayheadSlew, err * 0.18))
             }
         }
         let start = playhead
         playhead += max(0, duration)
         return start
+    }
+
+    private func lastSampleOf(_ samples: [Int16]) -> Int16? {
+        guard let s = samples.last else { return nil }
+        return s
+    }
+
+    private func fillHoldSample(
+        into dst: UnsafeMutableRawPointer,
+        frames: Int,
+        channels: Int,
+        isFloat: Bool,
+        sampleBytes: Int
+    ) {
+        // 调用方 asbd 可能是非交错；这里按交错写一帧宽，AU 路径 ch=1 时等价
+        let hold = [Int16](repeating: lastSample, count: frames)
+        writePCM(
+            dst,
+            frames: frames,
+            channels: channels,
+            samples: hold,
+            isFloat: isFloat,
+            sampleBytes: sampleBytes,
+            nonInterleaved: false
+        )
+    }
+
+    private func writePCM(
+        _ dst: UnsafeMutableRawPointer,
+        frames: Int,
+        channels: Int,
+        samples: [Int16],
+        isFloat: Bool,
+        sampleBytes: Int,
+        nonInterleaved: Bool
+    ) {
+        if nonInterleaved {
+            let planeBytes = frames * sampleBytes
+            for c in 0..<channels {
+                writePlane(
+                    dst.advanced(by: c * planeBytes),
+                    frames: frames,
+                    samples: samples,
+                    isFloat: isFloat,
+                    bytesPerSample: sampleBytes
+                )
+            }
+        } else {
+            writeInterleaved(
+                dst,
+                frames: frames,
+                channels: channels,
+                samples: samples,
+                isFloat: isFloat,
+                bytesPerSample: sampleBytes
+            )
+        }
     }
 
     private func peekStarting(at startPTS: Double, into buffer: inout [Int16], frames: Int) -> Int {
