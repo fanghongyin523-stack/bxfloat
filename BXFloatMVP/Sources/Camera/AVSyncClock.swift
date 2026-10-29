@@ -39,8 +39,8 @@ final class AVSyncClock {
     private let criticalLow: Double = 0.06
     /// 高于此略加速消耗积压
     private let highWater: Double = 1.55
-    private let warmupNeed: Double = 0.55
-    private let maxWarmupWall: Double = 0.65
+    private let warmupNeed: Double = 0.35
+    private let maxWarmupWall: Double = 0.45
     private let maxSlewPerCall: Double = 0.04
     private let videoStallSec: Double = 0.35
 
@@ -93,6 +93,17 @@ final class AVSyncClock {
         lastAudioEndPTS = pts
         lastAudioWall = CACurrentMediaTime()
         lock.unlock()
+    }
+
+    /// 音频不得甩开视频太远（分队列后曾出现沿差 3s+ → 永久 wait-video）。
+    /// 返回 false 时调用方应丢弃该段 PCM，别写入 ring。
+    func shouldAcceptAudioEndPTS(_ endPTS: Double) -> Bool {
+        guard endPTS.isFinite, endPTS >= 0 else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        if lastVideoPTS < 0 { return true }
+        // 允许音频最多超前视频 ~280ms（覆盖一帧抖动）
+        return endPTS <= lastVideoPTS + 0.28
     }
 
     func mediaTime() -> Double {
@@ -245,9 +256,14 @@ final class AVSyncClock {
     }
 
     private func liveEdgeLocked() -> Double {
-        if lastVideoPTS >= 0, lastAudioEndPTS >= 0 {
-            return min(lastVideoPTS, lastAudioEndPTS)
+        // 呈现以视频为主：音频超前已在 shouldAccept 拦住；
+        // 音频落后过多时不拖死直播沿（否则又会 wait-video）。
+        if lastVideoPTS >= 0 {
+            if lastAudioEndPTS >= 0, lastAudioEndPTS + 0.6 >= lastVideoPTS {
+                return min(lastVideoPTS, lastAudioEndPTS)
+            }
+            return lastVideoPTS
         }
-        return max(lastVideoPTS, lastAudioEndPTS)
+        return lastAudioEndPTS
     }
 }
