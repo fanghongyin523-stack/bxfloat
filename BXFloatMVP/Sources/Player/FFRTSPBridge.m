@@ -127,6 +127,8 @@ void BXFloatFFStop(void) {
     __block AVCodecContext *vctx = NULL;
     __block AVCodecContext *actx = NULL;
     dispatch_semaphore_t slots = NULL;
+    dispatch_semaphore_t vSlots = NULL;
+    dispatch_semaphore_t aSlots = NULL;
     BOOL startedDecodeSplit = NO;
     uint64_t gen = 0;
     AVRational videoTB = {1, 1};
@@ -248,8 +250,8 @@ void BXFloatFFStop(void) {
 
     // 读包与解码分离。音画分槽背压，禁止互相抢名额。
     gen = self.sessionGen;
-    dispatch_semaphore_t vSlots = dispatch_semaphore_create(48);
-    dispatch_semaphore_t aSlots = dispatch_semaphore_create(24);
+    vSlots = dispatch_semaphore_create(48);
+    aSlots = dispatch_semaphore_create(24);
     slots = vSlots;
     swrBlock = swr;
     swr = NULL; // 所有权交给 decode 路径，cleanup 前 sync 回收
