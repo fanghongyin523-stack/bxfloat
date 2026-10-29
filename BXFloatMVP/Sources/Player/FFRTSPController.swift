@@ -13,12 +13,20 @@ func BXFloatFFStop()
 enum FFRTSPController {
     static var isAvailable: Bool { BXFloatFFIsAvailable() }
 
+    /// 当前已请求拉流的 URL；同 URL 重复 start 不得 reset ring/clock。
+    private static var activePullURL: String?
+
     static func start(urlString: String) {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // URL 未变且仍视为在拉：完全不重置（避免 Timer 每秒 syncPuller 清缓冲）
+        if activePullURL == trimmed {
+            return
+        }
         CamFrameStore.shared.reset()
         CamAudioStore.shared.reset()
         AVSyncClock.shared.reset()
+        activePullURL = trimmed
         if isAvailable {
             trimmed.withCString { BXFloatFFStartUTF8($0) }
             NSLog("BXFloatCam puller=ffmpeg url=%@", trimmed)
@@ -29,6 +37,7 @@ enum FFRTSPController {
     }
 
     static func stop() {
+        activePullURL = nil
         if isAvailable {
             BXFloatFFStop()
         }
