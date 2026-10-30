@@ -11,6 +11,8 @@ enum MicReplaceHooks {
     private static let retainedProxies = NSMapTable<AVCaptureAudioDataOutput, MicSampleBufferProxy>.weakToStrongObjects()
     private static var injectActive = false
     private static var currentMode: AudioCaptureMode = .microphone
+    private static var lastCameraSeenAt: CFAbsoluteTime = 0
+    private static let stickyAwaySec: CFAbsoluteTime = 4.0
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -50,19 +52,22 @@ enum MicReplaceHooks {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
         let modeWantsInject = (mode == .stream || mode == .mute)
+        let now = CFAbsoluteTimeGetCurrent()
 
         lock.lock()
         let wasActive = injectActive
         currentMode = mode
-        // 与画面替换同理：用户选推流/静音后，录制过渡 !onCamera 不得把 AU 打回 mode=0
-        // （否则 auCb 冻结、写出静音，需重进开播页才恢复）。
+        if onCamera { lastCameraSeenAt = now }
+        // 录制过渡 sticky；离开相机超过 TTL 后释放，避免影响其它页面。
         let want: Bool
         if !modeWantsInject {
             want = false
         } else if onCamera {
             want = true
+        } else if wasActive, lastCameraSeenAt > 0, (now - lastCameraSeenAt) < stickyAwaySec {
+            want = true
         } else {
-            want = wasActive
+            want = false
         }
         injectActive = want
         lock.unlock()
@@ -97,7 +102,7 @@ enum MicReplaceHooks {
             "BXFloatMic apply mode=%@ cam=%d sticky=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld",
             mode.rawValue,
             onCamera ? 1 : 0,
-            (modeWantsInject && !onCamera && wasActive) ? 1 : 0,
+            (modeWantsInject && !onCamera && want) ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
             retainedProxyCount,
