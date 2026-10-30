@@ -299,10 +299,10 @@ final class CamSettingsPanel: UIView {
     @objc private func copyLogTapped() {
         let exp = CamPipelineDiag.shared.exportLogText()
         UIPasteboard.general.string = exp.text
-        let mark = exp.exists ? "已复制" : "空日志"
+        let mark = exp.exists ? "已复制" : "仍空"
         copyLogButton.setTitle(mark, for: .normal)
-        NSLog("BXFloatGate export path=%@ bytes≈%d", exp.path, exp.text.utf8.count)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        NSLog("BXFloatGate export path=%@ exists=%d bytes≈%d", exp.path, exp.exists ? 1 : 0, exp.text.utf8.count)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
             self?.copyLogButton.setTitle("复制Gate日志", for: .normal)
         }
     }
