@@ -76,10 +76,20 @@ enum CameraReplaceHooks {
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
-        let want = enabled && onCamera
 
         // 先改标志：关的时候即使还没 unwrap，回调也立刻透传
         lock.lock()
+        let wasActive = replaceActive
+        // 用户关替换才拆代理。开播/录制时抖音常短暂 stopRunning 或摘掉预览层，
+        // 若此时按 !onCamera 拆掉 → 收帧仍在但 out=0（画面冻，需重进）。
+        let want: Bool
+        if !enabled {
+            want = false
+        } else if onCamera {
+            want = true
+        } else {
+            want = wasActive // sticky：录制过渡保持注入
+        }
         replaceActive = want
         lock.unlock()
 
@@ -97,9 +107,10 @@ enum CameraReplaceHooks {
         }
         retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatCam applyReplaceMode cfg=%d cam=%d active=%d tracked=%d retainProxy=%d paintOK=%lld fail=%lld",
+            "BXFloatCam applyReplaceMode cfg=%d cam=%d sticky=%d active=%d tracked=%d retainProxy=%d paintOK=%lld fail=%lld",
             enabled ? 1 : 0,
             onCamera ? 1 : 0,
+            (enabled && !onCamera && wasActive) ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
             retainedProxyCount,
@@ -203,12 +214,10 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
+            // 仅清可见性缓存。不要在 stopRunning 里 apply*Mode：
+            // 录制切换常先停预览会话，再启录像会话；中间 apply 会把 AU/代理拆掉。
             ShootSurfaceDetector.invalidateCache()
-            DispatchQueue.main.async {
-                let cfg = MediaConfigStore.shared.config
-                applyReplaceMode(cfg.replaceCameraEnabled)
-                MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
-            }
+            NSLog("BXFloatCam session stopRunning (keep inject sticky until startRunning/apply)")
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
