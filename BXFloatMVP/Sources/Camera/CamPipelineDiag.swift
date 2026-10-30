@@ -69,6 +69,15 @@ final class CamPipelineDiag {
     private var windowInPeak: Int32 = 0
     private var windowOutPeak: Int32 = 0
 
+    // 交互卡顿：paint 耗时 / 主线程回调
+    private var paintMsMax: Double = 0
+    private var paintMsSum: Double = 0
+    private var paintCostN: Int = 0
+    private var paintOnMainN: Int = 0
+    private var snapPaintMax = 0
+    private var snapPaintAvg = 0
+    private var snapPaintMain = 0
+
     private init() {}
 
     func reset() {
@@ -85,9 +94,20 @@ final class CamPipelineDiag {
         prevVPrune = 0; prevVFail = 0
         prevAInClip = 0; prevAOutClip = 0; prevAUnd = 0; prevADisc = 0
         windowInPeak = 0; windowOutPeak = 0
+        paintMsMax = 0; paintMsSum = 0; paintCostN = 0; paintOnMainN = 0
         lastTick = CACurrentMediaTime()
         lock.unlock()
         appendLogLines(["BXFloatGate --- reset ---"])
+    }
+
+    func notePaintCost(ms: Double, onMain: Bool) {
+        lock.lock()
+        paintCostN += 1
+        paintMsSum += ms
+        if ms > paintMsMax { paintMsMax = ms }
+        if onMain { paintOnMainN += 1 }
+        lock.unlock()
+        tickIfNeeded()
     }
 
     func noteVideoDecodeOK() { bump { vDecodeOK += 1 } }
@@ -168,8 +188,8 @@ final class CamPipelineDiag {
         tickIfNeeded()
     }
 
-    /// 面板两行：视频每秒 / 音频每秒
-    func panelLines() -> (String, String) {
+    /// 面板：视频每秒 / 音频每秒 / paint 卡顿
+    func panelLines() -> (String, String, String) {
         tickIfNeeded()
         lock.lock()
         let v = String(
@@ -182,8 +202,12 @@ final class CamPipelineDiag {
             Double(snapAOutPk) / 32768.0,
             snapAInClip, snapAOutClip, snapAUnd, snapADisc
         )
+        let p = String(
+            format: "Paint max%d avg%d ms · main回调%d/s",
+            snapPaintMax, snapPaintAvg, snapPaintMain
+        )
         lock.unlock()
-        return (v, a)
+        return (v, a, p)
     }
 
     private func bump(_ body: () -> Void) {
@@ -210,6 +234,13 @@ final class CamPipelineDiag {
         snapADisc = Int(aClockDiscard - prevADisc)
         snapAInPk = Int(windowInPeak)
         snapAOutPk = Int(windowOutPeak)
+        snapPaintMax = Int(paintMsMax.rounded())
+        snapPaintAvg = paintCostN > 0 ? Int((paintMsSum / Double(paintCostN)).rounded()) : 0
+        snapPaintMain = paintOnMainN
+        paintMsMax = 0
+        paintMsSum = 0
+        paintCostN = 0
+        paintOnMainN = 0
         let acc = Int(gateAccept - prevGateAccept)
         let rej = Int(gateReject - prevGateReject)
         let aTick = aRawTick
@@ -236,11 +267,15 @@ final class CamPipelineDiag {
         windowInPeak = 0
         windowOutPeak = 0
         lastTick = now
+        let paintMax = snapPaintMax
+        let paintAvg = snapPaintAvg
+        let paintMain = snapPaintMain
         let vLine = String(
-            format: "BXFloatDiag V dec=%d cache=%d out=%d wait=%d prune=%d fail=%d | A inPk=%.2f outPk=%.2f clip=%d/%d und=%d disc=%d",
+            format: "BXFloatDiag V dec=%d cache=%d out=%d wait=%d prune=%d fail=%d | A inPk=%.2f outPk=%.2f clip=%d/%d und=%d disc=%d | paintMax=%d paintAvg=%d mainCb=%d",
             snapVDec, snapVCache, snapVOut, snapVWait, snapVPrune, snapVFail,
             Double(snapAInPk) / 32768.0, Double(snapAOutPk) / 32768.0,
-            snapAInClip, snapAOutClip, snapAUnd, snapADisc
+            snapAInClip, snapAOutClip, snapAUnd, snapADisc,
+            paintMax, paintAvg, paintMain
         )
         lock.unlock()
 
