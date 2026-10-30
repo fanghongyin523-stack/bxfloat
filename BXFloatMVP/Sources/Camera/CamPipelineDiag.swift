@@ -87,7 +87,7 @@ final class CamPipelineDiag {
         windowInPeak = 0; windowOutPeak = 0
         lastTick = CACurrentMediaTime()
         lock.unlock()
-        appendFileLines(["BXFloatGate --- reset ---"])
+        appendLogLines(["BXFloatGate --- reset ---"])
     }
 
     func noteVideoDecodeOK() { bump { vDecodeOK += 1 } }
@@ -263,74 +263,109 @@ final class CamPipelineDiag {
         )
         NSLog("%@", vLine)
         NSLog("%@", gateLine)
-        appendFileLines([vLine, gateLine])
+        appendLogLines([vLine, gateLine])
     }
 
-    // MARK: - 手机可导出的文件日志（Windows 无 idevicesyslog）
+    // MARK: - Windows 可取回：内存环形 + 可写路径落盘
 
-    /// Filza / 爱思可直接打开；剪贴板导出也读此文件。
-    static var logFilePath: String { "/var/mobile/Documents/BXFloat/gate.log" }
+    /// 注入抖音时 /var/mobile/Documents 常不可写；优先内存，其次沙盒/tmp。
+    private let logQueue = DispatchQueue(label: "bx.float.gate.log")
+    private let maxMemLines = 240
+    private let maxLogBytes = 512 * 1024
+    private var memLines: [String] = []
+    private var activeLogPath: String = "(memory-only)"
 
-    func logFileURL() -> URL { URL(fileURLWithPath: Self.logFilePath) }
+    private func candidateLogPaths() -> [String] {
+        var paths: [String] = []
+        let home = NSHomeDirectory()
+        paths.append((home as NSString).appendingPathComponent("Documents/BXFloat/gate.log"))
+        paths.append((home as NSString).appendingPathComponent("tmp/BXFloat-gate.log"))
+        paths.append(NSTemporaryDirectory() + "BXFloat-gate.log")
+        paths.append("/tmp/BXFloat-gate.log")
+        paths.append("/var/mobile/Documents/BXFloat/gate.log")
+        return paths
+    }
 
-    /// 供面板「复制Gate日志」：最多约 80KB 尾部，便于粘到微信传 Windows。
+    /// 供面板「复制Gate日志」：内存优先（不依赖文件权限），便于微信传到 Windows。
     func exportLogText(maxBytes: Int = 80_000) -> (text: String, path: String, exists: Bool) {
-        let path = Self.logFilePath
-        let url = URL(fileURLWithPath: path)
-        guard FileManager.default.fileExists(atPath: path),
-              let data = try? Data(contentsOf: url),
-              !data.isEmpty
-        else {
-            return ("(尚无 gate.log，请先推流并等待至少 1 秒)", path, false)
+        logQueue.sync {
+            let header = "BXFloatGateExport path=\(activeLogPath) lines=\(memLines.count)\n"
+            if !memLines.isEmpty {
+                var body = memLines.joined(separator: "\n") + "\n"
+                if body.utf8.count > maxBytes {
+                    let data = Data(body.utf8)
+                    body = String(data: data.suffix(maxBytes), encoding: .utf8) ?? body
+                    body = "…(截取尾部)\n" + body
+                }
+                return (header + body, activeLogPath, true)
+            }
+            // 内存空时再试文件（杀进程后仍可能有落盘）
+            for path in candidateLogPaths() {
+                guard FileManager.default.fileExists(atPath: path),
+                      let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                      !data.isEmpty
+                else { continue }
+                let slice = data.count > maxBytes ? data.suffix(maxBytes) : data
+                var text = String(data: slice, encoding: .utf8) ?? ""
+                if data.count > maxBytes { text = "…(截取尾部)\n" + text }
+                return (header + text, path, true)
+            }
+            return (
+                header + "(尚无日志：请保持推流≥2秒后再点复制。若仍空=诊断未 tick)\n",
+                activeLogPath,
+                false
+            )
         }
-        let slice: Data
-        if data.count > maxBytes {
-            slice = data.suffix(maxBytes)
-        } else {
-            slice = data
-        }
-        var text = String(data: slice, encoding: .utf8) ?? ""
-        if data.count > maxBytes {
-            text = "…(截取尾部 \(maxBytes) 字节)\n" + text
-        }
-        return (text, path, true)
     }
 
     func clearLogFile() {
         logQueue.async {
-            try? FileManager.default.removeItem(atPath: Self.logFilePath)
+            self.memLines.removeAll(keepingCapacity: true)
+            for path in self.candidateLogPaths() {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+            self.activeLogPath = "(memory-only)"
         }
     }
 
-    private let logQueue = DispatchQueue(label: "bx.float.gate.log")
-    private let maxLogBytes = 512 * 1024
-
-    private func appendFileLines(_ lines: [String]) {
+    private func appendLogLines(_ lines: [String]) {
         let stamp = ISO8601DateFormatter().string(from: Date())
-        let body = lines.map { "\(stamp) \($0)" }.joined(separator: "\n") + "\n"
-        let path = Self.logFilePath
+        let stamped = lines.map { "\(stamp) \($0)" }
+        let body = stamped.joined(separator: "\n") + "\n"
         logQueue.async {
+            self.memLines.append(contentsOf: stamped)
+            if self.memLines.count > self.maxMemLines {
+                self.memLines.removeFirst(self.memLines.count - self.maxMemLines)
+            }
+            guard let data = body.data(using: .utf8) else { return }
             let fm = FileManager.default
-            let dir = (path as NSString).deletingLastPathComponent
-            if !fm.fileExists(atPath: dir) {
-                try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            }
-            let url = URL(fileURLWithPath: path)
-            if !fm.fileExists(atPath: path) {
-                fm.createFile(atPath: path, contents: nil)
-            }
-            guard let handle = try? FileHandle(forWritingTo: url) else { return }
-            handle.seekToEndOfFile()
-            if let data = body.data(using: .utf8) {
+            for path in self.candidateLogPaths() {
+                let dir = (path as NSString).deletingLastPathComponent
+                if !fm.fileExists(atPath: dir) {
+                    try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                }
+                if !fm.fileExists(atPath: path) {
+                    fm.createFile(atPath: path, contents: nil)
+                }
+                guard let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) else {
+                    continue
+                }
+                handle.seekToEndOfFile()
                 handle.write(data)
+                let size = handle.offsetInFile
+                handle.closeFile()
+                self.activeLogPath = path
+                if size > UInt64(self.maxLogBytes),
+                   let all = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                    try? Data(all.suffix(self.maxLogBytes / 2)).write(
+                        to: URL(fileURLWithPath: path),
+                        options: .atomic
+                    )
+                }
+                return
             }
-            let size = handle.offsetInFile
-            handle.closeFile()
-            // 简单滚动：过大则丢掉前半
-            if size > UInt64(self.maxLogBytes), let all = try? Data(contentsOf: url) {
-                let keep = Data(all.suffix(self.maxLogBytes / 2))
-                try? keep.write(to: url, options: .atomic)
-            }
+            // 全部写失败仍保留内存，剪贴板可导出
+            self.activeLogPath = "(memory-only)"
         }
     }
 }
