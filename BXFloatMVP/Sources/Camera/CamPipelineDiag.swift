@@ -87,6 +87,7 @@ final class CamPipelineDiag {
         windowInPeak = 0; windowOutPeak = 0
         lastTick = CACurrentMediaTime()
         lock.unlock()
+        appendFileLines(["BXFloatGate --- reset ---"])
     }
 
     func noteVideoDecodeOK() { bump { vDecodeOK += 1 } }
@@ -262,6 +263,75 @@ final class CamPipelineDiag {
         )
         NSLog("%@", vLine)
         NSLog("%@", gateLine)
+        appendFileLines([vLine, gateLine])
+    }
+
+    // MARK: - 手机可导出的文件日志（Windows 无 idevicesyslog）
+
+    /// Filza / 爱思可直接打开；剪贴板导出也读此文件。
+    static var logFilePath: String { "/var/mobile/Documents/BXFloat/gate.log" }
+
+    func logFileURL() -> URL { URL(fileURLWithPath: Self.logFilePath) }
+
+    /// 供面板「复制Gate日志」：最多约 80KB 尾部，便于粘到微信传 Windows。
+    func exportLogText(maxBytes: Int = 80_000) -> (text: String, path: String, exists: Bool) {
+        let path = Self.logFilePath
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path),
+              let data = try? Data(contentsOf: url),
+              !data.isEmpty
+        else {
+            return ("(尚无 gate.log，请先推流并等待至少 1 秒)", path, false)
+        }
+        let slice: Data
+        if data.count > maxBytes {
+            slice = data.suffix(maxBytes)
+        } else {
+            slice = data
+        }
+        var text = String(data: slice, encoding: .utf8) ?? ""
+        if data.count > maxBytes {
+            text = "…(截取尾部 \(maxBytes) 字节)\n" + text
+        }
+        return (text, path, true)
+    }
+
+    func clearLogFile() {
+        logQueue.async {
+            try? FileManager.default.removeItem(atPath: Self.logFilePath)
+        }
+    }
+
+    private let logQueue = DispatchQueue(label: "bx.float.gate.log")
+    private let maxLogBytes = 512 * 1024
+
+    private func appendFileLines(_ lines: [String]) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let body = lines.map { "\(stamp) \($0)" }.joined(separator: "\n") + "\n"
+        let path = Self.logFilePath
+        logQueue.async {
+            let fm = FileManager.default
+            let dir = (path as NSString).deletingLastPathComponent
+            if !fm.fileExists(atPath: dir) {
+                try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            }
+            let url = URL(fileURLWithPath: path)
+            if !fm.fileExists(atPath: path) {
+                fm.createFile(atPath: path, contents: nil)
+            }
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            handle.seekToEndOfFile()
+            if let data = body.data(using: .utf8) {
+                handle.write(data)
+            }
+            let size = handle.offsetInFile
+            handle.closeFile()
+            // 简单滚动：过大则丢掉前半
+            if size > UInt64(self.maxLogBytes), let all = try? Data(contentsOf: url) {
+                let keep = Data(all.suffix(self.maxLogBytes / 2))
+                try? keep.write(to: url, options: .atomic)
+            }
+        }
     }
 }
 
