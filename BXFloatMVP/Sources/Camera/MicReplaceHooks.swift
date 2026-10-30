@@ -49,11 +49,21 @@ enum MicReplaceHooks {
     static func applyAudioMode(_ mode: AudioCaptureMode) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
-        // 仅在拍摄/开播界面注入，避免启动首页就 fishhook
-        let want = onCamera && (mode == .stream || mode == .mute)
+        let modeWantsInject = (mode == .stream || mode == .mute)
 
         lock.lock()
+        let wasActive = injectActive
         currentMode = mode
+        // 与画面替换同理：用户选推流/静音后，录制过渡 !onCamera 不得把 AU 打回 mode=0
+        // （否则 auCb 冻结、写出静音，需重进开播页才恢复）。
+        let want: Bool
+        if !modeWantsInject {
+            want = false
+        } else if onCamera {
+            want = true
+        } else {
+            want = wasActive
+        }
         injectActive = want
         lock.unlock()
 
@@ -84,9 +94,10 @@ enum MicReplaceHooks {
         }
         retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatMic apply mode=%@ cam=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld",
+            "BXFloatMic apply mode=%@ cam=%d sticky=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld",
             mode.rawValue,
             onCamera ? 1 : 0,
+            (modeWantsInject && !onCamera && wasActive) ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
             retainedProxyCount,
