@@ -91,7 +91,7 @@ final class CamPipelineDiag {
     func noteSessionEvent(_ message: String) {
         let line = "BXFloatSession \(message)"
         NSLog("%@", line)
-        appendLogLines([line])
+        appendLogLines([line], syncFlush: true)
     }
 
     private func startMainWatchdogIfNeeded() {
@@ -366,7 +366,11 @@ final class CamPipelineDiag {
     // MARK: - Windows 可取回：内存环形 + 可写路径落盘
 
     /// 注入抖音时 /var/mobile/Documents 常不可写；优先内存，其次沙盒/tmp。
-    private let logQueue = DispatchQueue(label: "bx.float.gate.log")
+    private let logQueue: DispatchQueue = {
+        let q = DispatchQueue(label: "bx.float.gate.log")
+        q.setSpecific(key: CamPipelineDiag.logQueueKey, value: 1)
+        return q
+    }()
     private let maxMemLines = 240
     private let maxLogBytes = 512 * 1024
     private var memLines: [String] = []
@@ -425,11 +429,11 @@ final class CamPipelineDiag {
         }
     }
 
-    private func appendLogLines(_ lines: [String]) {
+    private func appendLogLines(_ lines: [String], syncFlush: Bool = false) {
         let stamp = ISO8601DateFormatter().string(from: Date())
         let stamped = lines.map { "\(stamp) \($0)" }
         let body = stamped.joined(separator: "\n") + "\n"
-        logQueue.async {
+        let work: () -> Void = {
             self.memLines.append(contentsOf: stamped)
             if self.memLines.count > self.maxMemLines {
                 self.memLines.removeFirst(self.memLines.count - self.maxMemLines)
@@ -449,6 +453,9 @@ final class CamPipelineDiag {
                 }
                 handle.seekToEndOfFile()
                 handle.write(data)
+                if syncFlush {
+                    try? handle.synchronize()
+                }
                 let size = handle.offsetInFile
                 handle.closeFile()
                 self.activeLogPath = path
@@ -464,7 +471,19 @@ final class CamPipelineDiag {
             // 全部写失败仍保留内存，剪贴板可导出
             self.activeLogPath = "(memory-only)"
         }
+        if syncFlush {
+            // 启停事件尽量立刻落盘，避免卡死杀进程后日志丢失
+            if DispatchQueue.getSpecific(key: Self.logQueueKey) != nil {
+                work()
+            } else {
+                logQueue.sync(execute: work)
+            }
+        } else {
+            logQueue.async(execute: work)
+        }
     }
+
+    private static let logQueueKey = DispatchSpecificKey<UInt8>()
 }
 
 @_cdecl("BXFloatDiagVideoDecodeOK")
