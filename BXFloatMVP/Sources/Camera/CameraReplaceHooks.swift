@@ -380,15 +380,6 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         super.init()
     }
 
-    deinit {
-        deliverLock.lock()
-        if let pendingSample {
-            CFRelease(pendingSample)
-            self.pendingSample = nil
-        }
-        deliverLock.unlock()
-    }
-
     private var originalWasMain: Bool {
         originalQueue == nil || originalQueue === DispatchQueue.main
     }
@@ -450,11 +441,9 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
             BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
             return
         }
-        // paintQueue → main：合并投递。禁止 main.sync（与 startRunning 死锁）。
-        CFRetain(sampleBuffer)
+        // paintQueue → main：合并投递（Swift ARC 持有 sampleBuffer）。禁止 main.sync。
         deliverLock.lock()
-        if let old = pendingSample {
-            CFRelease(old)
+        if pendingSample != nil {
             coalescedDropCount += 1
         }
         pendingSample = sampleBuffer
@@ -485,7 +474,6 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         deliverLock.unlock()
         guard let sb, let out, let conn else { return }
         BXFloatForwardDidOutput(originalTarget, out, sb, conn)
-        CFRelease(sb)
     }
 }
 
