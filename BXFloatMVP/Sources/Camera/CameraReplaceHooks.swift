@@ -50,8 +50,6 @@ enum CameraReplaceHooks {
 
     /// 仅当抖音原回调是 main/nil 时改挂此队列，避免触摸卡死；非 main 原队列保持不动
     static let paintQueue = DispatchQueue(label: "bx.cam.paint", qos: .userInteractive)
-    /// start/stopRunning 专用，禁止在主线程同步跑 session 启停
-    private static let sessionQueue = DispatchQueue(label: "bx.cam.session", qos: .userInitiated)
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -268,26 +266,20 @@ enum CameraReplaceHooks {
             }
             ShootSurfaceDetector.invalidateCache()
             let onMain = Thread.isMainThread
-            CamPipelineDiag.shared.noteSessionEvent("startRunning begin onMain=\(onMain ? 1 : 0)")
+            // 必须同步调用原实现：异步会破坏抖音暂停/继续的 stop→start 时序（isRunning 竞态）。
+            CamPipelineDiag.shared.noteSessionEvent("startRunning begin onMain=\(onMain ? 1 : 0) sync=1")
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            let run: () -> Void = {
-                let t0 = CACurrentMediaTime()
-                unsafeBitCast(original, to: Fn.self)(session, sel)
-                let ms = (CACurrentMediaTime() - t0) * 1000.0
-                CamPipelineDiag.shared.noteSessionEvent(
-                    String(format: "startRunning done ms=%.0f onMainWas=%d", ms, onMain ? 1 : 0)
-                )
-                DispatchQueue.main.async {
-                    let cfg = MediaConfigStore.shared.config
-                    applyReplaceMode(cfg.replaceCameraEnabled)
-                    MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
-                }
-            }
-            // 主线程调用时改到 sessionQueue，避免暂停后继续时堵死触摸
-            if onMain {
-                sessionQueue.async(execute: run)
-            } else {
-                run()
+            let t0 = CACurrentMediaTime()
+            unsafeBitCast(original, to: Fn.self)(session, sel)
+            let ms = (CACurrentMediaTime() - t0) * 1000.0
+            CamPipelineDiag.shared.noteSessionEvent(
+                String(format: "startRunning done ms=%.0f onMain=%d", ms, onMain ? 1 : 0)
+            )
+            // apply 仍异步，避免在启停路径上做 wrap/锁
+            DispatchQueue.main.async {
+                let cfg = MediaConfigStore.shared.config
+                applyReplaceMode(cfg.replaceCameraEnabled)
+                MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
@@ -300,26 +292,19 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             let onMain = Thread.isMainThread
-            CamPipelineDiag.shared.noteSessionEvent("stopRunning begin onMain=\(onMain ? 1 : 0)")
+            CamPipelineDiag.shared.noteSessionEvent("stopRunning begin onMain=\(onMain ? 1 : 0) sync=1")
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            let run: () -> Void = {
-                let t0 = CACurrentMediaTime()
-                unsafeBitCast(original, to: Fn.self)(session, sel)
-                let ms = (CACurrentMediaTime() - t0) * 1000.0
-                // 仅清可见性缓存。不要在 stopRunning 里 apply*Mode。
-                ShootSurfaceDetector.invalidateCache()
-                CamPipelineDiag.shared.noteSessionEvent(
-                    String(format: "stopRunning done ms=%.0f pauseSticky=1", ms)
-                )
-                NSLog("BXFloatCam session stopRunning (pauseSticky until startRunning/apply)")
-            }
-            if onMain {
-                sessionQueue.async(execute: run)
-            } else {
-                run()
-            }
+            let t0 = CACurrentMediaTime()
+            // 同步 stop：禁止 async，否则继续录制时 start 可能跑在 stop 完成前
+            unsafeBitCast(original, to: Fn.self)(session, sel)
+            let ms = (CACurrentMediaTime() - t0) * 1000.0
+            ShootSurfaceDetector.invalidateCache()
+            CamPipelineDiag.shared.noteSessionEvent(
+                String(format: "stopRunning done ms=%.0f pauseSticky=1", ms)
+            )
+            NSLog("BXFloatCam session stopRunning sync (pauseSticky until startRunning/apply)")
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -381,11 +366,31 @@ enum CameraReplaceHooks {
 final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let originalTarget: AnyObject
     let originalQueue: DispatchQueue?
+    /// 原回调在 main 时：paint 在 paintQueue，向 main 合并投递（丢中间帧），避免 sync 死锁与 30fps 灌主线程
+    private let deliverLock = NSLock()
+    private var pendingSample: CMSampleBuffer?
+    private var pendingOutput: AVCaptureOutput?
+    private var pendingConnection: AVCaptureConnection?
+    private var deliverScheduled = false
+    private var coalescedDropCount: Int64 = 0
 
     init(target: AnyObject, originalQueue: DispatchQueue?) {
         self.originalTarget = target
         self.originalQueue = originalQueue
         super.init()
+    }
+
+    deinit {
+        deliverLock.lock()
+        if let pendingSample {
+            CFRelease(pendingSample)
+            self.pendingSample = nil
+        }
+        deliverLock.unlock()
+    }
+
+    private var originalWasMain: Bool {
+        originalQueue == nil || originalQueue === DispatchQueue.main
     }
 
     override func responds(to aSelector: Selector!) -> Bool {
@@ -430,14 +435,57 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         BXFloatForwardDidDrop(originalTarget, output, sampleBuffer, connection)
     }
 
-    /// 原队列是 main 时我们挂在 paintQueue：同步转发（禁止 main.sync / 禁止 async 灌主线程）。
-    /// 原队列非 main：回调已在原队列上，同步转发即符合抖音设定。
     private func forwardDidOutput(
         _ output: AVCaptureOutput,
         sampleBuffer: CMSampleBuffer,
         connection: AVCaptureConnection
     ) {
-        BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
+        // 非 main 原队列：回调已在其队列，同步转发。
+        if !originalWasMain {
+            BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
+            return
+        }
+        // 已在主线程（少见）：直接转，勿再 async
+        if Thread.isMainThread {
+            BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
+            return
+        }
+        // paintQueue → main：合并投递。禁止 main.sync（与 startRunning 死锁）。
+        CFRetain(sampleBuffer)
+        deliverLock.lock()
+        if let old = pendingSample {
+            CFRelease(old)
+            coalescedDropCount += 1
+        }
+        pendingSample = sampleBuffer
+        pendingOutput = output
+        pendingConnection = connection
+        let needSchedule = !deliverScheduled
+        deliverScheduled = true
+        let drops = coalescedDropCount
+        deliverLock.unlock()
+        if drops > 0, drops % 120 == 0 {
+            CamPipelineDiag.shared.noteSessionEvent("fwdCoalesce drops=\(drops)")
+        }
+        guard needSchedule else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.flushPendingToOriginal()
+        }
+    }
+
+    private func flushPendingToOriginal() {
+        deliverLock.lock()
+        let sb = pendingSample
+        let out = pendingOutput
+        let conn = pendingConnection
+        pendingSample = nil
+        pendingOutput = nil
+        pendingConnection = nil
+        deliverScheduled = false
+        deliverLock.unlock()
+        guard let sb, let out, let conn else { return }
+        BXFloatForwardDidOutput(originalTarget, out, sb, conn)
+        CFRelease(sb)
     }
 }
 
