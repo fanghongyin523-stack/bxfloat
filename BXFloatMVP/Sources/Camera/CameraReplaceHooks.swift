@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import ObjectiveC
+import QuartzCore
 import UIKit
 
 @_silgen_name("BXFloatForwardDidOutput")
@@ -38,6 +39,12 @@ enum CameraReplaceHooks {
     /// key=output（弱），value=proxy（强）——修回调为 0 的根因
     private static let retainedProxies = NSMapTable<AVCaptureVideoDataOutput, CamSampleBufferProxy>.weakToStrongObjects()
     private static var replaceActive = false
+    /// 上次确认在拍摄面的时间；用于录制过渡 sticky，并在离开相机后超时释放
+    private static var lastCameraSeenAt: CFAbsoluteTime = 0
+    private static let stickyAwaySec: CFAbsoluteTime = 4.0
+
+    /// 替换期间专用回调队列：避免抖音把 sampleBuffer 派到主线程导致触摸卡死
+    static let paintQueue = DispatchQueue(label: "bx.cam.paint", qos: .userInteractive)
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -76,20 +83,24 @@ enum CameraReplaceHooks {
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
+        let now = CFAbsoluteTimeGetCurrent()
 
         // 先改标志：关的时候即使还没 unwrap，回调也立刻透传
         lock.lock()
         let wasActive = replaceActive
-        // 用户关替换才拆代理。开播/录制时抖音常短暂 stopRunning 或摘掉预览层，
-        // 若此时按 !onCamera 拆掉 → 收帧仍在但 out=0（画面冻，需重进）。
+        if onCamera { lastCameraSeenAt = now }
+        // 用户关替换才拆。录制过渡 !onCamera 短时 sticky；离开相机超时后释放，避免影响其它页。
         let want: Bool
         if !enabled {
             want = false
         } else if onCamera {
             want = true
+        } else if wasActive, lastCameraSeenAt > 0, (now - lastCameraSeenAt) < stickyAwaySec {
+            want = true
         } else {
-            want = wasActive // sticky：录制过渡保持注入
+            want = false
         }
+        let sticky = enabled && !onCamera && want
         replaceActive = want
         lock.unlock()
 
@@ -99,8 +110,8 @@ enum CameraReplaceHooks {
         let outputs = trackedOutputs.allObjects
         for output in outputs {
             if want {
-                let q = output.sampleBufferCallbackQueue ?? DispatchQueue.main
-                q.async { ensureWrapped(output) }
+                // 不要派到抖音原 queue（常是 main）再 wrap；直接在 paintQueue 上挂代理
+                paintQueue.async { ensureWrapped(output) }
             } else {
                 unwrap(output)
             }
@@ -110,7 +121,7 @@ enum CameraReplaceHooks {
             "BXFloatCam applyReplaceMode cfg=%d cam=%d sticky=%d active=%d tracked=%d retainProxy=%d paintOK=%lld fail=%lld",
             enabled ? 1 : 0,
             onCamera ? 1 : 0,
-            (enabled && !onCamera && wasActive) ? 1 : 0,
+            sticky ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
             retainedProxyCount,
@@ -133,20 +144,25 @@ enum CameraReplaceHooks {
                 track(vout)
             }
             var finalDelegate = delegate
+            var finalQueue = queue
             if isReplaceActive(),
                let vout = obj as? AVCaptureVideoDataOutput,
                let delegate,
                !(delegate is CamSampleBufferProxy)
             {
-                let proxy = CamSampleBufferProxy(target: delegate)
+                let proxy = CamSampleBufferProxy(target: delegate, originalQueue: queue)
                 retainedProxies.setObject(proxy, forKey: vout)
                 retainedProxyCount = retainedProxies.count
                 finalDelegate = proxy
+                finalQueue = paintQueue
+                vout.alwaysDiscardsLateVideoFrames = true
                 wrapCount += 1
+                let onMain = (queue == nil) || (queue == DispatchQueue.main)
                 NSLog(
-                    "BXFloatCam wrap #%lld retain=%d %@",
+                    "BXFloatCam wrap #%lld retain=%d origMain=%d %@",
                     wrapCount,
                     retainedProxyCount,
+                    onMain ? 1 : 0,
                     String(describing: type(of: delegate))
                 )
             }
@@ -158,7 +174,7 @@ enum CameraReplaceHooks {
                 retainedProxyCount = retainedProxies.count
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
-            unsafeBitCast(original, to: Fn.self)(obj, sel, finalDelegate, queue)
+            unsafeBitCast(original, to: Fn.self)(obj, sel, finalDelegate, finalQueue)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -177,8 +193,7 @@ enum CameraReplaceHooks {
             if let vout = output as? AVCaptureVideoDataOutput {
                 track(vout)
                 if isReplaceActive() {
-                    let q = vout.sampleBufferCallbackQueue ?? DispatchQueue.main
-                    q.async { ensureWrapped(vout) }
+                    paintQueue.async { ensureWrapped(vout) }
                 }
             }
         }
@@ -225,9 +240,14 @@ enum CameraReplaceHooks {
     private static func ensureWrapped(_ output: AVCaptureVideoDataOutput) {
         track(output)
         guard isReplaceActive() else { return }
+        output.alwaysDiscardsLateVideoFrames = true
         if let existing = output.sampleBufferDelegate as? CamSampleBufferProxy {
             retainedProxies.setObject(existing, forKey: output)
             retainedProxyCount = retainedProxies.count
+            // 已是我们的 proxy 但队列可能仍被抖音改回 main：强制拉回 paintQueue
+            if output.sampleBufferCallbackQueue !== paintQueue {
+                BXFloatRestoreSampleBufferDelegate(output, existing, paintQueue)
+            }
             return
         }
         // delegate 已是 nil：可能是上次弱引用把 proxy 放掉了，无法恢复原 target
@@ -235,13 +255,18 @@ enum CameraReplaceHooks {
             NSLog("BXFloatCam ensureWrapped skip: delegate=nil (need re-enter camera page)")
             return
         }
-        let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
-        let proxy = CamSampleBufferProxy(target: delegate)
+        let origQ = output.sampleBufferCallbackQueue
+        let proxy = CamSampleBufferProxy(target: delegate, originalQueue: origQ)
         retainedProxies.setObject(proxy, forKey: output) // 先强持有再 set
         retainedProxyCount = retainedProxies.count
-        output.setSampleBufferDelegate(proxy, queue: queue)
+        // 走 swizzle：最终挂到 paintQueue
+        output.setSampleBufferDelegate(proxy, queue: paintQueue)
         wrapCount += 1
-        NSLog("BXFloatCam ensureWrapped retained=%d", retainedProxyCount)
+        NSLog(
+            "BXFloatCam ensureWrapped retained=%d origMain=%d",
+            retainedProxyCount,
+            (origQ == nil || origQ === DispatchQueue.main) ? 1 : 0
+        )
     }
 
     private static func unwrap(_ output: AVCaptureVideoDataOutput) {
@@ -249,7 +274,7 @@ enum CameraReplaceHooks {
             (output.sampleBufferDelegate as? CamSampleBufferProxy)
             ?? retainedProxies.object(forKey: output)
         if let proxy {
-            let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
+            let queue = proxy.originalQueue ?? DispatchQueue.global(qos: .userInteractive)
             BXFloatRestoreSampleBufferDelegate(output, proxy.originalTarget, queue)
             NSLog("BXFloatCam unwrapped")
         }
@@ -260,9 +285,11 @@ enum CameraReplaceHooks {
 
 final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let originalTarget: AnyObject
+    let originalQueue: DispatchQueue?
 
-    init(target: AnyObject) {
+    init(target: AnyObject, originalQueue: DispatchQueue?) {
         self.originalTarget = target
+        self.originalQueue = originalQueue
         super.init()
     }
 
@@ -283,7 +310,9 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         CameraReplaceHooks.noteCallback()
-        // 替换开启时每一帧都必须盖掉真机像素；跳过 = 闪回原摄像头（实测键盘/桌面）。
+        let t0 = CACurrentMediaTime()
+        let onMain = Thread.isMainThread
+        // 替换开启时必须盖掉真机像素；超时则 hold 上一完整帧，禁止闪真机。
         if CameraReplaceHooks.isReplaceActive() {
             if CamBufferPainter.paintInPlace(sampleBuffer) {
                 CameraReplaceHooks.notePaintOK()
@@ -291,6 +320,9 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 CameraReplaceHooks.notePaintFail()
             }
         }
+        let ms = (CACurrentMediaTime() - t0) * 1000.0
+        CamPipelineDiag.shared.notePaintCost(ms: ms, onMain: onMain)
+        // 必须在本回调内同步转发给原代理（sampleBuffer 返回后不可再用）
         BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
     }
 
@@ -314,8 +346,12 @@ enum CamBufferPainter {
     private static var lastGoodH = 0
     private static var lastGoodFmt: OSType = 0
 
+    /// 单帧软预算：超时 hold 上一完整帧，避免主线程/回调队列积压卡触摸。
+    private static let budgetSec: CFTimeInterval = 0.006
+
     @discardableResult
     static func paintInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        let t0 = CACurrentMediaTime()
         guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
         let dw = CVPixelBufferGetWidth(dst)
         let dh = CVPixelBufferGetHeight(dst)
@@ -329,6 +365,7 @@ enum CamBufferPainter {
             NSLog("BXFloatCam paint dstFormat=%u %dx%d (memcpy-only)", fmt, dw, dh)
         }
 
+        // 1) 后台预渲染帧（最快、不碰 ring）
         if let prepared = CamFrameBlitter.shared.copyPrepared(
             width: dw, height: dh, format: fmt
         ), copyPixels(from: prepared, to: dst) {
@@ -336,10 +373,21 @@ enum CamBufferPainter {
             return true
         }
 
-        // 预渲染未就绪 / 拷贝失败：同 mediaTime 推流帧 → 上一成功帧 → 涂黑。
-        // 禁止 copyLatest（会画快声慢）。
+        // 2) 预算紧张或主线程：直接 hold 上一完整帧，禁止再扫 ring / 二次全幅拷贝
+        let tight = Thread.isMainThread || (CACurrentMediaTime() - t0) > budgetSec * 0.4
+        if tight {
+            if let good = copyLastGood(width: dw, height: dh, format: fmt),
+               copyPixels(from: good, to: dst)
+            {
+                return true
+            }
+            return fillBlack(dst)
+        }
+
+        // 3) 预渲染未就绪：同 mediaTime 取帧（禁止 copyLatest）
         let t = AVSyncClock.shared.mediaTime()
-        if let src = CamFrameStore.shared.copyForMediaTime(t),
+        if (CACurrentMediaTime() - t0) < budgetSec,
+           let src = CamFrameStore.shared.copyForMediaTime(t),
            CVPixelBufferGetWidth(src) == dw,
            CVPixelBufferGetHeight(src) == dh,
            CVPixelBufferGetPixelFormatType(src) == fmt,
