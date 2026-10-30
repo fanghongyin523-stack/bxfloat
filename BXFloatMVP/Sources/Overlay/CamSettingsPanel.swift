@@ -19,6 +19,7 @@ final class CamSettingsPanel: UIView {
     private let audioLabel = UILabel()
     private let audioControl = UISegmentedControl(items: ["推流声音", "手机麦克风", "静音"])
     private let collapseButton = UIButton(type: .system)
+    private let copyLogButton = UIButton(type: .system)
     private let statusLabel = UILabel()
 
     override init(frame: CGRect) {
@@ -114,11 +115,18 @@ final class CamSettingsPanel: UIView {
         collapseButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
         collapseButton.addTarget(self, action: #selector(collapseTapped), for: .touchUpInside)
 
+        copyLogButton.setTitle("复制Gate日志", for: .normal)
+        copyLogButton.setTitleColor(.white, for: .normal)
+        copyLogButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
+        copyLogButton.layer.cornerRadius = 8
+        copyLogButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        copyLogButton.addTarget(self, action: #selector(copyLogTapped), for: .touchUpInside)
+
         statusLabel.textColor = UIColor.white.withAlphaComponent(0.55)
         statusLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         statusLabel.numberOfLines = 0
 
-        [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, audioLabel, audioControl, collapseButton, statusLabel].forEach {
+        [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, audioLabel, audioControl, collapseButton, copyLogButton, statusLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             card.addSubview($0)
         }
@@ -166,6 +174,12 @@ final class CamSettingsPanel: UIView {
 
             collapseButton.topAnchor.constraint(equalTo: audioControl.bottomAnchor, constant: 16),
             collapseButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+
+            copyLogButton.centerYAnchor.constraint(equalTo: collapseButton.centerYAnchor),
+            copyLogButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            copyLogButton.heightAnchor.constraint(equalToConstant: 32),
+            copyLogButton.widthAnchor.constraint(equalToConstant: 110),
+            collapseButton.trailingAnchor.constraint(lessThanOrEqualTo: copyLogButton.leadingAnchor, constant: -8),
 
             statusLabel.topAnchor.constraint(equalTo: collapseButton.bottomAnchor, constant: 12),
             statusLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
@@ -280,6 +294,17 @@ final class CamSettingsPanel: UIView {
     @objc private func collapseTapped() {
         commit()
         delegate?.camSettingsPanelDidCollapse(self)
+    }
+
+    @objc private func copyLogTapped() {
+        let exp = CamPipelineDiag.shared.exportLogText()
+        UIPasteboard.general.string = exp.text
+        let mark = exp.exists ? "已复制" : "空日志"
+        copyLogButton.setTitle(mark, for: .normal)
+        NSLog("BXFloatGate export path=%@ bytes≈%d", exp.path, exp.text.utf8.count)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.copyLogButton.setTitle("复制Gate日志", for: .normal)
+        }
     }
 
     @objc private func backgroundTapped(_ g: UITapGestureRecognizer) {
