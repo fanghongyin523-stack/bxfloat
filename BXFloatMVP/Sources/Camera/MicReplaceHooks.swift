@@ -13,6 +13,18 @@ enum MicReplaceHooks {
     private static var currentMode: AudioCaptureMode = .microphone
     private static var lastCameraSeenAt: CFAbsoluteTime = 0
     private static let stickyAwaySec: CFAbsoluteTime = 4.0
+    private static var pauseSticky = false
+    private static var pauseStickyAt: CFAbsoluteTime = 0
+    private static let pauseStickyMaxSec: CFAbsoluteTime = 180.0
+
+    static func markPauseStickyFromStopRunning() {
+        lock.lock()
+        if injectActive {
+            pauseSticky = true
+            pauseStickyAt = CFAbsoluteTimeGetCurrent()
+        }
+        lock.unlock()
+    }
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -57,17 +69,24 @@ enum MicReplaceHooks {
         lock.lock()
         let wasActive = injectActive
         currentMode = mode
-        if onCamera { lastCameraSeenAt = now }
-        // 录制过渡 sticky；离开相机超过 TTL 后释放，避免影响其它页面。
+        if onCamera {
+            lastCameraSeenAt = now
+            pauseSticky = false
+        }
+        // pauseSticky=会话暂停；离开相机仍 4s TTL，不靠拉长宽限。
         let want: Bool
         if !modeWantsInject {
             want = false
+            pauseSticky = false
         } else if onCamera {
+            want = true
+        } else if pauseSticky, (now - pauseStickyAt) < pauseStickyMaxSec {
             want = true
         } else if wasActive, lastCameraSeenAt > 0, (now - lastCameraSeenAt) < stickyAwaySec {
             want = true
         } else {
             want = false
+            pauseSticky = false
         }
         injectActive = want
         lock.unlock()
