@@ -3,6 +3,7 @@ import CoreVideo
 import Foundation
 
 /// 后台按采集格式预渲染；失败时保留上一帧，避免闪回真机摄像头。
+/// 使用 CVPixelBufferPool 复用缓冲，避免长录时每帧 Create 导致内存/卡顿。
 final class CamFrameBlitter {
     static let shared = CamFrameBlitter()
 
@@ -24,6 +25,12 @@ final class CamFrameBlitter {
     private var targetFmt: OSType = 0
     private var ticking = false
 
+    private var bgraPool: CVPixelBufferPool?
+    private var dstPool: CVPixelBufferPool?
+    private var poolW = 0
+    private var poolH = 0
+    private var poolDstFmt: OSType = 0
+
     private init() {}
 
     func setEnabled(_ on: Bool) {
@@ -35,6 +42,11 @@ final class CamFrameBlitter {
             prepW = 0
             prepH = 0
             prepFmt = 0
+            bgraPool = nil
+            dstPool = nil
+            poolW = 0
+            poolH = 0
+            poolDstFmt = 0
         }
         let needTick = on && !ticking
         if needTick { ticking = true }
@@ -53,13 +65,12 @@ final class CamFrameBlitter {
 
     /// 匹配则返回预渲染帧；尺寸突变前仍返回旧帧，杜绝闪真机。
     func copyPrepared(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
-        lock.lock()
+        guard lock.lock(before: Date().addingTimeInterval(0.001)) else { return nil }
         defer { lock.unlock() }
         guard let prepared else { return nil }
         if prepW == width, prepH == height, prepFmt == format {
             return prepared
         }
-        // 尺寸/格式未对齐：返回 nil，上层用 lastGood/黑帧，禁止 latest
         return nil
     }
 
@@ -91,14 +102,78 @@ final class CamFrameBlitter {
         }
     }
 
+    private func ensurePools(width: Int, height: Int, format: OSType) {
+        lock.lock()
+        let need =
+            bgraPool == nil || dstPool == nil || poolW != width || poolH != height || poolDstFmt != format
+        if !need {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferPoolMinimumBufferCountKey: 3,
+        ]
+        var bgra: CVPixelBufferPool?
+        var dst: CVPixelBufferPool?
+        let bgraSrc: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        let dstSrc: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: format,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        CVPixelBufferPoolCreate(
+            kCFAllocatorDefault, attrs as CFDictionary, bgraSrc as CFDictionary, &bgra
+        )
+        CVPixelBufferPoolCreate(
+            kCFAllocatorDefault, attrs as CFDictionary, dstSrc as CFDictionary, &dst
+        )
+
+        lock.lock()
+        bgraPool = bgra
+        dstPool = dst
+        poolW = width
+        poolH = height
+        poolDstFmt = format
+        lock.unlock()
+    }
+
+    private func makeBuffer(pool: CVPixelBufferPool?, width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
+        if let pool {
+            var buf: CVPixelBuffer?
+            let err = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buf)
+            if err == kCVReturnSuccess, let buf { return buf }
+        }
+        var buf: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault, width, height, format, attrs as CFDictionary, &buf
+        ) == kCVReturnSuccess else { return nil }
+        return buf
+    }
+
     private func prepareIfNeeded(width: Int, height: Int, format: OSType) {
         let store = CamFrameStore.shared
         guard store.hasFreshFrame else { return }
         let mediaT = AVSyncClock.shared.mediaTime()
-        // 禁止 copyLatest：最新帧会让画面单飞、声音落后
-        guard let src = store.copyForMediaTime(mediaT) else { return }
+        guard let src = store.copyForMediaTimeIfLock(mediaT) ?? store.copyForMediaTime(mediaT) else {
+            return
+        }
 
-        // 约每帧更新；同一档不重复渲
         let syncKey = Int64((mediaT * 30.0).rounded())
         lock.lock()
         let unchanged = prepared != nil && prepW == width && prepH == height &&
@@ -110,14 +185,16 @@ final class CamFrameBlitter {
         lastSyncKey = syncKey
         lock.unlock()
 
-        var bgra: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            kCVPixelBufferMetalCompatibilityKey: true,
-        ]
-        guard CVPixelBufferCreate(
-            kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &bgra
-        ) == kCVReturnSuccess, let bgra else { return }
+        ensurePools(width: width, height: height, format: format)
+
+        lock.lock()
+        let bgraP = bgraPool
+        let dstP = dstPool
+        lock.unlock()
+
+        guard let bgra = makeBuffer(
+            pool: bgraP, width: width, height: height, format: kCVPixelFormatType_32BGRA
+        ) else { return }
 
         let ciSrc = CIImage(cvPixelBuffer: src)
         let sw = CGFloat(CVPixelBufferGetWidth(src))
@@ -145,11 +222,7 @@ final class CamFrameBlitter {
         if format == kCVPixelFormatType_32BGRA {
             final = bgra
         } else {
-            var dst: CVPixelBuffer?
-            guard CVPixelBufferCreate(
-                kCFAllocatorDefault, width, height, format, attrs as CFDictionary, &dst
-            ) == kCVReturnSuccess, let dst else {
-                // 转换失败：至少把 BGRA 存上（若目标恰好能用）或保留旧 prepared
+            guard let dst = makeBuffer(pool: dstP, width: width, height: height, format: format) else {
                 return
             }
             ci.render(CIImage(cvPixelBuffer: bgra), to: dst, bounds: bounds, colorSpace: colorSpace)
