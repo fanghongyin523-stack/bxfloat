@@ -60,6 +60,17 @@ final class CamFrameStore {
     func copyForMediaTime(_ t: Double) -> CVPixelBuffer? {
         lock.lock()
         defer { lock.unlock() }
+        return copyForMediaTimeLocked(t)
+    }
+
+    /// 采集回调专用：拿不到锁立刻返回 nil，由上层 hold-last，避免锁等待拖死触摸。
+    func copyForMediaTimeIfLock(_ t: Double) -> CVPixelBuffer? {
+        guard lock.lock(before: Date().addingTimeInterval(0.001)) else { return nil }
+        defer { lock.unlock() }
+        return copyForMediaTimeLocked(t)
+    }
+
+    private func copyForMediaTimeLocked(_ t: Double) -> CVPixelBuffer? {
         guard !frames.isEmpty else { return lastHeld }
         if t < 0 || frames.allSatisfy({ $0.pts < 0 }) {
             return frames.last?.buffer ?? lastHeld
