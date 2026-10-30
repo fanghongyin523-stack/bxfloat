@@ -231,6 +231,7 @@ final class CamSettingsPanel: UIView {
             "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionName())",
             diag.0,
             diag.1,
+            diag.2,
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"
