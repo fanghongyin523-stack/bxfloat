@@ -78,7 +78,66 @@ final class CamPipelineDiag {
     private var snapPaintAvg = 0
     private var snapPaintMain = 0
 
-    private init() {}
+    private var watchdogStarted = false
+    private var mainProbeSentAt: CFTimeInterval = 0
+    private var mainProbeAckAt: CFTimeInterval = 0
+    private var snapMainStallMs = 0
+
+    private init() {
+        startMainWatchdogIfNeeded()
+    }
+
+    /// 会话事件自动落盘（不依赖面板按钮；卡住时仍可能有后台 tick 写入）
+    func noteSessionEvent(_ message: String) {
+        let line = "BXFloatSession \(message)"
+        NSLog("%@", line)
+        appendLogLines([line])
+    }
+
+    private func startMainWatchdogIfNeeded() {
+        lock.lock()
+        if watchdogStarted {
+            lock.unlock()
+            return
+        }
+        watchdogStarted = true
+        lock.unlock()
+        // 独立队列探测主线程停顿；结果写入 gate 日志，无需点面板
+        let q = DispatchQueue(label: "bx.float.main.watchdog")
+        q.async {
+            while true {
+                let sent = CACurrentMediaTime()
+                self.lock.lock()
+                self.mainProbeSentAt = sent
+                self.lock.unlock()
+                DispatchQueue.main.async {
+                    let ack = CACurrentMediaTime()
+                    self.lock.lock()
+                    self.mainProbeAckAt = ack
+                    let stall = Int(max(0, (ack - sent) * 1000.0).rounded())
+                    if stall > self.snapMainStallMs { self.snapMainStallMs = stall }
+                    self.lock.unlock()
+                    if stall >= 80 {
+                        self.appendLogLines([
+                            String(format: "BXFloatMainStall ms=%d", stall)
+                        ])
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+                self.lock.lock()
+                let sentAt = self.mainProbeSentAt
+                let ackAt = self.mainProbeAckAt
+                self.lock.unlock()
+                // 主线程半秒仍未 ack：记一笔（UI 已卡时面板不可用，靠文件/内存环）
+                if sentAt > ackAt, (CACurrentMediaTime() - sentAt) >= 0.45 {
+                    let pending = Int(((CACurrentMediaTime() - sentAt) * 1000.0).rounded())
+                    self.appendLogLines([
+                        String(format: "BXFloatMainStall pendingMs=%d (no-ack)", pending)
+                    ])
+                }
+            }
+        }
+    }
 
     func reset() {
         lock.lock()
@@ -202,9 +261,10 @@ final class CamPipelineDiag {
             Double(snapAOutPk) / 32768.0,
             snapAInClip, snapAOutClip, snapAUnd, snapADisc
         )
+        let stall = snapMainStallMs
         let p = String(
-            format: "Paint max%d avg%d ms · main回调%d/s",
-            snapPaintMax, snapPaintAvg, snapPaintMain
+            format: "Paint max%d avg%d ms · main回调%d/s · 主线程卡%d ms",
+            snapPaintMax, snapPaintAvg, snapPaintMain, stall
         )
         lock.unlock()
         return (v, a, p)
@@ -237,10 +297,12 @@ final class CamPipelineDiag {
         snapPaintMax = Int(paintMsMax.rounded())
         snapPaintAvg = paintCostN > 0 ? Int((paintMsSum / Double(paintCostN)).rounded()) : 0
         snapPaintMain = paintOnMainN
+        let mainStall = snapMainStallMs
         paintMsMax = 0
         paintMsSum = 0
         paintCostN = 0
         paintOnMainN = 0
+        snapMainStallMs = 0
         let acc = Int(gateAccept - prevGateAccept)
         let rej = Int(gateReject - prevGateReject)
         let aTick = aRawTick
@@ -271,11 +333,11 @@ final class CamPipelineDiag {
         let paintAvg = snapPaintAvg
         let paintMain = snapPaintMain
         let vLine = String(
-            format: "BXFloatDiag V dec=%d cache=%d out=%d wait=%d prune=%d fail=%d | A inPk=%.2f outPk=%.2f clip=%d/%d und=%d disc=%d | paintMax=%d paintAvg=%d mainCb=%d",
+            format: "BXFloatDiag V dec=%d cache=%d out=%d wait=%d prune=%d fail=%d | A inPk=%.2f outPk=%.2f clip=%d/%d und=%d disc=%d | paintMax=%d paintAvg=%d mainCb=%d mainStall=%d",
             snapVDec, snapVCache, snapVOut, snapVWait, snapVPrune, snapVFail,
             Double(snapAInPk) / 32768.0, Double(snapAOutPk) / 32768.0,
             snapAInClip, snapAOutClip, snapAUnd, snapADisc,
-            paintMax, paintAvg, paintMain
+            paintMax, paintAvg, paintMain, mainStall
         )
         lock.unlock()
 
