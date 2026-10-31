@@ -253,10 +253,9 @@ final class AVSyncClock {
     func shouldFreezeAudio() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        // 画面硬 hold / 视频空窗：音频也冻，避免播放头空转再拽回产生电流声
-        return frozenForVideo
-            || lastAction == .freezeAudio
-            || lastAction == .holdLast
+        // 仅「视频长时间无帧」才冻音频。
+        // hold-last（缓冲临界短抖）不再冻：否则音乐会连续微断 + 包络泵动。
+        return frozenForVideo || lastAction == .freezeAudio
     }
 
     func latencySeconds() -> Double {

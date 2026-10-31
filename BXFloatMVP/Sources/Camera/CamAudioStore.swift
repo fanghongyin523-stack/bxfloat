@@ -281,17 +281,10 @@ final class CamAudioStore {
         let needStore = max(1, Int((duration * Double(storeRate)).rounded(.up)) + 2)
 
         let target = AVSyncClock.shared.mediaTime()
+        // 视频真停：干净静音（禁止末样衰减电流声）；短 hold-last 不走这里
         if AVSyncClock.shared.shouldFreezeAudio() {
             CamPipelineDiag.shared.noteAudioUnderrun()
-            fillWithEnvelope(
-                into: dst,
-                frames: outFrames,
-                auChannels: auCh,
-                isFloat: isFloat,
-                sampleBytes: sampleBytes,
-                nonInterleaved: isNonInterleaved,
-                decaying: true
-            )
+            Self.silence(into: dst, byteCount: byteCount)
             return false
         }
         let startPTS = advancePlayhead(target: target, duration: duration)
@@ -540,8 +533,8 @@ final class CamAudioStore {
         decaying: Bool
     ) {
         ensureScratch(store: 1, out: frames * auChannels)
-        // ~25ms 时间常数：音乐欠载时缓慢落下，减轻泵动感
-        let decayPerFrame = exp(-1.0 / (0.025 * Double(storeRate)))
+        // ~40ms 时间常数：真无包时慢落，避免和短抖叠成连续泵动
+        let decayPerFrame = exp(-1.0 / (0.040 * Double(storeRate)))
         for i in 0..<frames {
             if decaying {
                 envelope = max(0.0, envelope * decayPerFrame)
@@ -575,10 +568,20 @@ final class CamAudioStore {
             playhead = max(0, target)
         } else {
             let err = target - playhead
-            if abs(err) > 0.35 {
-                playhead += max(-0.04, min(0.04, err * 0.15))
-            } else if abs(err) > 0.04 {
-                playhead += max(-maxPlayheadSlew, min(maxPlayheadSlew, err * 0.18))
+            if err > 0.04 {
+                // 目标超前：软追上
+                if err > 0.35 {
+                    playhead += min(0.04, err * 0.15)
+                } else {
+                    playhead += min(maxPlayheadSlew, err * 0.18)
+                }
+            } else if err < -0.04 {
+                // 目标落后：常见于画面 hold-last 钉住 mediaTime。
+                // 禁止回拉播放头（回拉会反复读同一段 → 连续短断）；音频继续往前消耗 ring。
+                // 仅当严重超前视频很多时才轻微刹一下，避免音画永久拉开。
+                if err < -0.50 {
+                    playhead += max(-0.008, err * 0.02)
+                }
             }
         }
         let start = playhead
