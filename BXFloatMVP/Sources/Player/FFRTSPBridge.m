@@ -371,6 +371,8 @@ void BXFloatFFStop(void) {
                         audioOutBufSamplesBlock = outSamples;
                     }
                     uint8_t *outPlanes[1] = { audioOutBufBlock };
+                    // convert 前读 delay：输出首样对应时间 ≈ input_pts - delay/outRate
+                    int64_t delayBefore = swr_get_delay(swrBlock, 48000);
                     int converted = swr_convert(
                         swrBlock,
                         outPlanes,
@@ -384,6 +386,10 @@ void BXFloatFFStop(void) {
                         double pts = -1;
                         if (ts != AV_NOPTS_VALUE) {
                             pts = ts * av_q2d(audioTB);
+                            // 扣 swr 延迟，避免 endPTS 虚高 → 门控误判超前 → 连续拒收断音
+                            if (delayBefore > 0) {
+                                pts -= (double)delayBefore / 48000.0;
+                            }
                             BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
                         }
                         BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, 1, 48000, pts);
