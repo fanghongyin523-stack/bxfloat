@@ -53,6 +53,8 @@ final class CamFrameStore {
         CamPipelineDiag.shared.noteVideoCachePrune(pruned)
         if mapped >= 0 {
             AVSyncClock.shared.noteVideoPTS(mapped)
+            // 视频推进后尝试把超前暂存的音频冲入 ring，避免门控硬拒收造成断音
+            CamAudioStore.shared.flushPendingAgainstVideo()
         }
     }
 
