@@ -95,15 +95,51 @@ final class AVSyncClock {
         lock.unlock()
     }
 
-    /// 音频不得甩开视频太远（分队列后曾出现沿差 3s+ → 永久 wait-video）。
-    /// 返回 false 时调用方应丢弃该段 PCM，别写入 ring。
+    /// 软接纳窗：端点不超视频太多则直接入 ring（覆盖一帧抖动）。
+    /// 故意不放大到数秒——超窗由 CamAudioStore pending/rebase 处理，避免硬拒收断音。
+    private let audioSoftLead: Double = 0.28
+    /// 可暂存等待视频追上的最大超前（有界，不是无限门限）
+    private let audioHoldLead: Double = 1.20
+
+    enum AudioAdmit {
+        case accept
+        /// 暂存：视频还没到，不要丢包
+        case pending(lead: Double)
+        /// 超前过大：把本包起点对齐到建议值后再入 ring（重对齐，非丢弃）
+        case rebase(startPTS: Double, lead: Double)
+        case reject
+    }
+
+    /// 旧接口：仅表示「能否直接入 ring」。pending/rebase 对调用方视为不可直接入。
     func shouldAcceptAudioEndPTS(_ endPTS: Double) -> Bool {
-        guard endPTS.isFinite, endPTS >= 0 else { return false }
+        if case .accept = admitAudio(endPTS: endPTS, duration: 0) { return true }
+        return false
+    }
+
+    /// 音频接纳决策（不改 0.28 软窗；超窗走 pending/rebase，禁止连续硬拒收）。
+    func admitAudio(endPTS: Double, duration: Double) -> AudioAdmit {
+        guard endPTS.isFinite, endPTS >= 0 else { return .reject }
+        let dur = max(0, duration)
         lock.lock()
         defer { lock.unlock() }
-        if lastVideoPTS < 0 { return true }
-        // 允许音频最多超前视频 ~280ms（覆盖一帧抖动）
-        return endPTS <= lastVideoPTS + 0.28
+        if lastVideoPTS < 0 { return .accept }
+        let lead = endPTS - lastVideoPTS
+        if lead <= audioSoftLead { return .accept }
+        if lead <= audioHoldLead { return .pending(lead: lead) }
+        // 重对齐：让本包终点落在 video + softLead/2，保留 PCM
+        let newEnd = lastVideoPTS + audioSoftLead * 0.5
+        let newStart = max(0, newEnd - dur)
+        return .rebase(startPTS: newStart, lead: lead)
+    }
+
+    func audioSoftLeadSeconds() -> Double { audioSoftLead }
+
+    /// 当前音频相对视频超前秒数（诊断）
+    func audioLeadSeconds(endPTS: Double) -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        guard lastVideoPTS >= 0, endPTS.isFinite else { return 0 }
+        return endPTS - lastVideoPTS
     }
 
     func mediaTime() -> Double {
