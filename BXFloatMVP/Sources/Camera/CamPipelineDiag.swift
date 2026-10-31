@@ -149,6 +149,8 @@ final class CamPipelineDiag {
         vRawTick = 0; vTbNum = 0; vTbDen = 0; vRawSec = -1
         gateAccept = 0; gateReject = 0; lastGateEndPTS = -1
         prevGateAccept = 0; prevGateReject = 0
+        gatePending = 0; gateRebase = 0; prevGatePending = 0; prevGateRebase = 0
+        lastGateReason = ""; lastGateLeadMs = 0; audioFormatNote = ""
         prevVDec = 0; prevVCache = 0; prevVOut = 0; prevVWait = 0
         prevVPrune = 0; prevVFail = 0
         prevAInClip = 0; prevAOutClip = 0; prevAUnd = 0; prevADisc = 0
@@ -195,18 +197,46 @@ final class CamPipelineDiag {
         lock.unlock()
     }
 
-    /// 门控结果（不改 shouldAccept 本身；仅记账）
-    func noteAudioGate(accepted: Bool, endPTS: Double) {
+    private var gatePending: Int64 = 0
+    private var gateRebase: Int64 = 0
+    private var lastGateReason: String = ""
+    private var lastGateLeadMs: Double = 0
+    private var snapGatePending = 0
+    private var snapGateRebase = 0
+    private var prevGatePending: Int64 = 0
+    private var prevGateRebase: Int64 = 0
+    private var audioFormatNote: String = ""
+
+    /// 门控记账。pending/rebase 不算硬丢包 disc；仅 reject/flush-drop 计 disc。
+    func noteAudioGate(
+        accepted: Bool,
+        endPTS: Double,
+        reason: String = "",
+        leadMs: Double = 0
+    ) {
         lock.lock()
         lastGateEndPTS = endPTS
+        lastGateReason = reason
+        lastGateLeadMs = leadMs
         if accepted {
             gateAccept += 1
+            if reason.contains("rebase") { gateRebase += 1 }
+        } else if reason == "pending" {
+            gatePending += 1
         } else {
             gateReject += 1
             aClockDiscard += 1
         }
         lock.unlock()
         tickIfNeeded()
+    }
+
+    func noteAudioFormat(_ note: String) {
+        lock.lock()
+        audioFormatNote = note
+        lock.unlock()
+        appendLogLines(["BXFloatAudioFormat \(note)"], syncFlush: false)
+        NSLog("BXFloatAudioFormat %@", note)
     }
 
     func noteAudioUnderrun() { bump { aUnderrun += 1 } }
@@ -305,6 +335,13 @@ final class CamPipelineDiag {
         snapMainStallMs = 0
         let acc = Int(gateAccept - prevGateAccept)
         let rej = Int(gateReject - prevGateReject)
+        snapGatePending = Int(gatePending - prevGatePending)
+        snapGateRebase = Int(gateRebase - prevGateRebase)
+        let pend = snapGatePending
+        let reb = snapGateRebase
+        let gateReason = lastGateReason
+        let gateLead = lastGateLeadMs
+        let fmtNote = audioFormatNote
         let aTick = aRawTick
         let aN = aTbNum
         let aD = aTbDen
@@ -326,6 +363,8 @@ final class CamPipelineDiag {
         prevADisc = aClockDiscard
         prevGateAccept = gateAccept
         prevGateReject = gateReject
+        prevGatePending = gatePending
+        prevGateRebase = gateRebase
         windowInPeak = 0
         windowOutPeak = 0
         lastTick = now
@@ -352,11 +391,13 @@ final class CamPipelineDiag {
             dEndV = .nan
         }
         let gateLine = String(
-            format: "BXFloatGate aRaw=%lld tb=%d/%d aRawSec=%.6f aEnd=%.6f vRaw=%lld tb=%d/%d vRawSec=%.6f vMap=%.6f dEndV=%.6f epoch=%.6f acc=%d rej=%d aRingMs=%d auCb=%lld auPaint=%lld",
+            format: "BXFloatGate aRaw=%lld tb=%d/%d aRawSec=%.6f aEnd=%.6f vRaw=%lld tb=%d/%d vRawSec=%.6f vMap=%.6f dEndV=%.6f epoch=%.6f acc=%d rej=%d pend=%d rebase=%d leadMs=%.0f reason=%@ aRingMs=%d auCb=%lld auPaint=%lld fmt=%@",
             aTick, aN, aD, aRS, aEnd,
             vTick, vN, vD, vRS, clock.lastVideoPTS,
             dEndV, clock.epoch,
-            acc, rej, aRingMs, auCb, auPaint
+            acc, rej, pend, reb, gateLead, gateReason as NSString,
+            aRingMs, auCb, auPaint,
+            (fmtNote.isEmpty ? "-" : fmtNote) as NSString
         )
         NSLog("%@", vLine)
         NSLog("%@", gateLine)
