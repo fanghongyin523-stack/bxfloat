@@ -56,7 +56,7 @@ public func BXFloatMicPaintFrames(
     var asbd = AudioStreamBasicDescription()
     asbd.mSampleRate = sampleRate > 0 ? sampleRate : 48000
     asbd.mFormatID = kAudioFormatLinearPCM
-    // 单缓冲写入视为交错（平面由 hook 侧复制）；flags 必须与 bps/float 一致，否则电流声
+    // 交错 PCM（多平面由 hook 拆分）；flags 必须与 bps/float 一致
     asbd.mFormatFlags = floatMode
         ? (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked)
         : (kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked)

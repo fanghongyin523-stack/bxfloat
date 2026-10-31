@@ -255,14 +255,29 @@ static void paintABL(
 
     AudioBuffer *b0 = &ioData->mBuffers[0];
     if (nonInterleaved || multiPlane) {
-        // 只从环缓读一次，复制到各平面，避免左右声道各吃一段 PCM 变成噪声
-        BXFloatMicPaintFrames(b0->mData, (int)frames, 1, rate, bytesPerSample, isFloat, mode);
-        for (UInt32 i = 1; i < ioData->mNumberBuffers; i++) {
-            AudioBuffer *buf = &ioData->mBuffers[i];
+        // 立体声：交错取一次再拆平面；禁止「只取 mono 再 memcpy 到 R」把声像抹掉
+        int planes = (int)ioData->mNumberBuffers;
+        if (planes < 1) planes = 1;
+        if (planes > 8) planes = 8;
+        size_t tmpBytes = (size_t)frames * (size_t)planes * (size_t)bytesPerSample;
+        void *tmp = malloc(tmpBytes);
+        if (!tmp) return;
+        memset(tmp, 0, tmpBytes);
+        BXFloatMicPaintFrames(tmp, (int)frames, planes, rate, bytesPerSample, isFloat, mode);
+        for (int p = 0; p < planes; p++) {
+            AudioBuffer *buf = &ioData->mBuffers[p];
             if (!buf->mData || buf->mDataByteSize == 0) continue;
-            size_t n = buf->mDataByteSize < b0->mDataByteSize ? buf->mDataByteSize : b0->mDataByteSize;
-            memcpy(buf->mData, b0->mData, n);
+            uint8_t *dst = (uint8_t *)buf->mData;
+            uint8_t *src = (uint8_t *)tmp;
+            size_t planeCap = buf->mDataByteSize;
+            for (UInt32 i = 0; i < frames; i++) {
+                size_t off = (size_t)i * (size_t)bytesPerSample;
+                if (off + (size_t)bytesPerSample > planeCap) break;
+                size_t srcOff = ((size_t)i * (size_t)planes + (size_t)p) * (size_t)bytesPerSample;
+                memcpy(dst + off, src + srcOff, (size_t)bytesPerSample);
+            }
         }
+        free(tmp);
     } else {
         BXFloatMicPaintFrames(
             b0->mData, (int)frames, chInBuf, rate, bytesPerSample, isFloat, mode

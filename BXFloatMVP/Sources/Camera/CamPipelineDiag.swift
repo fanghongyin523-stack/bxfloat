@@ -419,12 +419,13 @@ final class CamPipelineDiag {
     func audioQualityPanelLine() -> String {
         tickIfNeeded()
         lock.lock()
+        let ch = CamAudioStore.shared.storeChannels
         let line = String(
-            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %d→%d bps%d f%d mis%d",
+            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %dch %d→%d bps%d f%d mis%d",
             aqSrcPeak, aqSrcRms, aqSrcDc,
             aqOutPeak, aqOutRms, aqOutDc,
             aqMicPeak,
-            aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch
+            ch, aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch
         )
         lock.unlock()
         return line

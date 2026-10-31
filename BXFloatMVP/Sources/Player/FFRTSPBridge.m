@@ -128,6 +128,7 @@ void BXFloatFFStop(void) {
     __block struct SwrContext *swrBlock = NULL;
     __block uint8_t *audioOutBufBlock = NULL;
     __block int audioOutBufSamplesBlock = 0;
+    __block int audioOutCh = 1;
     __block AVFrame *vframe = NULL;
     __block AVFrame *aframe = NULL;
     __block AVCodecContext *vctx = NULL;
@@ -210,9 +211,12 @@ void BXFloatFFStop(void) {
                     if (!inLayout) {
                         inLayout = av_get_default_channel_layout(audioCtx->channels);
                     }
+                    // 音乐多为立体声：解码后保 2ch，禁止过早压成 mono（发糊/相位抵消主因）
+                    const int outCh = audioCtx->channels >= 2 ? 2 : 1;
+                    const int64_t outLayout = outCh == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
                     swr = swr_alloc_set_opts(
                         NULL,
-                        AV_CH_LAYOUT_MONO,
+                        outLayout,
                         AV_SAMPLE_FMT_S16,
                         48000,
                         inLayout,
@@ -221,7 +225,7 @@ void BXFloatFFStop(void) {
                         0,
                         NULL
                     );
-                    // 提高重采样滤波质量，减轻「发糊」；不做增益/降噪
+                    // 提高重采样滤波质量；不做增益/降噪
                     if (swr) {
                         av_opt_set_int(swr, "filter_size", 64, 0);
                         av_opt_set_int(swr, "phase_shift", 12, 0);
@@ -234,8 +238,9 @@ void BXFloatFFStop(void) {
                         audioCtx = NULL;
                         audioIdx = -1;
                     } else {
-                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → mono 48k s16 (swr hq)",
-                              audioCtx->channels, audioCtx->sample_rate, (int)audioCtx->sample_fmt);
+                        audioOutCh = outCh;
+                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → %dch 48k s16 (swr hq, keep stereo)",
+                              audioCtx->channels, audioCtx->sample_rate, (int)audioCtx->sample_fmt, outCh);
                     }
                 }
             }
@@ -367,16 +372,18 @@ void BXFloatFFStop(void) {
                         AV_ROUND_UP
                     );
                     if (outSamples <= 0) outSamples = aframe->nb_samples;
+                    const int och = audioOutCh > 0 ? audioOutCh : 1;
                     if (outSamples > audioOutBufSamplesBlock) {
                         av_freep(&audioOutBufBlock);
-                        if (av_samples_alloc(&audioOutBufBlock, NULL, 1, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
+                        if (av_samples_alloc(&audioOutBufBlock, NULL, och, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
                             audioOutBufBlock = NULL;
                             audioOutBufSamplesBlock = 0;
                             break;
                         }
                         audioOutBufSamplesBlock = outSamples;
                     }
-                    uint8_t *outPlanes[1] = { audioOutBufBlock };
+                    uint8_t *outPlanes[8] = {0};
+                    outPlanes[0] = audioOutBufBlock;
                     // convert 前读 delay：输出首样对应时间 ≈ input_pts - delay/outRate
                     int64_t delayBefore = swr_get_delay(swrBlock, 48000);
                     int converted = swr_convert(
@@ -398,7 +405,7 @@ void BXFloatFFStop(void) {
                             }
                             BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
                         }
-                        BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, 1, 48000, pts);
+                        BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, 48000, pts);
                     }
                 }
             } else {
