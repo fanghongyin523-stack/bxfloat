@@ -239,6 +239,121 @@ final class CamPipelineDiag {
         NSLog("BXFloatAudioFormat %@", note)
     }
 
+    // 音质分阶段：decode=注入前（贴近推流源），inject=AU 写出后，mic=原麦对照
+    private var aqSrcPeak: Float = 0
+    private var aqSrcRms: Float = 0
+    private var aqSrcDc: Float = 0
+    private var aqSrcZcr: Float = 0
+    private var aqOutPeak: Float = 0
+    private var aqOutRms: Float = 0
+    private var aqOutDc: Float = 0
+    private var aqOutZcr: Float = 0
+    private var aqMicPeak: Float = 0
+    private var aqMicRms: Float = 0
+    private var aqMicDc: Float = 0
+    private var aqMicZcr: Float = 0
+    private var aqRateIn: Int = 0
+    private var aqRateOut: Int = 0
+    private var aqBps: Int = 0
+    private var aqFloat: Int = 0
+    private var aqMismatch: Int = 0
+    private var aqSrcN: Int = 0
+    private var aqOutN: Int = 0
+    private var aqMicN: Int = 0
+
+    enum AudioQualityStage: String {
+        case decode
+        case inject
+        case mic
+    }
+
+    func noteAUFormatMeta(
+        rateOut: Int,
+        bytesPerSample: Int,
+        isFloat: Bool,
+        formatMismatch: Bool
+    ) {
+        lock.lock()
+        if rateOut > 0 { aqRateOut = rateOut }
+        if bytesPerSample > 0 { aqBps = bytesPerSample }
+        aqFloat = isFloat ? 1 : 0
+        if formatMismatch { aqMismatch += 1 }
+        lock.unlock()
+        tickIfNeeded()
+    }
+
+    /// 音质探针：区分「源头已有杂音」vs「注入路径引入」
+    func noteAudioQuality(
+        stage: AudioQualityStage,
+        samples: UnsafePointer<Int16>,
+        count: Int,
+        rateIn: Int = 0,
+        rateOut: Int = 0,
+        bytesPerSample: Int = 0,
+        isFloat: Bool = false,
+        formatMismatch: Bool = false
+    ) {
+        guard count > 8 else {
+            if formatMismatch || rateOut > 0 || bytesPerSample > 0 {
+                noteAUFormatMeta(
+                    rateOut: rateOut,
+                    bytesPerSample: bytesPerSample,
+                    isFloat: isFloat,
+                    formatMismatch: formatMismatch
+                )
+            }
+            return
+        }
+        var peak: Int32 = 0
+        var sum: Int64 = 0
+        var sumSq: Double = 0
+        var zc = 0
+        var prev = samples[0]
+        for i in 0..<count {
+            let s = samples[i]
+            let a = abs(Int32(s))
+            if a > peak { peak = a }
+            sum += Int64(s)
+            sumSq += Double(Int(s) * Int(s))
+            if (prev >= 0 && s < 0) || (prev < 0 && s >= 0) { zc += 1 }
+            prev = s
+        }
+        let n = Double(count)
+        let dc = Float(Double(sum) / n / 32768.0)
+        let rms = Float(sqrt(sumSq / n) / 32768.0)
+        let pk = Float(Double(peak) / 32768.0)
+        let zcr = Float(Double(zc) / n)
+
+        lock.lock()
+        switch stage {
+        case .decode:
+            aqSrcPeak = max(aqSrcPeak, pk)
+            aqSrcRms = max(aqSrcRms, rms)
+            aqSrcDc = dc
+            aqSrcZcr = zcr
+            aqSrcN += 1
+            if rateIn > 0 { aqRateIn = rateIn }
+        case .inject:
+            aqOutPeak = max(aqOutPeak, pk)
+            aqOutRms = max(aqOutRms, rms)
+            aqOutDc = dc
+            aqOutZcr = zcr
+            aqOutN += 1
+            if rateOut > 0 { aqRateOut = rateOut }
+            if bytesPerSample > 0 { aqBps = bytesPerSample }
+            aqFloat = isFloat ? 1 : 0
+            if formatMismatch { aqMismatch += 1 }
+        case .mic:
+            aqMicPeak = max(aqMicPeak, pk)
+            aqMicRms = max(aqMicRms, rms)
+            aqMicDc = dc
+            aqMicZcr = zcr
+            aqMicN += 1
+        }
+        lock.unlock()
+        tickIfNeeded()
+    }
+
     func noteAudioUnderrun() { bump { aUnderrun += 1 } }
 
     func noteAudioInput(samples: UnsafePointer<Int16>, count: Int) {
@@ -298,6 +413,21 @@ final class CamPipelineDiag {
         )
         lock.unlock()
         return (v, a, p)
+    }
+
+    /// 音质对照行：源(decode) / 注入(out) / 原麦(mic)
+    func audioQualityPanelLine() -> String {
+        tickIfNeeded()
+        lock.lock()
+        let line = String(
+            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %d→%d bps%d f%d mis%d",
+            aqSrcPeak, aqSrcRms, aqSrcDc,
+            aqOutPeak, aqOutRms, aqOutDc,
+            aqMicPeak,
+            aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch
+        )
+        lock.unlock()
+        return line
     }
 
     private func bump(_ body: () -> Void) {
@@ -378,6 +508,18 @@ final class CamPipelineDiag {
             snapAInClip, snapAOutClip, snapAUnd, snapADisc,
             paintMax, paintAvg, paintMain, mainStall
         )
+        // AQ 快照在锁内；窗口峰重置后解锁再打日志
+        let aqLine = String(
+            format: "BXFloatAQ srcPk=%.3f srcRms=%.3f srcDc=%.4f srcZcr=%.3f outPk=%.3f outRms=%.3f outDc=%.4f outZcr=%.3f micPk=%.3f micRms=%.3f micDc=%.4f rate=%d->%d bps=%d float=%d mismatch=%d srcN=%d outN=%d micN=%d",
+            aqSrcPeak, aqSrcRms, aqSrcDc, aqSrcZcr,
+            aqOutPeak, aqOutRms, aqOutDc, aqOutZcr,
+            aqMicPeak, aqMicRms, aqMicDc,
+            aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch,
+            aqSrcN, aqOutN, aqMicN
+        )
+        aqSrcPeak = 0; aqSrcRms = 0; aqOutPeak = 0; aqOutRms = 0
+        aqMicPeak = 0; aqMicRms = 0; aqMismatch = 0
+        aqSrcN = 0; aqOutN = 0; aqMicN = 0
         lock.unlock()
 
         let clock = AVSyncClock.shared.diagSnapshot()
@@ -401,7 +543,8 @@ final class CamPipelineDiag {
         )
         NSLog("%@", vLine)
         NSLog("%@", gateLine)
-        appendLogLines([vLine, gateLine])
+        NSLog("%@", aqLine)
+        appendLogLines([vLine, gateLine, aqLine])
     }
 
     // MARK: - Windows 可取回：内存环形 + 可写路径落盘
@@ -544,4 +687,81 @@ public func BXFloatDiagNoteVideoRaw(_ tick: Int64, _ tbNum: Int32, _ tbDen: Int3
 @_cdecl("BXFloatDiagNoteAudioRaw")
 public func BXFloatDiagNoteAudioRaw(_ tick: Int64, _ tbNum: Int32, _ tbDen: Int32, _ rawSec: Double) {
     CamPipelineDiag.shared.noteAudioRaw(tick: tick, tbNum: tbNum, tbDen: tbDen, rawSec: rawSec)
+}
+
+/// AU 原麦抽检：把第一路 PCM 转成 s16 记 mic 阶段，用于和推流注入对照。
+@_cdecl("BXFloatAQNoteMicTap")
+public func BXFloatAQNoteMicTap(
+    _ data: UnsafeRawPointer,
+    _ frames: Int32,
+    _ channels: Int32,
+    _ bytesPerSample: Int32,
+    _ isFloat: Int32
+) {
+    let f = Int(frames)
+    let ch = max(1, Int(channels))
+    var bps = Int(bytesPerSample)
+    let floatMode = isFloat != 0
+    if floatMode, bps < 4 { bps = 4 }
+    if !floatMode, bps != 2, bps != 4 { bps = 2 }
+    guard f > 8, bps > 0 else { return }
+    // 限频：约每 8 次回调抽一帧，避免 AU 路径过重
+    struct Gate { static var n: Int = 0 }
+    Gate.n += 1
+    if Gate.n % 8 != 0 { return }
+
+    var mono = [Int16](repeating: 0, count: f)
+    let base = data
+    for i in 0..<f {
+        let off = i * ch * bps
+        let s: Int16
+        if floatMode, bps == 4 {
+            var fl: Float = 0
+            memcpy(&fl, base.advanced(by: off), 4)
+            s = Int16(clamping: Int((Double(fl) * 32767.0).rounded()))
+        } else if bps == 2 {
+            var v: Int16 = 0
+            memcpy(&v, base.advanced(by: off), 2)
+            s = v
+        } else if bps == 4, !floatMode {
+            var v: Int32 = 0
+            memcpy(&v, base.advanced(by: off), 4)
+            s = Int16(clamping: Int(v >> 16))
+        } else {
+            s = 0
+        }
+        mono[i] = s
+    }
+    mono.withUnsafeBufferPointer { buf in
+        guard let p = buf.baseAddress else { return }
+        CamPipelineDiag.shared.noteAudioQuality(stage: .mic, samples: p, count: f)
+    }
+}
+
+/// AU 实际格式 vs 缓冲几何不一致时累计，便于定位电流声根因。
+@_cdecl("BXFloatAQNoteAUFormat")
+public func BXFloatAQNoteAUFormat(
+    _ rate: Double,
+    _ frames: Int32,
+    _ bufBytes: Int32,
+    _ channels: Int32,
+    _ bytesPerSample: Int32,
+    _ isFloat: Int32,
+    _ asbdBits: Int32,
+    _ asbdFlags: UInt32,
+    _ mismatch: Int32
+) {
+    if mismatch != 0 {
+        let note = String(
+            format: "AU rate=%.0f frames=%d buf=%d ch=%d bps=%d float=%d asbdBits=%d flags=0x%x mis=%d",
+            rate, frames, bufBytes, channels, bytesPerSample, isFloat, asbdBits, asbdFlags, mismatch
+        )
+        CamPipelineDiag.shared.noteAudioFormat(note)
+    }
+    CamPipelineDiag.shared.noteAUFormatMeta(
+        rateOut: Int(rate.rounded()),
+        bytesPerSample: Int(bytesPerSample),
+        isFloat: isFloat != 0,
+        formatMismatch: mismatch != 0
+    )
 }

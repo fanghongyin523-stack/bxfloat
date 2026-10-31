@@ -221,6 +221,12 @@ void BXFloatFFStop(void) {
                         0,
                         NULL
                     );
+                    // 提高重采样滤波质量，减轻「发糊」；不做增益/降噪
+                    if (swr) {
+                        av_opt_set_int(swr, "filter_size", 64, 0);
+                        av_opt_set_int(swr, "phase_shift", 12, 0);
+                        av_opt_set_double(swr, "cutoff", 0.96, 0);
+                    }
                     if (!swr || swr_init(swr) < 0) {
                         NSLog(@"BXFloatCam ffmpeg swr init fail");
                         if (swr) { swr_free(&swr); swr = NULL; }
@@ -228,8 +234,8 @@ void BXFloatFFStop(void) {
                         audioCtx = NULL;
                         audioIdx = -1;
                     } else {
-                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz → mono 48k s16",
-                              audioCtx->channels, audioCtx->sample_rate);
+                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → mono 48k s16 (swr hq)",
+                              audioCtx->channels, audioCtx->sample_rate, (int)audioCtx->sample_fmt);
                     }
                 }
             }

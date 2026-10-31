@@ -56,6 +56,7 @@ public func BXFloatMicPaintFrames(
     var asbd = AudioStreamBasicDescription()
     asbd.mSampleRate = sampleRate > 0 ? sampleRate : 48000
     asbd.mFormatID = kAudioFormatLinearPCM
+    // 单缓冲写入视为交错（平面由 hook 侧复制）；flags 必须与 bps/float 一致，否则电流声
     asbd.mFormatFlags = floatMode
         ? (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked)
         : (kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked)
@@ -65,10 +66,10 @@ public func BXFloatMicPaintFrames(
     asbd.mFramesPerPacket = 1
     asbd.mBytesPerPacket = asbd.mBytesPerFrame
 
-    // 连续播放头取声（与画面共用时钟软跟）；失败/无包 → 静音，禁止破音垫末样
     if CamAudioStore.shared.hasFreshAudio {
         _ = CamAudioStore.shared.fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
     } else {
+        // 无新鲜包：静音（非末样垫），避免注入路径自造底噪
         CamAudioStore.silence(into: dst, byteCount: byteCount)
     }
 }

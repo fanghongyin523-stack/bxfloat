@@ -29,6 +29,11 @@ final class CamAudioStore {
     private var scratchStore: [Int16] = Array(repeating: 0, count: 4096)
     private var scratchOut: [Int16] = Array(repeating: 0, count: 2048)
 
+    /// 极轻 DC 消除（~几 Hz），去直流/低频底座电流感；不做人声降噪/增益
+    private var dcX1: Double = 0
+    private var dcY1: Double = 0
+    private let dcR: Double = 0.995
+
     private(set) var packetCount: Int64 = 0
     private(set) var lastUpdate = Date.distantPast
     private(set) var lastPTS: Double = -1
@@ -60,6 +65,8 @@ final class CamAudioStore {
         playhead = -1
         lastSample = 0
         envelope = 1.0
+        dcX1 = 0
+        dcY1 = 0
         lock.unlock()
     }
 
@@ -82,10 +89,22 @@ final class CamAudioStore {
         }
 
         let rate = sampleRate > 0 ? sampleRate : storeRate
-        let pcm = (rate == storeRate) ? mono : resampleLinear(mono, from: rate, to: storeRate)
+        // 解码后（入环前）记源音质：源头已有杂音会在这里体现
+        mono.withUnsafeBufferPointer { buf in
+            if let base = buf.baseAddress {
+                CamPipelineDiag.shared.noteAudioQuality(
+                    stage: .decode,
+                    samples: base,
+                    count: buf.count,
+                    rateIn: rate
+                )
+            }
+        }
+
+        let pcm = (rate == storeRate) ? mono : resampleHermite(mono, from: rate, to: storeRate)
         guard !pcm.isEmpty else { return }
 
-        if lastFormatNote.isEmpty {
+        if lastFormatNote.isEmpty || lastFormatNote != "mono \(storeRate)Hz s16 (src \(ch)ch \(rate)Hz)" {
             lastFormatNote = "mono \(storeRate)Hz s16 (src \(ch)ch \(rate)Hz)"
             CamPipelineDiag.shared.noteAudioFormat(lastFormatNote)
         }
@@ -242,7 +261,6 @@ final class CamAudioStore {
             return false
         }
 
-        var outCount = frames
         if got <= 0 {
             CamPipelineDiag.shared.noteAudioUnderrun()
             fillWithEnvelope(
@@ -259,24 +277,25 @@ final class CamAudioStore {
         if dstRate == storeRate {
             let n = min(frames, got)
             for i in 0..<n { scratchOut[i] = scratchStore[i] }
+            // 不足：淡出到 0，禁止末样死循环（电流/蜂鸣主因之一）
             if n < frames {
-                let pad = scratchStore[n - 1]
-                for i in n..<frames { scratchOut[i] = pad }
+                fadePad(&scratchOut, from: n, to: frames, seed: n > 0 ? scratchStore[n - 1] : lastSample)
             }
         } else {
-            var rs = resampleLinear(
+            var rs = resampleHermite(
                 Array(scratchStore.prefix(max(got, 1))),
                 from: storeRate,
                 to: dstRate
             )
             if rs.count < frames {
-                let pad = rs.last ?? lastSample
-                rs.append(contentsOf: repeatElement(pad, count: frames - rs.count))
+                let seed = rs.last ?? lastSample
+                let start = rs.count
+                rs.append(contentsOf: repeatElement(Int16(0), count: frames - rs.count))
+                fadePad(&rs, from: start, to: frames, seed: seed)
             } else if rs.count > frames {
                 rs = Array(rs.prefix(frames))
             }
-            outCount = rs.count
-            for i in 0..<outCount { scratchOut[i] = rs[i] }
+            for i in 0..<frames { scratchOut[i] = rs[i] }
         }
 
         // 从欠载恢复：淡入，避免台阶
@@ -288,6 +307,8 @@ final class CamAudioStore {
             }
             envelope = 1.0
         }
+
+        applyLightDCBlock(frames)
 
         if frames > 0 { lastSample = scratchOut[frames - 1] }
 
@@ -302,6 +323,26 @@ final class CamAudioStore {
             nonInterleaved: isNonInterleaved
         )
         CamPipelineDiag.shared.noteAudioOutput(samples: Array(scratchOut.prefix(frames)))
+        // 注入后音质：与 decode 对照，分离「源头杂音」vs「注入引入」
+        scratchOut.withUnsafeBufferPointer { buf in
+            if let base = buf.baseAddress {
+                let asbdBits = Int(asbd.mBitsPerChannel)
+                let asbdFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+                let mismatch = (asbdBits > 0 && asbdBits / 8 != sampleBytes)
+                    || ((asbd.mFormatFlags & (kAudioFormatFlagIsFloat | kAudioFormatFlagIsSignedInteger)) != 0
+                        && asbdFloat != isFloat)
+                CamPipelineDiag.shared.noteAudioQuality(
+                    stage: .inject,
+                    samples: base,
+                    count: frames,
+                    rateIn: storeRate,
+                    rateOut: dstRate,
+                    bytesPerSample: sampleBytes,
+                    isFloat: isFloat,
+                    formatMismatch: mismatch
+                )
+            }
+        }
         return true
     }
 
@@ -513,14 +554,15 @@ final class CamAudioStore {
             let chunkEnd = chunk.pts + Double(chunk.samples.count) / Double(storeRate)
             if chunkEnd <= cursor { continue }
             if chunk.pts > cursor + 0.02 {
-                // 间隙：用衰减末样填，不做满幅重复
+                // 间隙：淡出到近静音，禁止末样平台造成电流声
                 let gapFrames = min(
                     frames - written,
                     max(0, Int(((chunk.pts - cursor) * Double(storeRate)).rounded(.down)))
                 )
-                let hold = Int16(clamping: Int(Double(lastSample) * max(envelope, 0.15)))
+                let seed = Int16(clamping: Int(Double(lastSample) * max(envelope, 0.2)))
                 for i in 0..<gapFrames {
-                    buffer[written + i] = hold
+                    let a = 1.0 - Double(i + 1) / Double(gapFrames + 1)
+                    buffer[written + i] = Int16(clamping: Int(Double(seed) * a))
                 }
                 written += gapFrames
                 cursor = chunk.pts
@@ -558,7 +600,30 @@ final class CamAudioStore {
         }
     }
 
-    private func resampleLinear(_ input: [Int16], from srcRate: Int, to dstRate: Int) -> [Int16] {
+    /// 短不足段：从 seed 淡到 0，避免 hold-last 蜂鸣
+    private func fadePad(_ buf: inout [Int16], from start: Int, to end: Int, seed: Int16) {
+        let n = end - start
+        guard n > 0 else { return }
+        for i in 0..<n {
+            let a = 1.0 - Double(i + 1) / Double(n + 1)
+            buf[start + i] = Int16(clamping: Int(Double(seed) * a))
+        }
+    }
+
+    private func applyLightDCBlock(_ count: Int) {
+        guard count > 0 else { return }
+        let R = dcR
+        for i in 0..<count {
+            let x = Double(scratchOut[i])
+            let y = x - dcX1 + R * dcY1
+            dcX1 = x
+            dcY1 = y
+            scratchOut[i] = Int16(clamping: Int(y.rounded()))
+        }
+    }
+
+    /// 4 点 Hermite：比线性重采样少混叠/发糊，仍不做强滤波降噪
+    private func resampleHermite(_ input: [Int16], from srcRate: Int, to dstRate: Int) -> [Int16] {
         guard !input.isEmpty, srcRate > 0, dstRate > 0 else { return input }
         if srcRate == dstRate { return input }
         let outCount = max(1, Int((Double(input.count) * Double(dstRate) / Double(srcRate)).rounded()))
@@ -566,12 +631,21 @@ final class CamAudioStore {
         let last = input.count - 1
         for i in 0..<outCount {
             let srcPos = Double(i) * Double(srcRate) / Double(dstRate)
-            let i0 = min(Int(srcPos), last)
-            let i1 = min(i0 + 1, last)
-            let frac = srcPos - Double(i0)
-            let a = Double(input[i0])
-            let b = Double(input[i1])
-            out[i] = Int16(clamping: Int((a + (b - a) * frac).rounded()))
+            let i1 = min(max(Int(srcPos), 0), last)
+            let i0 = max(i1 - 1, 0)
+            let i2 = min(i1 + 1, last)
+            let i3 = min(i1 + 2, last)
+            let t = srcPos - Double(i1)
+            let y0 = Double(input[i0])
+            let y1 = Double(input[i1])
+            let y2 = Double(input[i2])
+            let y3 = Double(input[i3])
+            let c0 = y1
+            let c1 = 0.5 * (y2 - y0)
+            let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3
+            let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2)
+            let v = ((c3 * t + c2) * t + c1) * t + c0
+            out[i] = Int16(clamping: Int(v.rounded()))
         }
         return out
     }

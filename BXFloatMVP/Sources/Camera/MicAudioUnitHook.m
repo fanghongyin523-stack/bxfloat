@@ -17,6 +17,26 @@ FOUNDATION_EXPORT void BXFloatMicPaintFrames(
     int mode
 );
 
+FOUNDATION_EXPORT void BXFloatAQNoteMicTap(
+    const void *data,
+    int frames,
+    int channels,
+    int bytesPerSample,
+    int isFloat
+);
+
+FOUNDATION_EXPORT void BXFloatAQNoteAUFormat(
+    double rate,
+    int frames,
+    int bufBytes,
+    int channels,
+    int bytesPerSample,
+    int isFloat,
+    int asbdBits,
+    uint32_t asbdFlags,
+    int mismatch
+);
+
 static OSStatus (*orig_AudioUnitRender)(
     AudioUnit inUnit,
     AudioUnitRenderActionFlags *ioActionFlags,
@@ -30,7 +50,7 @@ static _Atomic int gMode = 0; // 0 mic, 1 stream, 2 mute
 static _Atomic int64_t gPaint = 0;
 static _Atomic int64_t gCallback = 0;
 static _Atomic int gInstalled = 0;
-static _Atomic int gLoggedFmt = 0;
+static _Atomic int gFmtLogTick = 0;
 
 void BXFloatMicAUSetMode(int mode) {
     atomic_store(&gMode, mode);
@@ -44,20 +64,23 @@ int64_t BXFloatMicAUCallbackCount(void) {
     return atomic_load(&gCallback);
 }
 
-static void paintABL(
+/// 解析 AU 缓冲与 ASBD：优先信任有效 ASBD，缓冲几何做交叉校验
+static int resolveFormat(
     AudioBufferList *ioData,
     UInt32 frames,
     const AudioStreamBasicDescription *asbd,
-    int mode
+    int *outCh,
+    int *outBps,
+    int *outFloat,
+    int *outMismatch,
+    double *outRate
 ) {
-    if (!ioData || frames == 0 || mode == 0 || ioData->mNumberBuffers == 0) return;
-
+    if (!ioData || frames == 0 || ioData->mNumberBuffers == 0) return 0;
     AudioBuffer *b0 = &ioData->mBuffers[0];
-    if (!b0->mData || b0->mDataByteSize == 0) return;
+    if (!b0->mData || b0->mDataByteSize == 0) return 0;
 
-    // 用缓冲几何推断格式（比 ASBD 更可靠；ASBD 常出现 bits=0）
     int bytesPerFrameInBuf = (int)(b0->mDataByteSize / frames);
-    if (bytesPerFrameInBuf <= 0) return;
+    if (bytesPerFrameInBuf <= 0) return 0;
 
     int chInBuf = (int)(b0->mNumberChannels > 0 ? b0->mNumberChannels : 1);
     BOOL multiPlane = (ioData->mNumberBuffers > 1);
@@ -77,27 +100,60 @@ static void paintABL(
     }
 
     int isFloat = 0;
-    if (asbd && (asbd->mFormatFlags & kAudioFormatFlagIsFloat)) {
-        isFloat = 1;
-    } else if (bytesPerSample == 4) {
-        // iOS RemoteIO / VPIO 输入几乎都是 Float32
-        isFloat = 1;
-    } else if (bytesPerSample == 2) {
-        isFloat = 0;
-    } else if (bytesPerSample == 8) {
-        // 极少见 double
-        isFloat = 1;
-        bytesPerSample = 8;
+    int mismatch = 0;
+    // ASBD 有效时优先：float / signed int 标志；bits>0 时对齐 bps
+    if (asbd && asbd->mBitsPerChannel > 0) {
+        int asbdBps = (int)(asbd->mBitsPerChannel / 8);
+        if (asbdBps > 0 && asbdBps != bytesPerSample) {
+            mismatch = 1;
+            // 缓冲几何与 ASBD 冲突时以缓冲为准（写入必须匹配真实布局）
+        }
+        if (asbd->mFormatFlags & kAudioFormatFlagIsFloat) {
+            isFloat = 1;
+        } else if (asbd->mFormatFlags & kAudioFormatFlagIsSignedInteger) {
+            isFloat = 0;
+        } else if (bytesPerSample == 4) {
+            isFloat = 1;
+            mismatch = 1;
+        }
+        if (isFloat && bytesPerSample == 2) {
+            // ASBD 说 float 但缓冲是 2 字节 → 严重不一致，按缓冲写 int16
+            isFloat = 0;
+            mismatch = 1;
+        }
+        if (!isFloat && bytesPerSample == 4 && !(asbd->mFormatFlags & kAudioFormatFlagIsSignedInteger)) {
+            // bits=32 无 signed 标志：iOS 输入几乎都是 float
+            isFloat = 1;
+        }
+    } else {
+        // ASBD bits=0：仅靠缓冲宽推断（历史电流声坑）
+        if (bytesPerSample == 4) {
+            isFloat = 1;
+        } else if (bytesPerSample == 2) {
+            isFloat = 0;
+        } else if (bytesPerSample == 8) {
+            isFloat = 1;
+            bytesPerSample = 8;
+        } else if (bytesPerFrameInBuf % 4 == 0) {
+            isFloat = 1;
+            bytesPerSample = 4;
+            chInBuf = bytesPerFrameInBuf / 4;
+            mismatch = 1;
+        } else {
+            isFloat = 0;
+            bytesPerSample = 2;
+            chInBuf = bytesPerFrameInBuf / 2;
+            mismatch = 1;
+        }
     }
 
-    // 纠正：float 却推成 2 字节 → 电流声根因
     if (isFloat && bytesPerSample < 4) {
         bytesPerSample = 4;
         chInBuf = bytesPerFrameInBuf / 4;
         if (chInBuf <= 0) chInBuf = 1;
+        mismatch = 1;
     }
     if (!isFloat && bytesPerSample != 2 && bytesPerSample != 4) {
-        // 回退：按缓冲宽猜测
         if (bytesPerFrameInBuf % 4 == 0) {
             isFloat = 1;
             bytesPerSample = 4;
@@ -108,6 +164,7 @@ static void paintABL(
             chInBuf = bytesPerFrameInBuf / 2;
         }
         if (chInBuf <= 0) chInBuf = 1;
+        mismatch = 1;
     }
 
     double rate = 48000.0;
@@ -115,22 +172,88 @@ static void paintABL(
         rate = asbd->mSampleRate;
     }
 
-    if (!atomic_exchange(&gLoggedFmt, 1)) {
-        NSLog(
-            @"BXFloatMic AU fmt rate=%.0f frames=%u bufs=%u bytes/buf=%u bpf=%d ch=%d bps=%d float=%d asbdBits=%u asbdFlags=0x%x",
-            rate,
-            (unsigned)frames,
-            (unsigned)ioData->mNumberBuffers,
-            (unsigned)b0->mDataByteSize,
-            bytesPerFrameInBuf,
-            chInBuf,
-            bytesPerSample,
-            isFloat,
-            asbd ? (unsigned)asbd->mBitsPerChannel : 0,
-            asbd ? (unsigned)asbd->mFormatFlags : 0
-        );
+    *outCh = chInBuf;
+    *outBps = bytesPerSample;
+    *outFloat = isFloat;
+    *outMismatch = mismatch;
+    *outRate = rate;
+    return 1;
+}
+
+static void logFormatThrottled(
+    double rate,
+    UInt32 frames,
+    AudioBufferList *ioData,
+    int ch,
+    int bps,
+    int isFloat,
+    const AudioStreamBasicDescription *asbd,
+    int mismatch
+) {
+    int tick = atomic_fetch_add(&gFmtLogTick, 1);
+    // 首次 + 之后每 ~2s（按 ~50Hz 回调估）或 mismatch 时立刻
+    if (tick != 0 && !mismatch && (tick % 100) != 0) return;
+    AudioBuffer *b0 = &ioData->mBuffers[0];
+    NSLog(
+        @"BXFloatMic AU fmt rate=%.0f frames=%u bufs=%u bytes/buf=%u bpf=%d ch=%d bps=%d float=%d asbdBits=%u asbdFlags=0x%x mis=%d",
+        rate,
+        (unsigned)frames,
+        (unsigned)ioData->mNumberBuffers,
+        (unsigned)b0->mDataByteSize,
+        (int)(b0->mDataByteSize / frames),
+        ch,
+        bps,
+        isFloat,
+        asbd ? (unsigned)asbd->mBitsPerChannel : 0,
+        asbd ? (unsigned)asbd->mFormatFlags : 0,
+        mismatch
+    );
+    BXFloatAQNoteAUFormat(
+        rate,
+        (int)frames,
+        (int)b0->mDataByteSize,
+        ch,
+        bps,
+        isFloat,
+        asbd ? (int)asbd->mBitsPerChannel : 0,
+        asbd ? (uint32_t)asbd->mFormatFlags : 0,
+        mismatch
+    );
+}
+
+static void tapMicABL(
+    AudioBufferList *ioData,
+    UInt32 frames,
+    const AudioStreamBasicDescription *asbd
+) {
+    int ch = 1, bps = 4, isFloat = 1, mismatch = 0;
+    double rate = 48000;
+    if (!resolveFormat(ioData, frames, asbd, &ch, &bps, &isFloat, &mismatch, &rate)) return;
+    AudioBuffer *b0 = &ioData->mBuffers[0];
+    BXFloatAQNoteMicTap(b0->mData, (int)frames, ch, bps, isFloat);
+}
+
+static void paintABL(
+    AudioBufferList *ioData,
+    UInt32 frames,
+    const AudioStreamBasicDescription *asbd,
+    int mode
+) {
+    if (!ioData || frames == 0 || mode == 0 || ioData->mNumberBuffers == 0) return;
+
+    int chInBuf = 1, bytesPerSample = 4, isFloat = 1, mismatch = 0;
+    double rate = 48000;
+    if (!resolveFormat(ioData, frames, asbd, &chInBuf, &bytesPerSample, &isFloat, &mismatch, &rate)) {
+        return;
     }
 
+    BOOL multiPlane = (ioData->mNumberBuffers > 1);
+    BOOL asbdNonInterleaved = asbd && (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved);
+    BOOL nonInterleaved = multiPlane || asbdNonInterleaved;
+
+    logFormatThrottled(rate, frames, ioData, chInBuf, bytesPerSample, isFloat, asbd, mismatch);
+
+    AudioBuffer *b0 = &ioData->mBuffers[0];
     if (nonInterleaved || multiPlane) {
         // 只从环缓读一次，复制到各平面，避免左右声道各吃一段 PCM 变成噪声
         BXFloatMicPaintFrames(b0->mData, (int)frames, 1, rate, bytesPerSample, isFloat, mode);
@@ -164,11 +287,9 @@ static OSStatus hooked_AudioUnitRender(
     );
     int mode = atomic_load(&gMode);
     // bus0 = 扬声器输出，绝不能改
-    if (st != noErr || mode == 0 || !ioData || inNumberFrames == 0 || inOutputBusNumber == 0) {
+    if (st != noErr || !ioData || inNumberFrames == 0 || inOutputBusNumber == 0) {
         return st;
     }
-
-    atomic_fetch_add(&gCallback, 1);
 
     AudioStreamBasicDescription asbd;
     memset(&asbd, 0, sizeof(asbd));
@@ -182,6 +303,14 @@ static OSStatus hooked_AudioUnitRender(
             inUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, inOutputBusNumber, &asbd, &sz
         );
     }
+
+    // 原麦模式：不改缓冲，只抽检音质对照
+    if (mode == 0) {
+        tapMicABL(ioData, inNumberFrames, &asbd);
+        return st;
+    }
+
+    atomic_fetch_add(&gCallback, 1);
     paintABL(ioData, inNumberFrames, &asbd, mode);
     return st;
 }

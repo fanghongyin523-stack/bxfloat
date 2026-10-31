@@ -224,6 +224,7 @@ final class CamSettingsPanel: UIView {
         let vBuf = Int(store.bufferedSeconds() * 1000)
         let aBuf = Int(CamAudioStore.shared.bufferedSeconds() * 1000)
         let diag = CamPipelineDiag.shared.panelLines()
+        let aq = CamPipelineDiag.shared.audioQualityPanelLine()
         statusLabel.text = [
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
@@ -232,6 +233,7 @@ final class CamSettingsPanel: UIView {
             diag.0,
             diag.1,
             diag.2,
+            aq,
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"
