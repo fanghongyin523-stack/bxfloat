@@ -53,8 +53,16 @@ public func BXFloatMicPaintFrames(
     }
     guard mode == 1 else { return }
 
+    let rate = sampleRate > 0 ? sampleRate : 48000
+    // 尽早锁定 AU 目标，让后续解码入环一次对齐到此采样率
+    CamAudioStore.shared.lockTargetFromAU(
+        sampleRate: Int(rate.rounded()),
+        channels: ch,
+        isFloat: floatMode
+    )
+
     var asbd = AudioStreamBasicDescription()
-    asbd.mSampleRate = sampleRate > 0 ? sampleRate : 48000
+    asbd.mSampleRate = rate
     asbd.mFormatID = kAudioFormatLinearPCM
     // 交错 PCM（多平面由 hook 拆分）；flags 必须与 bps/float 一致
     asbd.mFormatFlags = floatMode
@@ -69,7 +77,17 @@ public func BXFloatMicPaintFrames(
     if CamAudioStore.shared.hasFreshAudio {
         _ = CamAudioStore.shared.fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
     } else {
-        // 无新鲜包：静音（非末样垫），避免注入路径自造底噪
         CamAudioStore.silence(into: dst, byteCount: byteCount)
     }
+}
+
+/// 供 ObjC / 诊断查询当前环缓目标采样率（AU 锁定后）
+@_cdecl("BXFloatAudioTargetRate")
+public func BXFloatAudioTargetRate() -> Int32 {
+    Int32(CamAudioStore.shared.storeRate)
+}
+
+@_cdecl("BXFloatAudioTargetChannels")
+public func BXFloatAudioTargetChannels() -> Int32 {
+    Int32(CamAudioStore.shared.storeChannels)
 }

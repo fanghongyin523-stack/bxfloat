@@ -2,9 +2,8 @@ import AudioToolbox
 import Foundation
 
 /// 音频 ring + 连续播放头。
-/// - 立体声保真：解码后保 2ch 交错 s16，注入时再按 AU 声道布局写出（禁止过早压 mono）
-/// - 超前视频：有界 pending + rebase
-/// - 欠载：慢衰减包络，避免音乐忽大忽小；禁止末样死循环
+/// - AU 目标格式一次锁定后，入环即对齐采样率 → 注入回调免短块重采样（接近原音关键）
+/// - 立体声保真；超前视频 pending/rebase；真欠载才包络
 final class CamAudioStore {
     static let shared = CamAudioStore()
 
@@ -20,8 +19,14 @@ final class CamAudioStore {
     private var pending: [Chunk] = []
     private let maxSeconds: Double = 3.5
     private let maxPendingSeconds: Double = 1.20
-    let storeRate = 48_000
-    /// 环缓声道（1 或 2）；由首包决定，会话内不变
+    private let defaultRate = 48_000
+    /// AU 锁定后的环缓采样率；未锁定前用 48k
+    private var lockedRate: Int = 0
+    private var lockedAUChannels: Int = 0
+    private var targetLocked = false
+    /// 对外：当前环缓采样率
+    var storeRate: Int { lockedRate > 0 ? lockedRate : defaultRate }
+    /// 环缓声道（1 或 2）；由首包 / AU 锁定决定
     private(set) var storeChannels = 1
 
     private var playhead: Double = -1
@@ -40,6 +45,36 @@ final class CamAudioStore {
     private(set) var lastFormatNote = ""
 
     private init() {}
+
+    /// AU/采集首次（或变更）锁定目标格式：之后入环按此采样率，注入侧免 Hermite
+    func lockTargetFromAU(sampleRate: Int, channels: Int, isFloat: Bool) {
+        let rate = sampleRate > 0 ? sampleRate : defaultRate
+        let ch = max(1, min(2, channels))
+        lock.lock()
+        let rateChanged = targetLocked && lockedRate > 0 && lockedRate != rate
+        let firstLock = !targetLocked
+        if firstLock || rateChanged {
+            lockedRate = rate
+            lockedAUChannels = ch
+            targetLocked = true
+            if rateChanged {
+                chunks.removeAll(keepingCapacity: true)
+                pending.removeAll(keepingCapacity: true)
+                playhead = -1
+                envelope = 1.0
+            }
+            let note = String(
+                format: "AU-lock %dHz %dch float=%d → ring@%dHz",
+                rate, ch, isFloat ? 1 : 0, storeRate
+            )
+            lock.unlock()
+            CamPipelineDiag.shared.noteAudioFormat(note)
+            NSLog("BXFloatAudio %@", note)
+        } else {
+            if lockedAUChannels != ch { lockedAUChannels = ch }
+            lock.unlock()
+        }
+    }
 
     var hasFreshAudio: Bool {
         lock.lock()
@@ -67,6 +102,9 @@ final class CamAudioStore {
         lastR = 0
         envelope = 1.0
         storeChannels = 1
+        lockedRate = 0
+        lockedAUChannels = 0
+        targetLocked = false
         lastFormatNote = ""
         lock.unlock()
     }
@@ -91,8 +129,9 @@ final class CamAudioStore {
             }
         }
 
-        let rate = sampleRate > 0 ? sampleRate : storeRate
-        // 解码后音质：用第一声道峰/DC 代表源
+        let rate = sampleRate > 0 ? sampleRate : defaultRate
+        let ringRate = storeRate
+        // 解码后音质：用第一声道峰/DC 代表源（对齐前）
         var probe = [Int16](repeating: 0, count: frames)
         for i in 0..<frames { probe[i] = interleaved[i * srcCh] }
         probe.withUnsafeBufferPointer { buf in
@@ -106,17 +145,23 @@ final class CamAudioStore {
             }
         }
 
+        // 入环一次重采样到 AU 锁定率（包级），注入回调不再 Hermite
         let pcm: [Int16]
-        if rate == storeRate {
+        if rate == ringRate {
             pcm = interleaved
         } else {
-            pcm = resampleHermiteInterleaved(interleaved, channels: srcCh, from: rate, to: storeRate)
+            pcm = resampleHermiteInterleaved(interleaved, channels: srcCh, from: rate, to: ringRate)
         }
         guard !pcm.isEmpty else { return }
 
         lock.lock()
         if chunks.isEmpty, pending.isEmpty {
-            storeChannels = srcCh
+            // AU 已锁声道则优先跟 AU；否则跟源
+            if lockedAUChannels > 0 {
+                storeChannels = lockedAUChannels
+            } else {
+                storeChannels = srcCh
+            }
         }
         let ringCh = storeChannels
         lock.unlock()
@@ -125,23 +170,26 @@ final class CamAudioStore {
         if srcCh == ringCh {
             ringPCM = pcm
         } else if srcCh == 1, ringCh == 2 {
-            var up = [Int16](repeating: 0, count: (pcm.count) * 2)
+            var up = [Int16](repeating: 0, count: pcm.count * 2)
             for i in 0..<pcm.count {
                 up[i * 2] = pcm[i]
                 up[i * 2 + 1] = pcm[i]
             }
             ringPCM = up
         } else {
-            // ring mono, src stereo → 仅此会话首包前不应发生；兜底平均
-            let framesN = pcm.count / 2
+            let framesN = pcm.count / max(1, srcCh)
             var down = [Int16](repeating: 0, count: framesN)
-            for i in 0..<framesN {
-                down[i] = Int16(clamping: (Int(pcm[i * 2]) + Int(pcm[i * 2 + 1])) / 2)
+            if srcCh >= 2 {
+                for i in 0..<framesN {
+                    down[i] = Int16(clamping: (Int(pcm[i * srcCh]) + Int(pcm[i * srcCh + 1])) / 2)
+                }
+            } else {
+                down = pcm
             }
             ringPCM = down
         }
 
-        let note = "\(ringCh)ch \(storeRate)Hz s16 (src \(channels)ch \(rate)Hz)"
+        let note = "\(ringCh)ch \(ringRate)Hz s16 (src \(channels)ch \(rate)Hz lock=\(targetLocked ? 1 : 0))"
         if lastFormatNote != note {
             lastFormatNote = note
             CamPipelineDiag.shared.noteAudioFormat(note)
@@ -149,7 +197,7 @@ final class CamAudioStore {
 
         let mapped = pts >= 0 ? AVSyncClock.shared.mapPTS(pts) : -1
         let frameCount = ringPCM.count / max(1, ringCh)
-        let duration = Double(frameCount) / Double(storeRate)
+        let duration = Double(frameCount) / Double(ringRate)
         var startPTS: Double
         if mapped >= 0 {
             startPTS = mapped
@@ -276,12 +324,16 @@ final class CamAudioStore {
         guard outFrames > 0 else { return false }
 
         let dstRate = asbd.mSampleRate > 0 ? Int(asbd.mSampleRate) : storeRate
+        // 每次注入锁定 AU 目标，使后续入环一次对齐
+        lockTargetFromAU(sampleRate: dstRate, channels: auCh, isFloat: isFloat)
+
+        let ringRate = storeRate
         let duration = Double(outFrames) / Double(dstRate)
         let ringCh = max(1, storeChannels)
-        let needStore = max(1, Int((duration * Double(storeRate)).rounded(.up)) + 2)
+        let needStore = max(1, Int((duration * Double(ringRate)).rounded(.up)) + 2)
 
         let target = AVSyncClock.shared.mediaTime()
-        // 视频真停：干净静音（禁止末样衰减电流声）；短 hold-last 不走这里
+        // 视频真停：干净静音；短 hold-last 不冻
         if AVSyncClock.shared.shouldFreezeAudio() {
             CamPipelineDiag.shared.noteAudioUnderrun()
             Self.silence(into: dst, byteCount: byteCount)
@@ -296,15 +348,8 @@ final class CamAudioStore {
             lock.unlock()
         } else {
             CamPipelineDiag.shared.noteAudioUnderrun()
-            fillWithEnvelope(
-                into: dst,
-                frames: outFrames,
-                auChannels: auCh,
-                isFloat: isFloat,
-                sampleBytes: sampleBytes,
-                nonInterleaved: isNonInterleaved,
-                decaying: true
-            )
+            Self.silence(into: dst, byteCount: byteCount)
+            envelope = min(envelope, 0.15)
             return false
         }
 
@@ -322,36 +367,32 @@ final class CamAudioStore {
             return false
         }
 
-        // 环缓 → AU 采样率（按声道独立 Hermite，保留立体声）
+        // 环率已对齐 AU 时零重采样；仅锁定期前偶发走 Hermite
         let rateConverted: [Int16]
-        if dstRate == storeRate {
+        if dstRate == ringRate {
             let n = min(needStore, got) * ringCh
             rateConverted = Array(scratchStore.prefix(n))
         } else {
             rateConverted = resampleHermiteInterleaved(
                 Array(scratchStore.prefix(got * ringCh)),
                 channels: ringCh,
-                from: storeRate,
+                from: ringRate,
                 to: dstRate
             )
         }
 
-        // 声道布局：ringCh → auCh
+        // 声道布局：ringCh → auCh；不足用静音垫（禁止末样平台）
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: outFrames)
         if laid.count < outFrames * auCh {
-            let seedL = lastL
-            let seedR = lastR
-            let start = laid.count / auCh
             laid.append(contentsOf: repeatElement(Int16(0), count: outFrames * auCh - laid.count))
-            fadePadInterleaved(&laid, channels: auCh, fromFrame: start, toFrame: outFrames, seedL: seedL, seedR: seedR)
         } else if laid.count > outFrames * auCh {
             laid = Array(laid.prefix(outFrames * auCh))
         }
         for i in 0..<(outFrames * auCh) { scratchOut[i] = laid[i] }
 
-        // 慢淡入：~20ms，减轻音乐忽大忽小
+        // 从真欠载恢复：~30ms 淡入
         if envelope < 0.999 {
-            let fade = min(max(1, dstRate / 50), outFrames)
+            let fade = min(max(1, dstRate / 33), outFrames)
             for i in 0..<fade {
                 let a = envelope + (1.0 - envelope) * (Double(i + 1) / Double(fade))
                 for c in 0..<auCh {
@@ -391,7 +432,7 @@ final class CamAudioStore {
                     stage: .inject,
                     samples: base,
                     count: outFrames,
-                    rateIn: storeRate,
+                    rateIn: ringRate,
                     rateOut: dstRate,
                     bytesPerSample: sampleBytes,
                     isFloat: isFloat,
@@ -645,13 +686,11 @@ final class CamAudioStore {
                     frames - written,
                     max(0, Int(((chunk.pts - cursor) * Double(storeRate)).rounded(.down)))
                 )
+                // 缺口：静音，禁止末样平台造成电流/短断感
                 for i in 0..<gapFrames {
-                    let a = 1.0 - Double(i + 1) / Double(gapFrames + 1)
-                    let l = Int16(clamping: Int(Double(lastL) * max(envelope, 0.2) * a))
-                    let r = Int16(clamping: Int(Double(lastR) * max(envelope, 0.2) * a))
                     let base = (written + i) * ch
-                    buffer[base] = l
-                    if ch > 1 { buffer[base + 1] = r }
+                    buffer[base] = 0
+                    if ch > 1 { buffer[base + 1] = 0 }
                 }
                 written += gapFrames
                 cursor = chunk.pts

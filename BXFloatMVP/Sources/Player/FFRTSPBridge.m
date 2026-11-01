@@ -5,6 +5,7 @@ extern void BXFloatDiagVideoDecodeFail(void);
 extern void BXFloatDiagVideoSlotWait(void);
 extern void BXFloatDiagNoteVideoRaw(int64_t tick, int32_t tbNum, int32_t tbDen, double rawSec);
 extern void BXFloatDiagNoteAudioRaw(int64_t tick, int32_t tbNum, int32_t tbDen, double rawSec);
+extern int32_t BXFloatAudioTargetRate(void);
 
 #if BXFLOAT_HAS_FFMPEG
 
@@ -129,6 +130,10 @@ void BXFloatFFStop(void) {
     __block uint8_t *audioOutBufBlock = NULL;
     __block int audioOutBufSamplesBlock = 0;
     __block int audioOutCh = 1;
+    __block int audioOutRate = 48000;
+    __block int64_t audioInLayoutBlock = 0;
+    __block enum AVSampleFormat audioInFmtBlock = AV_SAMPLE_FMT_NONE;
+    __block int audioInRateBlock = 0;
     __block AVFrame *vframe = NULL;
     __block AVFrame *aframe = NULL;
     __block AVCodecContext *vctx = NULL;
@@ -239,8 +244,12 @@ void BXFloatFFStop(void) {
                         audioIdx = -1;
                     } else {
                         audioOutCh = outCh;
-                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → %dch 48k s16 (swr hq, keep stereo)",
-                              audioCtx->channels, audioCtx->sample_rate, (int)audioCtx->sample_fmt, outCh);
+                        audioOutRate = 48000;
+                        audioInLayoutBlock = inLayout;
+                        audioInFmtBlock = audioCtx->sample_fmt;
+                        audioInRateBlock = audioCtx->sample_rate;
+                        NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → %dch %dk s16 (swr hq, keep stereo)",
+                              audioCtx->channels, audioCtx->sample_rate, (int)audioCtx->sample_fmt, outCh, audioOutRate);
                     }
                 }
             }
@@ -365,9 +374,42 @@ void BXFloatFFStop(void) {
                     dr = avcodec_receive_frame(actx, aframe);
                     if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
                     if (dr < 0) break;
+                    // AU 已锁定目标采样率时，swr 一次对齐，避免环缓再 Hermite
+                    int wantRate = (int)BXFloatAudioTargetRate();
+                    if (wantRate < 8000) wantRate = 48000;
+                    if (wantRate != audioOutRate && audioInRateBlock > 0 && swrBlock) {
+                        const int64_t outLayout = audioOutCh >= 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
+                        struct SwrContext *nw = swr_alloc_set_opts(
+                            NULL,
+                            outLayout,
+                            AV_SAMPLE_FMT_S16,
+                            wantRate,
+                            audioInLayoutBlock,
+                            audioInFmtBlock,
+                            audioInRateBlock,
+                            0,
+                            NULL
+                        );
+                        if (nw) {
+                            av_opt_set_int(nw, "filter_size", 64, 0);
+                            av_opt_set_int(nw, "phase_shift", 12, 0);
+                            av_opt_set_double(nw, "cutoff", 0.96, 0);
+                        }
+                        if (nw && swr_init(nw) >= 0) {
+                            swr_free(&swrBlock);
+                            swrBlock = nw;
+                            audioOutRate = wantRate;
+                            av_freep(&audioOutBufBlock);
+                            audioOutBufSamplesBlock = 0;
+                            NSLog(@"BXFloatCam swr retarget → %dHz %dch", audioOutRate, audioOutCh);
+                        } else if (nw) {
+                            swr_free(&nw);
+                        }
+                    }
+                    const int outRate = audioOutRate > 0 ? audioOutRate : 48000;
                     int outSamples = (int)av_rescale_rnd(
                         swr_get_delay(swrBlock, actx->sample_rate) + aframe->nb_samples,
-                        48000,
+                        outRate,
                         actx->sample_rate,
                         AV_ROUND_UP
                     );
@@ -384,8 +426,7 @@ void BXFloatFFStop(void) {
                     }
                     uint8_t *outPlanes[8] = {0};
                     outPlanes[0] = audioOutBufBlock;
-                    // convert 前读 delay：输出首样对应时间 ≈ input_pts - delay/outRate
-                    int64_t delayBefore = swr_get_delay(swrBlock, 48000);
+                    int64_t delayBefore = swr_get_delay(swrBlock, outRate);
                     int converted = swr_convert(
                         swrBlock,
                         outPlanes,
@@ -399,13 +440,12 @@ void BXFloatFFStop(void) {
                         double pts = -1;
                         if (ts != AV_NOPTS_VALUE) {
                             pts = ts * av_q2d(audioTB);
-                            // 扣 swr 延迟，避免 endPTS 虚高 → 门控误判超前 → 连续拒收断音
                             if (delayBefore > 0) {
-                                pts -= (double)delayBefore / 48000.0;
+                                pts -= (double)delayBefore / (double)outRate;
                             }
                             BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
                         }
-                        BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, 48000, pts);
+                        BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, outRate, pts);
                     }
                 }
             } else {
