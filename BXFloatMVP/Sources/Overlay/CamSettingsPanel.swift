@@ -228,7 +228,7 @@ final class CamSettingsPanel: UIView {
         statusLabel.text = [
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
-            "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · 延迟 \(String(format: "%.1f", clock.latencySeconds()))s · 沿差 \(String(format: "%.0f", clock.estimatedAVDelta() * 1000))ms",
+            "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · AQ写 \(BXFloatMicAQPaintCount()) · 延迟 \(String(format: "%.1f", clock.latencySeconds()))s · 沿差 \(String(format: "%.0f", clock.estimatedAVDelta() * 1000))ms",
             "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionName())",
             diag.0,
             diag.1,
@@ -240,7 +240,10 @@ final class CamSettingsPanel: UIView {
                     : "若收帧=0：检查电脑 MediaMTX/OBS 与 IP")
                 : (cfg.audioCaptureMode == .stream && audioPkts == 0
                     ? "有画面无音频包：OBS 推流需勾选音频轨"
-                    : (cfg.audioCaptureMode != .microphone && BXFloatMicAUPaintCount() == 0 && MicReplaceHooks.paintCount == 0
+                    : (cfg.audioCaptureMode != .microphone
+                        && BXFloatMicAUPaintCount() == 0
+                        && BXFloatMicAQPaintCount() == 0
+                        && MicReplaceHooks.paintCount == 0
                         ? "麦未写入：进「开直播」页试麦，或杀抖音重进"
                         : "运行中 · 软变速跟 ring")),
         ].joined(separator: "\n")

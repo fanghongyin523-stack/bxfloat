@@ -2,6 +2,7 @@
 #import "fishhook.h"
 
 #import <AudioToolbox/AudioToolbox.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #import <stdatomic.h>
 #import <string.h>
@@ -46,12 +47,45 @@ static OSStatus (*orig_AudioUnitRender)(
     AudioBufferList *ioData
 ) = NULL;
 
+static OSStatus (*orig_AudioComponentInstanceNew)(
+    AudioComponent inComponent,
+    AudioComponentInstance *outInstance
+) = NULL;
+
+static OSStatus (*orig_AudioOutputUnitStart)(AudioUnit ci) = NULL;
+
+static OSStatus (*orig_AudioQueueNewInput)(
+    const AudioStreamBasicDescription *inFormat,
+    AudioQueueInputCallback inCallbackProc,
+    void *inUserData,
+    CFRunLoopRef inCallbackRunLoop,
+    CFStringRef inCallbackRunLoopMode,
+    UInt32 inFlags,
+    AudioQueueRef *outAQ
+) = NULL;
+
+enum { kAQWrapSlots = 16 };
+
+typedef struct {
+    AudioQueueInputCallback orig;
+    void *userData;
+    AudioStreamBasicDescription asbd;
+    _Atomic int used;
+} BXAQWrap;
+
+static BXAQWrap gAQWraps[kAQWrapSlots];
+
 static _Atomic int gMode = 0; // 0 mic, 1 stream, 2 mute
 static _Atomic int64_t gPaint = 0;
 static _Atomic int64_t gCallback = 0;
+static _Atomic int64_t gAQPaint = 0;
+static _Atomic int64_t gAQCallback = 0;
+static _Atomic int64_t gAUCreate = 0;
+static _Atomic int64_t gAUStart = 0;
 static _Atomic int gInstalled = 0;
 static _Atomic int gFmtLogTick = 0;
-// AU 回调禁止 malloc：固定交错临时区（≤4096 帧 × 8 平面 × 4 字节）
+static _Atomic int gAQFmtLogTick = 0;
+// AU/AQ 回调禁止 malloc：固定交错临时区（≤4096 帧 × 8 平面 × 4 字节）
 static uint8_t gPaintTmp[4096 * 8 * 4];
 
 void BXFloatMicAUSetMode(int mode) {
@@ -64,6 +98,22 @@ int64_t BXFloatMicAUPaintCount(void) {
 
 int64_t BXFloatMicAUCallbackCount(void) {
     return atomic_load(&gCallback);
+}
+
+int64_t BXFloatMicAQPaintCount(void) {
+    return atomic_load(&gAQPaint);
+}
+
+int64_t BXFloatMicAQCallbackCount(void) {
+    return atomic_load(&gAQCallback);
+}
+
+int64_t BXFloatMicAUCreateCount(void) {
+    return atomic_load(&gAUCreate);
+}
+
+int64_t BXFloatMicAUStartCount(void) {
+    return atomic_load(&gAUStart);
 }
 
 /// 解析 AU 缓冲与 ASBD：优先信任有效 ASBD，缓冲几何做交叉校验
@@ -292,7 +342,6 @@ static void paintABL(
             b0->mData, (int)frames, chInBuf, rate, bytesPerSample, isFloat, mode
         );
     }
-    atomic_fetch_add(&gPaint, 1);
 }
 
 static OSStatus hooked_AudioUnitRender(
@@ -336,6 +385,185 @@ static OSStatus hooked_AudioUnitRender(
 
     atomic_fetch_add(&gCallback, 1);
     paintABL(ioData, inNumberFrames, &asbd, mode);
+    atomic_fetch_add(&gPaint, 1);
+    return st;
+}
+
+static OSStatus hooked_AudioComponentInstanceNew(
+    AudioComponent inComponent,
+    AudioComponentInstance *outInstance
+) {
+    if (!orig_AudioComponentInstanceNew) return -1;
+    OSStatus st = orig_AudioComponentInstanceNew(inComponent, outInstance);
+    if (st == noErr) {
+        int64_t n = atomic_fetch_add(&gAUCreate, 1) + 1;
+        if (n <= 8 || (n % 32) == 0) {
+            AudioComponentDescription desc;
+            memset(&desc, 0, sizeof(desc));
+            if (inComponent) {
+                AudioComponentGetDescription(inComponent, &desc);
+            }
+            uint32_t t = CFSwapInt32HostToBig(desc.componentType);
+            uint32_t s = CFSwapInt32HostToBig(desc.componentSubType);
+            uint32_t m = CFSwapInt32HostToBig(desc.componentManufacturer);
+            NSLog(
+                @"BXFloatMic AU create #%lld type=%.4s subtype=%.4s manuf=%.4s",
+                (long long)n,
+                (char *)&t,
+                (char *)&s,
+                (char *)&m
+            );
+        }
+    }
+    return st;
+}
+
+static OSStatus hooked_AudioOutputUnitStart(AudioUnit ci) {
+    if (!orig_AudioOutputUnitStart) return -1;
+    OSStatus st = orig_AudioOutputUnitStart(ci);
+    if (st == noErr) {
+        int64_t n = atomic_fetch_add(&gAUStart, 1) + 1;
+        if (n <= 8 || (n % 32) == 0) {
+            NSLog(@"BXFloatMic AU start #%lld unit=%p", (long long)n, ci);
+        }
+    }
+    return st;
+}
+
+static void hooked_AudioQueueInputCallback(
+    void *inUserData,
+    AudioQueueRef inAQ,
+    AudioQueueBufferRef inBuffer,
+    const AudioTimeStamp *inStartTime,
+    UInt32 inNumberPacketDescriptions,
+    const AudioStreamPacketDescription *inPacketDescs
+) {
+    BXAQWrap *wrap = (BXAQWrap *)inUserData;
+    if (!wrap) return;
+
+    atomic_fetch_add(&gAQCallback, 1);
+    int mode = atomic_load(&gMode);
+
+    if (mode != 0 && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0) {
+        AudioStreamBasicDescription asbd = wrap->asbd;
+        UInt32 bpf = asbd.mBytesPerPacket > 0
+            ? asbd.mBytesPerPacket
+            : (asbd.mBytesPerFrame > 0 ? asbd.mBytesPerFrame : 0);
+        UInt32 frames = 0;
+        if (bpf > 0) {
+            frames = inBuffer->mAudioDataByteSize / bpf;
+        }
+        if (frames > 0) {
+            AudioBufferList abl;
+            memset(&abl, 0, sizeof(abl));
+            abl.mNumberBuffers = 1;
+            abl.mBuffers[0].mNumberChannels =
+                asbd.mChannelsPerFrame > 0 ? asbd.mChannelsPerFrame : 1;
+            abl.mBuffers[0].mDataByteSize = inBuffer->mAudioDataByteSize;
+            abl.mBuffers[0].mData = inBuffer->mAudioData;
+
+            int tick = atomic_fetch_add(&gAQFmtLogTick, 1);
+            if (tick == 0 || (tick % 100) == 0) {
+                NSLog(
+                    @"BXFloatMic AQ fmt rate=%.0f frames=%u bytes=%u ch=%u bits=%u flags=0x%x mode=%d",
+                    asbd.mSampleRate,
+                    (unsigned)frames,
+                    (unsigned)inBuffer->mAudioDataByteSize,
+                    (unsigned)asbd.mChannelsPerFrame,
+                    (unsigned)asbd.mBitsPerChannel,
+                    (unsigned)asbd.mFormatFlags,
+                    mode
+                );
+            }
+
+            // 系统已填好原麦 → 原地改写后再交给宿主回调（与 VCam AQ 路径同序）
+            paintABL(&abl, frames, &asbd, mode);
+            atomic_fetch_add(&gAQPaint, 1);
+        }
+    } else if (mode == 0 && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0) {
+        AudioStreamBasicDescription asbd = wrap->asbd;
+        UInt32 bpf = asbd.mBytesPerPacket > 0
+            ? asbd.mBytesPerPacket
+            : (asbd.mBytesPerFrame > 0 ? asbd.mBytesPerFrame : 0);
+        if (bpf > 0) {
+            UInt32 frames = inBuffer->mAudioDataByteSize / bpf;
+            if (frames > 0) {
+                AudioBufferList abl;
+                memset(&abl, 0, sizeof(abl));
+                abl.mNumberBuffers = 1;
+                abl.mBuffers[0].mNumberChannels =
+                    asbd.mChannelsPerFrame > 0 ? asbd.mChannelsPerFrame : 1;
+                abl.mBuffers[0].mDataByteSize = inBuffer->mAudioDataByteSize;
+                abl.mBuffers[0].mData = inBuffer->mAudioData;
+                tapMicABL(&abl, frames, &asbd);
+            }
+        }
+    }
+
+    if (wrap->orig) {
+        wrap->orig(
+            wrap->userData,
+            inAQ,
+            inBuffer,
+            inStartTime,
+            inNumberPacketDescriptions,
+            inPacketDescs
+        );
+    }
+}
+
+static OSStatus hooked_AudioQueueNewInput(
+    const AudioStreamBasicDescription *inFormat,
+    AudioQueueInputCallback inCallbackProc,
+    void *inUserData,
+    CFRunLoopRef inCallbackRunLoop,
+    CFStringRef inCallbackRunLoopMode,
+    UInt32 inFlags,
+    AudioQueueRef *outAQ
+) {
+    if (!orig_AudioQueueNewInput) return -1;
+
+    AudioQueueInputCallback cb = inCallbackProc;
+    void *ud = inUserData;
+    BXAQWrap *slot = NULL;
+
+    if (inCallbackProc) {
+        for (int i = 0; i < kAQWrapSlots; i++) {
+            int expected = 0;
+            if (atomic_compare_exchange_strong(&gAQWraps[i].used, &expected, 1)) {
+                slot = &gAQWraps[i];
+                break;
+            }
+        }
+    }
+
+    if (slot) {
+        slot->orig = inCallbackProc;
+        slot->userData = inUserData;
+        memset(&slot->asbd, 0, sizeof(slot->asbd));
+        if (inFormat) {
+            slot->asbd = *inFormat;
+        }
+        cb = hooked_AudioQueueInputCallback;
+        ud = slot;
+        NSLog(
+            @"BXFloatMic AQ NewInput wrap rate=%.0f ch=%u bits=%u",
+            slot->asbd.mSampleRate,
+            (unsigned)slot->asbd.mChannelsPerFrame,
+            (unsigned)slot->asbd.mBitsPerChannel
+        );
+    } else if (inCallbackProc) {
+        NSLog(@"BXFloatMic AQ NewInput wrap slots full — pass-through");
+    }
+
+    OSStatus st = orig_AudioQueueNewInput(
+        inFormat, cb, ud, inCallbackRunLoop, inCallbackRunLoopMode, inFlags, outAQ
+    );
+    if (st != noErr && slot) {
+        slot->orig = NULL;
+        slot->userData = NULL;
+        atomic_store(&slot->used, 0);
+    }
     return st;
 }
 
@@ -345,15 +573,59 @@ void BXFloatMicAUInstall(void) {
     if (!orig_AudioUnitRender) {
         orig_AudioUnitRender = (void *)dlsym(RTLD_DEFAULT, "AudioUnitRender");
     }
-    if (!orig_AudioUnitRender) {
-        NSLog(@"BXFloatMic AU dlsym AudioUnitRender failed — skip hook");
+    if (!orig_AudioComponentInstanceNew) {
+        orig_AudioComponentInstanceNew = (void *)dlsym(RTLD_DEFAULT, "AudioComponentInstanceNew");
+    }
+    if (!orig_AudioOutputUnitStart) {
+        orig_AudioOutputUnitStart = (void *)dlsym(RTLD_DEFAULT, "AudioOutputUnitStart");
+    }
+    if (!orig_AudioQueueNewInput) {
+        orig_AudioQueueNewInput = (void *)dlsym(RTLD_DEFAULT, "AudioQueueNewInput");
+    }
+
+    if (!orig_AudioUnitRender && !orig_AudioQueueNewInput) {
+        NSLog(@"BXFloatMic AU/AQ dlsym failed — skip hook");
         return;
     }
 
-    struct rebinding rebs[1] = {
-        {"AudioUnitRender", (void *)hooked_AudioUnitRender, (void **)&orig_AudioUnitRender},
-    };
-    int rc = rebind_symbols(rebs, 1);
+    struct rebinding rebs[4];
+    int n = 0;
+    if (orig_AudioUnitRender) {
+        rebs[n++] = (struct rebinding){
+            "AudioUnitRender", (void *)hooked_AudioUnitRender, (void **)&orig_AudioUnitRender
+        };
+    }
+    if (orig_AudioComponentInstanceNew) {
+        rebs[n++] = (struct rebinding){
+            "AudioComponentInstanceNew",
+            (void *)hooked_AudioComponentInstanceNew,
+            (void **)&orig_AudioComponentInstanceNew
+        };
+    }
+    if (orig_AudioOutputUnitStart) {
+        rebs[n++] = (struct rebinding){
+            "AudioOutputUnitStart",
+            (void *)hooked_AudioOutputUnitStart,
+            (void **)&orig_AudioOutputUnitStart
+        };
+    }
+    if (orig_AudioQueueNewInput) {
+        rebs[n++] = (struct rebinding){
+            "AudioQueueNewInput",
+            (void *)hooked_AudioQueueNewInput,
+            (void **)&orig_AudioQueueNewInput
+        };
+    }
+
+    int rc = rebind_symbols(rebs, n);
     atomic_store(&gInstalled, 1);
-    NSLog(@"BXFloatMic AU fishhook rc=%d origRender=%p", rc, orig_AudioUnitRender);
+    NSLog(
+        @"BXFloatMic AudioUnit and AudioQueue probes installed rc=%d n=%d render=%p aq=%p create=%p start=%p",
+        rc,
+        n,
+        orig_AudioUnitRender,
+        orig_AudioQueueNewInput,
+        orig_AudioComponentInstanceNew,
+        orig_AudioOutputUnitStart
+    );
 }

@@ -56,7 +56,7 @@ enum MicReplaceHooks {
         swizzleAudioDataOutput()
         swizzleSessionAddOutput()
         // 注意：不在启动时 fishhook，避免只读 GOT 写崩导致抖音闪退
-        NSLog("BXFloatMic AVCapture hooks installed (AU deferred)")
+        NSLog("BXFloatMic AVCapture hooks installed (AU/AQ deferred)")
     }
 
     /// mode=推流/静音时注入；原麦则 unwrap 透传。
@@ -118,7 +118,7 @@ enum MicReplaceHooks {
         }
         retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatMic apply mode=%@ cam=%d sticky=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld",
+            "BXFloatMic apply mode=%@ cam=%d sticky=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld aqPaint=%lld auCreate=%lld auStart=%lld",
             mode.rawValue,
             onCamera ? 1 : 0,
             (modeWantsInject && !onCamera && want) ? 1 : 0,
@@ -126,7 +126,10 @@ enum MicReplaceHooks {
             outputs.count,
             retainedProxyCount,
             auMode,
-            BXFloatMicAUPaintCount()
+            BXFloatMicAUPaintCount(),
+            BXFloatMicAQPaintCount(),
+            BXFloatMicAUCreateCount(),
+            BXFloatMicAUStartCount()
         )
     }
 
@@ -341,6 +344,18 @@ func BXFloatMicAUPaintCount() -> Int64
 
 @_silgen_name("BXFloatMicAUCallbackCount")
 func BXFloatMicAUCallbackCount() -> Int64
+
+@_silgen_name("BXFloatMicAQPaintCount")
+func BXFloatMicAQPaintCount() -> Int64
+
+@_silgen_name("BXFloatMicAQCallbackCount")
+func BXFloatMicAQCallbackCount() -> Int64
+
+@_silgen_name("BXFloatMicAUCreateCount")
+func BXFloatMicAUCreateCount() -> Int64
+
+@_silgen_name("BXFloatMicAUStartCount")
+func BXFloatMicAUStartCount() -> Int64
 
 @_cdecl("BXFloatInstallMicHooks")
 public func BXFloatInstallMicHooks() {

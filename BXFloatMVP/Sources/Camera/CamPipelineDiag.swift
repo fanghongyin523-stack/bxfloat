@@ -527,6 +527,10 @@ final class CamPipelineDiag {
         let aRingMs = Int(CamAudioStore.shared.bufferedSeconds() * 1000)
         let auCb = BXFloatMicAUCallbackCount()
         let auPaint = BXFloatMicAUPaintCount()
+        let aqCb = BXFloatMicAQCallbackCount()
+        let aqPaint = BXFloatMicAQPaintCount()
+        let auCreate = BXFloatMicAUCreateCount()
+        let auStart = BXFloatMicAUStartCount()
         let dEndV: Double
         if aEnd >= 0, clock.lastVideoPTS >= 0 {
             dEndV = aEnd - clock.lastVideoPTS
@@ -534,12 +538,12 @@ final class CamPipelineDiag {
             dEndV = .nan
         }
         let gateLine = String(
-            format: "BXFloatGate aRaw=%lld tb=%d/%d aRawSec=%.6f aEnd=%.6f vRaw=%lld tb=%d/%d vRawSec=%.6f vMap=%.6f dEndV=%.6f epoch=%.6f acc=%d rej=%d pend=%d rebase=%d leadMs=%.0f reason=%@ aRingMs=%d auCb=%lld auPaint=%lld fmt=%@",
+            format: "BXFloatGate aRaw=%lld tb=%d/%d aRawSec=%.6f aEnd=%.6f vRaw=%lld tb=%d/%d vRawSec=%.6f vMap=%.6f dEndV=%.6f epoch=%.6f acc=%d rej=%d pend=%d rebase=%d leadMs=%.0f reason=%@ aRingMs=%d auCb=%lld auPaint=%lld aqCb=%lld aqPaint=%lld auCreate=%lld auStart=%lld fmt=%@",
             aTick, aN, aD, aRS, aEnd,
             vTick, vN, vD, vRS, clock.lastVideoPTS,
             dEndV, clock.epoch,
             acc, rej, pend, reb, gateLead, gateReason as NSString,
-            aRingMs, auCb, auPaint,
+            aRingMs, auCb, auPaint, aqCb, aqPaint, auCreate, auStart,
             (fmtNote.isEmpty ? "-" : fmtNote) as NSString
         )
         NSLog("%@", vLine)
