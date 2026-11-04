@@ -522,6 +522,8 @@ final class CamAudioStore {
         }
         lock.lock()
         pending.append(Chunk(pts: startPTS, samples: pcm, channels: channels))
+        // 面板「音频包」要反映「已收到推流音频」；pending 也算，避免有声却显示 0
+        packetCount += 1
         lastUpdate = Date()
         trimPendingLocked()
         lock.unlock()
@@ -534,7 +536,7 @@ final class CamAudioStore {
             let start = nextAppendPTSLocked()
             let end = start + dur
             chunks.append(Chunk(pts: start, samples: old.samples, channels: old.channels))
-            packetCount += 1
+            // packetCount 已在 enqueuePending 计过，这里只转入 ring
             lastPTS = end
             pruneLocked(before: end - maxSeconds)
             CamPipelineDiag.shared.noteAudioGate(

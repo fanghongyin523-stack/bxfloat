@@ -171,9 +171,9 @@ static int BXFloatFFInterrupt(void *opaque) {
     av_dict_set(&opts, "max_delay", "1500000", 0);
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
     av_dict_set(&opts, "flags", "low_delay", 0);
-    // 过小探测在 MediaMTX 直播开头容易只摸几帧就读挂
-    av_dict_set(&opts, "probesize", "524288", 0);
-    av_dict_set(&opts, "analyzeduration", "1500000", 0);
+    // 直播 AAC 常晚于视频出现：探测太短会变成「有画无声」
+    av_dict_set(&opts, "probesize", "1048576", 0);
+    av_dict_set(&opts, "analyzeduration", "2500000", 0);
 
     AVFormatContext *fmtOpen = avformat_alloc_context();
     if (!fmtOpen) {
@@ -241,12 +241,24 @@ static int BXFloatFFInterrupt(void *opaque) {
                     audioCtx = NULL;
                     audioIdx = -1;
                 } else {
+                    int inCh = audioCtx->channels;
+                    if (inCh <= 0 && ast->codecpar) {
+                        inCh = ast->codecpar->channels;
+                    }
+                    if (inCh <= 0) inCh = 2;
+                    int inRate = audioCtx->sample_rate;
+                    if (inRate <= 0 && ast->codecpar) {
+                        inRate = (int)ast->codecpar->sample_rate;
+                    }
+                    if (inRate <= 0) inRate = 48000;
+                    audioCtx->channels = inCh;
+                    audioCtx->sample_rate = inRate;
                     int64_t inLayout = audioCtx->channel_layout;
                     if (!inLayout) {
-                        inLayout = av_get_default_channel_layout(audioCtx->channels);
+                        inLayout = av_get_default_channel_layout(inCh);
                     }
                     // 音乐多为立体声：解码后保 2ch，禁止过早压成 mono（发糊/相位抵消主因）
-                    const int outCh = audioCtx->channels >= 2 ? 2 : 1;
+                    const int outCh = inCh >= 2 ? 2 : 1;
                     const int64_t outLayout = outCh == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
                     swr = swr_alloc_set_opts(
                         NULL,
@@ -255,7 +267,7 @@ static int BXFloatFFInterrupt(void *opaque) {
                         48000,
                         inLayout,
                         audioCtx->sample_fmt,
-                        audioCtx->sample_rate,
+                        inRate,
                         0,
                         NULL
                     );
@@ -266,7 +278,8 @@ static int BXFloatFFInterrupt(void *opaque) {
                         av_opt_set_double(swr, "cutoff", 0.96, 0);
                     }
                     if (!swr || swr_init(swr) < 0) {
-                        NSLog(@"BXFloatCam ffmpeg swr init fail");
+                        NSLog(@"BXFloatCam ffmpeg swr init fail inCh=%d rate=%d fmt=%d",
+                              inCh, inRate, (int)audioCtx->sample_fmt);
                         if (swr) { swr_free(&swr); swr = NULL; }
                         avcodec_free_context(&audioCtx);
                         audioCtx = NULL;
@@ -276,9 +289,9 @@ static int BXFloatFFInterrupt(void *opaque) {
                         audioOutRate = 48000;
                         audioInLayoutBlock = inLayout;
                         audioInFmtBlock = audioCtx->sample_fmt;
-                        audioInRateBlock = audioCtx->sample_rate;
+                        audioInRateBlock = inRate;
                         NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → %dch %dk s16 (swr hq, keep stereo)",
-                              audioCtx->channels, audioCtx->sample_rate, (int)audioCtx->sample_fmt, outCh, audioOutRate);
+                              inCh, inRate, (int)audioCtx->sample_fmt, outCh, audioOutRate);
                     }
                 }
             }

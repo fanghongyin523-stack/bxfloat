@@ -123,6 +123,8 @@ final class AVSyncClock {
         lock.lock()
         defer { lock.unlock() }
         if lastVideoPTS < 0 { return .accept }
+        // 视频刚起步（还没攒够半秒沿）：先放行音频，避免沙盒「有画无音频包」假阴性
+        if lastVideoPTS < 0.50 { return .accept }
         let lead = endPTS - lastVideoPTS
         if lead <= audioSoftLead { return .accept }
         if lead <= audioHoldLead { return .pending(lead: lead) }
