@@ -41,12 +41,22 @@ void BXFloatFFStop(void) {
 @property (nonatomic, assign) BOOL running;
 @property (nonatomic, copy) NSString *currentURL;
 @property (nonatomic, strong) dispatch_queue_t queue;
+@property (nonatomic, strong) dispatch_queue_t pullQueue;
 @property (nonatomic, strong) dispatch_queue_t decodeQueue;
 @property (nonatomic, strong) dispatch_queue_t audioDecodeQueue;
 @property (nonatomic, assign) int64_t frameOK;
 @property (nonatomic, assign) int64_t frameFail;
 @property (nonatomic, assign) uint64_t sessionGen;
 @end
+
+#if BXFLOAT_HAS_FFMPEG
+/// av_read_frame / open 可中断：running 被清掉后尽快返回，避免卡死在 socket 读
+static int BXFloatFFInterrupt(void *opaque) {
+    FFRTSPBridge *bridge = (__bridge FFRTSPBridge *)opaque;
+    if (!bridge || !bridge.running) return 1;
+    return 0;
+}
+#endif
 
 @implementation FFRTSPBridge
 
@@ -71,6 +81,8 @@ void BXFloatFFStop(void) {
     self = [super init];
     if (self) {
         _queue = dispatch_queue_create("com.baixiang.ffrtsp", DISPATCH_QUEUE_SERIAL);
+        // 读包循环绝不能占控制队列，否则 stop/reconnect 无法把 running 置假
+        _pullQueue = dispatch_queue_create("com.baixiang.ffrtsp.pull", DISPATCH_QUEUE_SERIAL);
         _decodeQueue = dispatch_queue_create("com.baixiang.ffrtsp.decode", DISPATCH_QUEUE_SERIAL);
         // 音画分队：关键帧解码不再堵住音频（约 2s GOP 时尤其明显）
         _audioDecodeQueue = dispatch_queue_create("com.baixiang.ffrtsp.audio", DISPATCH_QUEUE_SERIAL);
@@ -89,7 +101,10 @@ void BXFloatFFStop(void) {
         self.frameOK = 0;
         self.frameFail = 0;
 #if BXFLOAT_HAS_FFMPEG
-        [self runLoopWithURL:urlString];
+        NSString *urlCopy = [urlString copy];
+        dispatch_async(self.pullQueue, ^{
+            [self runLoopWithURL:urlCopy];
+        });
 #else
         NSLog(@"BXFloatCam FFmpeg not linked; cannot pull %@", urlString);
         self.running = NO;
@@ -151,24 +166,38 @@ void BXFloatFFStop(void) {
     // 抗抖靠 ring(1.5～2s)，不再用 nobuffer 硬扛（一抖就空窗导致音画双卡）
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-    av_dict_set(&opts, "stimeout", "5000000", 0); // us
+    av_dict_set(&opts, "stimeout", "5000000", 0); // us — RTSP socket
+    av_dict_set(&opts, "rw_timeout", "5000000", 0); // us — 通用读写超时
     av_dict_set(&opts, "max_delay", "1500000", 0);
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
     av_dict_set(&opts, "flags", "low_delay", 0);
-    av_dict_set(&opts, "probesize", "65536", 0);
-    av_dict_set(&opts, "analyzeduration", "800000", 0);
+    // 过小探测在 MediaMTX 直播开头容易只摸几帧就读挂
+    av_dict_set(&opts, "probesize", "524288", 0);
+    av_dict_set(&opts, "analyzeduration", "1500000", 0);
+
+    AVFormatContext *fmtOpen = avformat_alloc_context();
+    if (!fmtOpen) {
+        NSLog(@"BXFloatCam ffmpeg alloc format fail");
+        self.running = NO;
+        [self scheduleReconnect:urlString];
+        return;
+    }
+    fmtOpen->interrupt_callback.callback = BXFloatFFInterrupt;
+    fmtOpen->interrupt_callback.opaque = (__bridge void *)self;
 
     const char *url = urlString.UTF8String;
-    int ret = avformat_open_input(&fmt, url, NULL, &opts);
+    int ret = avformat_open_input(&fmtOpen, url, NULL, &opts);
     av_dict_free(&opts);
     if (ret < 0) {
         char err[128];
         av_strerror(ret, err, sizeof(err));
         NSLog(@"BXFloatCam ffmpeg open fail %s (%@)", err, urlString);
+        // open 失败时 FFmpeg 已释放用户传入的 context
         self.running = NO;
         [self scheduleReconnect:urlString];
         return;
     }
+    fmt = fmtOpen;
 
     ret = avformat_find_stream_info(fmt, NULL);
     if (ret < 0) {
@@ -292,9 +321,9 @@ void BXFloatFFStop(void) {
     while (self.running) {
         ret = av_read_frame(fmt, packet);
         if (ret < 0) {
-            if (ret == AVERROR_EOF || ret == AVERROR(EIO)) {
-                NSLog(@"BXFloatCam ffmpeg read end/err %d, reconnect", ret);
-            }
+            char err[128];
+            av_strerror(ret, err, sizeof(err));
+            NSLog(@"BXFloatCam ffmpeg read end/err %d (%s), reconnect", ret, err);
             break;
         }
         const int si = packet->stream_index;
@@ -332,15 +361,44 @@ void BXFloatFFStop(void) {
                 return;
             }
             if (isVideo && vctx && vframe) {
+                // EAGAIN：解码器满了，必须先 drain 再重送；绝不能把包当失败丢掉（会卡死在几帧后）
                 int dr = avcodec_send_packet(vctx, owned);
+                if (dr == AVERROR(EAGAIN)) {
+                    while (self.running && self.sessionGen == gen) {
+                        int rr = avcodec_receive_frame(vctx, vframe);
+                        if (rr == AVERROR(EAGAIN) || rr == AVERROR_EOF) break;
+                        if (rr < 0) {
+                            self.frameFail++;
+                            BXFloatDiagVideoDecodeFail();
+                            break;
+                        }
+                        int64_t ts = vframe->best_effort_timestamp;
+                        if (ts == AV_NOPTS_VALUE) ts = vframe->pts;
+                        double pts = -1;
+                        if (ts != AV_NOPTS_VALUE) {
+                            pts = ts * av_q2d(videoTB);
+                            BXFloatDiagNoteVideoRaw(ts, (int32_t)videoTB.num, (int32_t)videoTB.den, pts);
+                        }
+                        if (![self publishFrame:vframe codecCtx:vctx sws:&swsBlock pts:pts]) {
+                            self.frameFail++;
+                            BXFloatDiagVideoDecodeFail();
+                        } else {
+                            self.frameOK++;
+                            BXFloatDiagVideoDecodeOK();
+                        }
+                    }
+                    dr = avcodec_send_packet(vctx, owned);
+                }
                 av_packet_free(&owned);
                 if (dr < 0) {
-                    self.frameFail++;
-                    BXFloatDiagVideoDecodeFail();
+                    if (dr != AVERROR_EOF) {
+                        self.frameFail++;
+                        BXFloatDiagVideoDecodeFail();
+                    }
                     dispatch_semaphore_signal(slot);
                     return;
                 }
-                while (dr >= 0 && self.running && self.sessionGen == gen) {
+                while (self.running && self.sessionGen == gen) {
                     dr = avcodec_receive_frame(vctx, vframe);
                     if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
                     if (dr < 0) {
@@ -364,90 +422,98 @@ void BXFloatFFStop(void) {
                     }
                 }
             } else if (isAudio && actx && swrBlock && aframe) {
+                // 与视频相同：EAGAIN 先 drain 再重送，禁止丢包
                 int dr = avcodec_send_packet(actx, owned);
-                av_packet_free(&owned);
-                if (dr < 0) {
-                    dispatch_semaphore_signal(slot);
-                    return;
-                }
-                while (dr >= 0 && self.running && self.sessionGen == gen) {
-                    dr = avcodec_receive_frame(actx, aframe);
-                    if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
-                    if (dr < 0) break;
-                    // AU 已锁定目标采样率时，swr 一次对齐，避免环缓再 Hermite
-                    int wantRate = (int)BXFloatAudioTargetRate();
-                    if (wantRate < 8000) wantRate = 48000;
-                    if (wantRate != audioOutRate && audioInRateBlock > 0 && swrBlock) {
-                        const int64_t outLayout = audioOutCh >= 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
-                        struct SwrContext *nw = swr_alloc_set_opts(
-                            NULL,
-                            outLayout,
-                            AV_SAMPLE_FMT_S16,
-                            wantRate,
-                            audioInLayoutBlock,
-                            audioInFmtBlock,
-                            audioInRateBlock,
-                            0,
-                            NULL
-                        );
-                        if (nw) {
-                            av_opt_set_int(nw, "filter_size", 64, 0);
-                            av_opt_set_int(nw, "phase_shift", 12, 0);
-                            av_opt_set_double(nw, "cutoff", 0.96, 0);
-                        }
-                        if (nw && swr_init(nw) >= 0) {
-                            swr_free(&swrBlock);
-                            swrBlock = nw;
-                            audioOutRate = wantRate;
-                            av_freep(&audioOutBufBlock);
-                            audioOutBufSamplesBlock = 0;
-                            NSLog(@"BXFloatCam swr retarget → %dHz %dch", audioOutRate, audioOutCh);
-                        } else if (nw) {
-                            swr_free(&nw);
-                        }
+                int drainRounds = (dr == AVERROR(EAGAIN)) ? 2 : 1;
+                for (int round = 0; round < drainRounds; round++) {
+                    if (round == 1) {
+                        dr = avcodec_send_packet(actx, owned);
                     }
-                    const int outRate = audioOutRate > 0 ? audioOutRate : 48000;
-                    int outSamples = (int)av_rescale_rnd(
-                        swr_get_delay(swrBlock, actx->sample_rate) + aframe->nb_samples,
-                        outRate,
-                        actx->sample_rate,
-                        AV_ROUND_UP
-                    );
-                    if (outSamples <= 0) outSamples = aframe->nb_samples;
-                    const int och = audioOutCh > 0 ? audioOutCh : 1;
-                    if (outSamples > audioOutBufSamplesBlock) {
-                        av_freep(&audioOutBufBlock);
-                        if (av_samples_alloc(&audioOutBufBlock, NULL, och, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
-                            audioOutBufBlock = NULL;
-                            audioOutBufSamplesBlock = 0;
-                            break;
-                        }
-                        audioOutBufSamplesBlock = outSamples;
+                    if (dr == AVERROR(EAGAIN) && round == 0) {
+                        // fall through to drain then retry send in round 1
+                    } else if (dr < 0) {
+                        break;
                     }
-                    uint8_t *outPlanes[8] = {0};
-                    outPlanes[0] = audioOutBufBlock;
-                    int64_t delayBefore = swr_get_delay(swrBlock, outRate);
-                    int converted = swr_convert(
-                        swrBlock,
-                        outPlanes,
-                        outSamples,
-                        (const uint8_t **)aframe->data,
-                        aframe->nb_samples
-                    );
-                    if (converted > 0) {
-                        int64_t ts = aframe->best_effort_timestamp;
-                        if (ts == AV_NOPTS_VALUE) ts = aframe->pts;
-                        double pts = -1;
-                        if (ts != AV_NOPTS_VALUE) {
-                            pts = ts * av_q2d(audioTB);
-                            if (delayBefore > 0) {
-                                pts -= (double)delayBefore / (double)outRate;
+                    while (self.running && self.sessionGen == gen) {
+                        int rr = avcodec_receive_frame(actx, aframe);
+                        if (rr == AVERROR(EAGAIN) || rr == AVERROR_EOF) break;
+                        if (rr < 0) break;
+                        int wantRate = (int)BXFloatAudioTargetRate();
+                        if (wantRate < 8000) wantRate = 48000;
+                        if (wantRate != audioOutRate && audioInRateBlock > 0 && swrBlock) {
+                            const int64_t outLayout = audioOutCh >= 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
+                            struct SwrContext *nw = swr_alloc_set_opts(
+                                NULL,
+                                outLayout,
+                                AV_SAMPLE_FMT_S16,
+                                wantRate,
+                                audioInLayoutBlock,
+                                audioInFmtBlock,
+                                audioInRateBlock,
+                                0,
+                                NULL
+                            );
+                            if (nw) {
+                                av_opt_set_int(nw, "filter_size", 64, 0);
+                                av_opt_set_int(nw, "phase_shift", 12, 0);
+                                av_opt_set_double(nw, "cutoff", 0.96, 0);
                             }
-                            BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
+                            if (nw && swr_init(nw) >= 0) {
+                                swr_free(&swrBlock);
+                                swrBlock = nw;
+                                audioOutRate = wantRate;
+                                av_freep(&audioOutBufBlock);
+                                audioOutBufSamplesBlock = 0;
+                                NSLog(@"BXFloatCam swr retarget → %dHz %dch", audioOutRate, audioOutCh);
+                            } else if (nw) {
+                                swr_free(&nw);
+                            }
                         }
-                        BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, outRate, pts);
+                        const int outRate = audioOutRate > 0 ? audioOutRate : 48000;
+                        int outSamples = (int)av_rescale_rnd(
+                            swr_get_delay(swrBlock, actx->sample_rate) + aframe->nb_samples,
+                            outRate,
+                            actx->sample_rate,
+                            AV_ROUND_UP
+                        );
+                        if (outSamples <= 0) outSamples = aframe->nb_samples;
+                        const int och = audioOutCh > 0 ? audioOutCh : 1;
+                        if (outSamples > audioOutBufSamplesBlock) {
+                            av_freep(&audioOutBufBlock);
+                            if (av_samples_alloc(&audioOutBufBlock, NULL, och, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
+                                audioOutBufBlock = NULL;
+                                audioOutBufSamplesBlock = 0;
+                                break;
+                            }
+                            audioOutBufSamplesBlock = outSamples;
+                        }
+                        uint8_t *outPlanes[8] = {0};
+                        outPlanes[0] = audioOutBufBlock;
+                        int64_t delayBefore = swr_get_delay(swrBlock, outRate);
+                        int converted = swr_convert(
+                            swrBlock,
+                            outPlanes,
+                            outSamples,
+                            (const uint8_t **)aframe->data,
+                            aframe->nb_samples
+                        );
+                        if (converted > 0) {
+                            int64_t ts = aframe->best_effort_timestamp;
+                            if (ts == AV_NOPTS_VALUE) ts = aframe->pts;
+                            double pts = -1;
+                            if (ts != AV_NOPTS_VALUE) {
+                                pts = ts * av_q2d(audioTB);
+                                if (delayBefore > 0) {
+                                    pts -= (double)delayBefore / (double)outRate;
+                                }
+                                BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
+                            }
+                            BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, outRate, pts);
+                        }
                     }
+                    if (dr != AVERROR(EAGAIN)) break;
                 }
+                av_packet_free(&owned);
             } else {
                 av_packet_free(&owned);
             }
@@ -541,13 +607,18 @@ cleanup:
 }
 
 - (void)scheduleReconnect:(NSString *)urlString {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), self.queue, ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), self.queue, ^{
         if (self.running) return;
         if (urlString.length == 0) return;
         NSLog(@"BXFloatCam ffmpeg reconnect %@", urlString);
         self.currentURL = [urlString copy];
         self.running = YES;
-        [self runLoopWithURL:urlString];
+        self.frameOK = 0;
+        self.frameFail = 0;
+        NSString *urlCopy = [urlString copy];
+        dispatch_async(self.pullQueue, ^{
+            [self runLoopWithURL:urlCopy];
+        });
     });
 }
 
