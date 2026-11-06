@@ -20,6 +20,7 @@ final class CamSettingsPanel: UIView {
     private let audioControl = UISegmentedControl(items: ["推流声音", "手机麦克风", "静音"])
     private let collapseButton = UIButton(type: .system)
     private let copyLogButton = UIButton(type: .system)
+    private let monitorButton = UIButton(type: .system)
     private let statusLabel = UILabel()
 
     override init(frame: CGRect) {
@@ -122,11 +123,18 @@ final class CamSettingsPanel: UIView {
         copyLogButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
         copyLogButton.addTarget(self, action: #selector(copyLogTapped), for: .touchUpInside)
 
+        monitorButton.setTitle("听:关", for: .normal)
+        monitorButton.setTitleColor(.white, for: .normal)
+        monitorButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
+        monitorButton.layer.cornerRadius = 8
+        monitorButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        monitorButton.addTarget(self, action: #selector(monitorTapped), for: .touchUpInside)
+
         statusLabel.textColor = UIColor.white.withAlphaComponent(0.55)
         statusLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         statusLabel.numberOfLines = 0
 
-        [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, audioLabel, audioControl, collapseButton, copyLogButton, statusLabel].forEach {
+        [titleLabel, modeControl, modeHint, ipField, pasteButton, replaceLabel, replaceSwitch, audioLabel, audioControl, collapseButton, copyLogButton, monitorButton, statusLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             card.addSubview($0)
         }
@@ -175,8 +183,13 @@ final class CamSettingsPanel: UIView {
             collapseButton.topAnchor.constraint(equalTo: audioControl.bottomAnchor, constant: 16),
             collapseButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
 
+            monitorButton.centerYAnchor.constraint(equalTo: collapseButton.centerYAnchor),
+            monitorButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            monitorButton.heightAnchor.constraint(equalToConstant: 32),
+            monitorButton.widthAnchor.constraint(equalToConstant: 56),
+
             copyLogButton.centerYAnchor.constraint(equalTo: collapseButton.centerYAnchor),
-            copyLogButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            copyLogButton.trailingAnchor.constraint(equalTo: monitorButton.leadingAnchor, constant: -8),
             copyLogButton.heightAnchor.constraint(equalToConstant: 32),
             copyLogButton.widthAnchor.constraint(equalToConstant: 110),
             collapseButton.trailingAnchor.constraint(lessThanOrEqualTo: copyLogButton.leadingAnchor, constant: -8),
@@ -204,6 +217,7 @@ final class CamSettingsPanel: UIView {
     }
 
     private func refreshStatus() {
+        monitorButton.setTitle(CamAudioRingMonitor.shared.statusLine, for: .normal)
         let store = CamFrameStore.shared
         let age = Date().timeIntervalSince(store.lastUpdate)
         let ageText = store.frameCount == 0 ? "暂无数据" : String(format: "%.1fs前", age)
@@ -232,7 +246,7 @@ final class CamSettingsPanel: UIView {
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
             "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · AQ写 \(BXFloatMicAQPaintCount()) · 延迟 \(String(format: "%.1f", clock.latencySeconds()))s · 沿差 \(String(format: "%.0f", clock.estimatedAVDelta() * 1000))ms",
-            "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionName())",
+            "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionName()) · \(CamAudioRingMonitor.shared.statusLine)",
             diag.0,
             diag.1,
             diag.2,
@@ -305,6 +319,12 @@ final class CamSettingsPanel: UIView {
         delegate?.camSettingsPanelDidCollapse(self)
     }
 
+    @objc private func monitorTapped() {
+        CamAudioRingMonitor.shared.cycleSource()
+        monitorButton.setTitle(CamAudioRingMonitor.shared.statusLine, for: .normal)
+        refreshStatus()
+    }
+
     @objc private func copyLogTapped() {
         let snap = CamPipelineDiag.shared.panelSnapshotForCopy()
         let gate = CamPipelineDiag.shared.paintGatePanelLine()
@@ -315,6 +335,7 @@ final class CamSettingsPanel: UIView {
             snap,
             gate,
             panel,
+            "听分锅：听:环=环缓源 · 听:注=注入写出 · 录后=抖音成片",
             "=== BXFloatGate Log ===",
             exp.text,
         ].joined(separator: "\n")
