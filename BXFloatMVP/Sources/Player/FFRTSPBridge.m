@@ -170,7 +170,7 @@ static int BXFloatFFInterrupt(void *opaque) {
     av_dict_set(&opts, "rw_timeout", "5000000", 0); // us — 通用读写超时
     av_dict_set(&opts, "max_delay", "1500000", 0);
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
-    av_dict_set(&opts, "flags", "low_delay", 0);
+    // 不用 low_delay：直播 H264 更容易在短 GOP 后把解码器逼进异常路径
     // 直播 AAC 常晚于视频出现：探测太短会变成「有画无声」
     av_dict_set(&opts, "probesize", "1048576", 0);
     av_dict_set(&opts, "analyzeduration", "2500000", 0);
@@ -257,41 +257,37 @@ static int BXFloatFFInterrupt(void *opaque) {
                     if (!inLayout) {
                         inLayout = av_get_default_channel_layout(inCh);
                     }
-                    // 音乐多为立体声：解码后保 2ch，禁止过早压成 mono（发糊/相位抵消主因）
+                    // 音乐多为立体声：解码后保 2ch。AAC open 时 fmt 常 NONE → 用 FLTP 兜底；失败则首帧惰性建 swr
                     const int outCh = inCh >= 2 ? 2 : 1;
                     const int64_t outLayout = outCh == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
+                    enum AVSampleFormat openFmt = audioCtx->sample_fmt;
+                    if (openFmt == AV_SAMPLE_FMT_NONE && ast->codecpar) {
+                        openFmt = (enum AVSampleFormat)ast->codecpar->format;
+                    }
+                    if (openFmt == AV_SAMPLE_FMT_NONE) {
+                        openFmt = AV_SAMPLE_FMT_FLTP;
+                    }
                     swr = swr_alloc_set_opts(
-                        NULL,
-                        outLayout,
-                        AV_SAMPLE_FMT_S16,
-                        48000,
-                        inLayout,
-                        audioCtx->sample_fmt,
-                        inRate,
-                        0,
-                        NULL
+                        NULL, outLayout, AV_SAMPLE_FMT_S16, 48000,
+                        inLayout, openFmt, inRate, 0, NULL
                     );
-                    // 提高重采样滤波质量；不做增益/降噪
                     if (swr) {
                         av_opt_set_int(swr, "filter_size", 64, 0);
                         av_opt_set_int(swr, "phase_shift", 12, 0);
                         av_opt_set_double(swr, "cutoff", 0.96, 0);
                     }
+                    audioOutCh = outCh;
+                    audioOutRate = 48000;
+                    audioInLayoutBlock = inLayout;
+                    audioInFmtBlock = openFmt;
+                    audioInRateBlock = inRate;
                     if (!swr || swr_init(swr) < 0) {
-                        NSLog(@"BXFloatCam ffmpeg swr init fail inCh=%d rate=%d fmt=%d",
-                              inCh, inRate, (int)audioCtx->sample_fmt);
+                        NSLog(@"BXFloatCam ffmpeg swr defer inCh=%d rate=%d fmt=%d (keep audio track)",
+                              inCh, inRate, (int)openFmt);
                         if (swr) { swr_free(&swr); swr = NULL; }
-                        avcodec_free_context(&audioCtx);
-                        audioCtx = NULL;
-                        audioIdx = -1;
                     } else {
-                        audioOutCh = outCh;
-                        audioOutRate = 48000;
-                        audioInLayoutBlock = inLayout;
-                        audioInFmtBlock = audioCtx->sample_fmt;
-                        audioInRateBlock = inRate;
                         NSLog(@"BXFloatCam ffmpeg audio %dch %dHz fmt=%d → %dch %dk s16 (swr hq, keep stereo)",
-                              inCh, inRate, (int)audioCtx->sample_fmt, outCh, audioOutRate);
+                              inCh, inRate, (int)openFmt, outCh, audioOutRate);
                     }
                 }
             }
@@ -306,10 +302,10 @@ static int BXFloatFFInterrupt(void *opaque) {
     frame = av_frame_alloc();
     audioFrame = av_frame_alloc();
     packet = av_packet_alloc();
-    if (!frame || !packet) goto cleanup;
+    if (!frame || !audioFrame || !packet) goto cleanup;
 
-    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d (read∥decode ring)",
-          urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0);
+    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d swr=%d (read∥decode ring)",
+          urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0, swr ? 1 : 0);
 
     videoTB = fmt->streams[videoIdx]->time_base;
     if (audioIdx >= 0) {
@@ -341,7 +337,8 @@ static int BXFloatFFInterrupt(void *opaque) {
         }
         const int si = packet->stream_index;
         const BOOL isVideo = (si == videoIdx);
-        const BOOL isAudio = (audioIdx >= 0 && si == audioIdx && actx && swrBlock && aframe);
+        // 不要求 swrBlock：首帧可惰性建；否则 demux 层直接把 AAC 扔掉 → 音频包永远 0
+        const BOOL isAudio = (audioIdx >= 0 && si == audioIdx && actx && aframe);
         if (!isVideo && !isAudio) {
             av_packet_unref(packet);
             continue;
@@ -352,18 +349,29 @@ static int BXFloatFFInterrupt(void *opaque) {
         if (!owned) continue;
 
         dispatch_semaphore_t slot = isAudio ? aSlots : vSlots;
-        // 一直等到有解码槽：宁可延迟涨，也不丢 OBS 已稳定推来的包
+        // 直播：槽位等太久就丢包继续读，禁止死等把 TCP 塞死（约 1s/~30 帧后整路停）
+        int waitedMs = 0;
+        BOOL gotSlot = NO;
         while (self.running) {
-            if (dispatch_semaphore_wait(slot, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) == 0) {
+            if (dispatch_semaphore_wait(slot, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) == 0) {
+                gotSlot = YES;
                 break;
             }
+            waitedMs += 50;
             if (isVideo) {
                 BXFloatDiagVideoSlotWait();
+            }
+            if (waitedMs >= 400) {
+                break;
             }
         }
         if (!self.running) {
             av_packet_free(&owned);
             break;
+        }
+        if (!gotSlot) {
+            av_packet_free(&owned);
+            continue;
         }
 
         dispatch_queue_t q = isAudio ? self.audioDecodeQueue : self.decodeQueue;
@@ -434,99 +442,111 @@ static int BXFloatFFInterrupt(void *opaque) {
                         BXFloatDiagVideoDecodeOK();
                     }
                 }
-            } else if (isAudio && actx && swrBlock && aframe) {
-                // 与视频相同：EAGAIN 先 drain 再重送，禁止丢包
+            } else if (isAudio && actx && aframe) {
+                // 发布一帧 PCM（惰性 swr：按实际 aframe 格式建，避免 open 时 NONE 废掉音轨）
+                void (^publishAFrame)(void) = ^{
+                    int inCh = aframe->channels > 0 ? aframe->channels : actx->channels;
+                    if (inCh <= 0) inCh = audioOutCh > 0 ? audioOutCh : 2;
+                    int inRate = aframe->sample_rate > 0 ? aframe->sample_rate : actx->sample_rate;
+                    if (inRate <= 0) inRate = audioInRateBlock > 0 ? audioInRateBlock : 48000;
+                    enum AVSampleFormat inFmt = (enum AVSampleFormat)aframe->format;
+                    if (inFmt == AV_SAMPLE_FMT_NONE) inFmt = audioInFmtBlock;
+                    if (inFmt == AV_SAMPLE_FMT_NONE) inFmt = AV_SAMPLE_FMT_FLTP;
+                    int64_t inLayout = av_get_default_channel_layout(inCh);
+                    int wantRate = (int)BXFloatAudioTargetRate();
+                    if (wantRate < 8000) wantRate = 48000;
+                    const int och = inCh >= 2 ? 2 : 1;
+                    const int64_t outLayout = och == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
+                    BOOL needSwr = (swrBlock == NULL)
+                        || (inFmt != audioInFmtBlock)
+                        || (inRate != audioInRateBlock)
+                        || (och != audioOutCh)
+                        || (wantRate != audioOutRate);
+                    if (needSwr) {
+                        struct SwrContext *nw = swr_alloc_set_opts(
+                            NULL, outLayout, AV_SAMPLE_FMT_S16, wantRate,
+                            inLayout, inFmt, inRate, 0, NULL
+                        );
+                        if (nw) {
+                            av_opt_set_int(nw, "filter_size", 64, 0);
+                            av_opt_set_int(nw, "phase_shift", 12, 0);
+                            av_opt_set_double(nw, "cutoff", 0.96, 0);
+                        }
+                        if (nw && swr_init(nw) >= 0) {
+                            if (swrBlock) swr_free(&swrBlock);
+                            swrBlock = nw;
+                            audioInFmtBlock = inFmt;
+                            audioInRateBlock = inRate;
+                            audioInLayoutBlock = inLayout;
+                            audioOutCh = och;
+                            audioOutRate = wantRate;
+                            av_freep(&audioOutBufBlock);
+                            audioOutBufSamplesBlock = 0;
+                            NSLog(@"BXFloatCam swr ready %dch %dHz fmt=%d → %dch %dHz",
+                                  inCh, inRate, (int)inFmt, och, wantRate);
+                        } else {
+                            if (nw) swr_free(&nw);
+                            return;
+                        }
+                    }
+                    if (!swrBlock) return;
+                    const int outRate = audioOutRate > 0 ? audioOutRate : 48000;
+                    int outSamples = (int)av_rescale_rnd(
+                        swr_get_delay(swrBlock, inRate) + aframe->nb_samples,
+                        outRate, inRate, AV_ROUND_UP
+                    );
+                    if (outSamples <= 0) outSamples = aframe->nb_samples;
+                    if (outSamples > audioOutBufSamplesBlock) {
+                        av_freep(&audioOutBufBlock);
+                        if (av_samples_alloc(&audioOutBufBlock, NULL, och, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
+                            audioOutBufBlock = NULL;
+                            audioOutBufSamplesBlock = 0;
+                            return;
+                        }
+                        audioOutBufSamplesBlock = outSamples;
+                    }
+                    uint8_t *outPlanes[8] = {0};
+                    outPlanes[0] = audioOutBufBlock;
+                    int64_t delayBefore = swr_get_delay(swrBlock, outRate);
+                    const uint8_t **inPlanes = (const uint8_t **)(aframe->extended_data
+                        ? aframe->extended_data
+                        : aframe->data);
+                    int converted = swr_convert(
+                        swrBlock, outPlanes, outSamples, inPlanes, aframe->nb_samples
+                    );
+                    if (converted <= 0) return;
+                    int64_t ts = aframe->best_effort_timestamp;
+                    if (ts == AV_NOPTS_VALUE) ts = aframe->pts;
+                    double pts = -1;
+                    if (ts != AV_NOPTS_VALUE) {
+                        pts = ts * av_q2d(audioTB);
+                        if (delayBefore > 0) pts -= (double)delayBefore / (double)outRate;
+                        BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
+                    }
+                    BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, outRate, pts);
+                };
+
                 int dr = avcodec_send_packet(actx, owned);
-                int drainRounds = (dr == AVERROR(EAGAIN)) ? 2 : 1;
-                for (int round = 0; round < drainRounds; round++) {
-                    if (round == 1) {
-                        dr = avcodec_send_packet(actx, owned);
-                    }
-                    if (dr == AVERROR(EAGAIN) && round == 0) {
-                        // fall through to drain then retry send in round 1
-                    } else if (dr < 0) {
-                        break;
-                    }
+                if (dr == AVERROR(EAGAIN)) {
                     while (self.running && self.sessionGen == gen) {
                         int rr = avcodec_receive_frame(actx, aframe);
                         if (rr == AVERROR(EAGAIN) || rr == AVERROR_EOF) break;
                         if (rr < 0) break;
-                        int wantRate = (int)BXFloatAudioTargetRate();
-                        if (wantRate < 8000) wantRate = 48000;
-                        if (wantRate != audioOutRate && audioInRateBlock > 0 && swrBlock) {
-                            const int64_t outLayout = audioOutCh >= 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
-                            struct SwrContext *nw = swr_alloc_set_opts(
-                                NULL,
-                                outLayout,
-                                AV_SAMPLE_FMT_S16,
-                                wantRate,
-                                audioInLayoutBlock,
-                                audioInFmtBlock,
-                                audioInRateBlock,
-                                0,
-                                NULL
-                            );
-                            if (nw) {
-                                av_opt_set_int(nw, "filter_size", 64, 0);
-                                av_opt_set_int(nw, "phase_shift", 12, 0);
-                                av_opt_set_double(nw, "cutoff", 0.96, 0);
-                            }
-                            if (nw && swr_init(nw) >= 0) {
-                                swr_free(&swrBlock);
-                                swrBlock = nw;
-                                audioOutRate = wantRate;
-                                av_freep(&audioOutBufBlock);
-                                audioOutBufSamplesBlock = 0;
-                                NSLog(@"BXFloatCam swr retarget → %dHz %dch", audioOutRate, audioOutCh);
-                            } else if (nw) {
-                                swr_free(&nw);
-                            }
-                        }
-                        const int outRate = audioOutRate > 0 ? audioOutRate : 48000;
-                        int outSamples = (int)av_rescale_rnd(
-                            swr_get_delay(swrBlock, actx->sample_rate) + aframe->nb_samples,
-                            outRate,
-                            actx->sample_rate,
-                            AV_ROUND_UP
-                        );
-                        if (outSamples <= 0) outSamples = aframe->nb_samples;
-                        const int och = audioOutCh > 0 ? audioOutCh : 1;
-                        if (outSamples > audioOutBufSamplesBlock) {
-                            av_freep(&audioOutBufBlock);
-                            if (av_samples_alloc(&audioOutBufBlock, NULL, och, outSamples, AV_SAMPLE_FMT_S16, 0) < 0) {
-                                audioOutBufBlock = NULL;
-                                audioOutBufSamplesBlock = 0;
-                                break;
-                            }
-                            audioOutBufSamplesBlock = outSamples;
-                        }
-                        uint8_t *outPlanes[8] = {0};
-                        outPlanes[0] = audioOutBufBlock;
-                        int64_t delayBefore = swr_get_delay(swrBlock, outRate);
-                        int converted = swr_convert(
-                            swrBlock,
-                            outPlanes,
-                            outSamples,
-                            (const uint8_t **)aframe->data,
-                            aframe->nb_samples
-                        );
-                        if (converted > 0) {
-                            int64_t ts = aframe->best_effort_timestamp;
-                            if (ts == AV_NOPTS_VALUE) ts = aframe->pts;
-                            double pts = -1;
-                            if (ts != AV_NOPTS_VALUE) {
-                                pts = ts * av_q2d(audioTB);
-                                if (delayBefore > 0) {
-                                    pts -= (double)delayBefore / (double)outRate;
-                                }
-                                BXFloatDiagNoteAudioRaw(ts, (int32_t)audioTB.num, (int32_t)audioTB.den, pts);
-                            }
-                            BXFloatPublishAudioPCM((const int16_t *)audioOutBufBlock, converted, och, outRate, pts);
-                        }
+                        publishAFrame();
                     }
-                    if (dr != AVERROR(EAGAIN)) break;
+                    dr = avcodec_send_packet(actx, owned);
                 }
                 av_packet_free(&owned);
+                if (dr < 0) {
+                    dispatch_semaphore_signal(slot);
+                    return;
+                }
+                while (self.running && self.sessionGen == gen) {
+                    dr = avcodec_receive_frame(actx, aframe);
+                    if (dr == AVERROR(EAGAIN) || dr == AVERROR_EOF) break;
+                    if (dr < 0) break;
+                    publishAFrame();
+                }
             } else {
                 av_packet_free(&owned);
             }
