@@ -93,7 +93,7 @@ final class CamAudioRingMonitor {
         }
         try? AVAudioSession.sharedInstance().setCategory(
             .playAndRecord,
-            options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth]
+            options: [.defaultToSpeaker, .mixWithOthers, .allowBluetoothA2DP]
         )
         try? AVAudioSession.sharedInstance().setActive(true, options: [])
         let st = AudioQueueStart(q, nil)
@@ -119,11 +119,11 @@ final class CamAudioRingMonitor {
         let frames = Int(bufferFrames)
         let ch = Int(asbd.mChannelsPerFrame)
         let bytes = frames * ch * 2
-        guard buffer.pointee.mAudioDataByteSize >= bytes, let raw = buffer.pointee.mAudioData else {
+        guard buffer.pointee.mAudioDataByteSize >= bytes else {
             AudioQueueEnqueueBuffer(aq, buffer, 0, nil)
             return
         }
-        let dst = raw.bindMemory(to: Int16.self, capacity: frames * ch)
+        let dst = buffer.pointee.mAudioData.bindMemory(to: Int16.self, capacity: frames * ch)
         for i in 0..<(frames * ch) { dst[i] = 0 }
         lock.lock()
         let src = source
