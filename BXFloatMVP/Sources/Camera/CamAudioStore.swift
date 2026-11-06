@@ -333,8 +333,8 @@ final class CamAudioStore {
         let needStore = max(1, Int((duration * Double(ringRate)).rounded(.up)) + 2)
 
         let target = AVSyncClock.shared.mediaTime()
-        // 视频真停：干净静音；短 hold-last 不冻
-        if AVSyncClock.shared.shouldFreezeAudio() {
+        // 视频短停不再整段静音：环里有声就继续读。否则 AU写++ 但注入 pk 恒 0。
+        if AVSyncClock.shared.shouldFreezeAudio(), bufferedSeconds() < 0.05 {
             CamPipelineDiag.shared.noteAudioUnderrun()
             Self.silence(into: dst, byteCount: byteCount)
             return false
@@ -342,30 +342,30 @@ final class CamAudioStore {
 
         ensureScratch(store: needStore * ringCh, out: outFrames * max(auCh, ringCh))
 
-        // 读头必须落在 ring 窗内；窗外 peek 会整段填静音却 got>0 → 注入 pk=0 / A/s out=0
+        // 禁止 2ms 超时空写：锁不上就短等，避免「环满却整段静音」
         var startPTS = advancePlayhead(target: target, duration: duration)
         var got = 0
-        if lock.lock(before: Date().addingTimeInterval(0.002)) {
-            got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
-            // 空读或整段静音垫：硬拉回环内再读一次（修 playhead 漂移 / 多 AU 超前消耗）
-            if (got <= 0 || Self.isNearSilent(scratchStore, frames: got, channels: ringCh)),
-               let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
+        var usedTail = false
+        lock.lock()
+        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+        if got <= 0 || Self.isNearSilent(scratchStore, frames: got, channels: ringCh) {
+            if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
                 playhead = snap + max(0, duration)
                 startPTS = snap
                 got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
-                if got > 0 {
-                    NSLog(
-                        "BXFloatAudio playhead resync → %.3f (target %.3f got %d)",
-                        snap, target, got
-                    )
-                }
             }
-            lock.unlock()
-        } else {
-            CamPipelineDiag.shared.noteAudioUnderrun()
-            Self.silence(into: dst, byteCount: byteCount)
-            envelope = min(envelope, 0.15)
-            return false
+        }
+        // 同步窗仍静音：直接读 ring 尾（保注入能量；不改目标延迟参数）
+        if got <= 0 || Self.isNearSilent(scratchStore, frames: got, channels: ringCh) {
+            let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
+            if tailGot > 0, !Self.isNearSilent(scratchStore, frames: tailGot, channels: ringCh) {
+                got = tailGot
+                usedTail = true
+            }
+        }
+        lock.unlock()
+        if usedTail {
+            NSLog("BXFloatAudio fill ring-tail fallback got=%d need=%d", got, needStore)
         }
 
         if got <= 0 {
@@ -431,31 +431,18 @@ final class CamAudioStore {
             sampleBytes: sampleBytes,
             nonInterleaved: isNonInterleaved
         )
-
-        // 注入峰：取第一声道
-        var probe = [Int16](repeating: 0, count: outFrames)
-        for i in 0..<outFrames { probe[i] = scratchOut[i * auCh] }
-        CamPipelineDiag.shared.noteAudioOutput(samples: probe)
-        probe.withUnsafeBufferPointer { buf in
-            if let base = buf.baseAddress {
-                let asbdBits = Int(asbd.mBitsPerChannel)
-                let asbdFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-                let mismatch = (asbdBits > 0 && asbdBits / 8 != sampleBytes)
-                    || ((asbd.mFormatFlags & (kAudioFormatFlagIsFloat | kAudioFormatFlagIsSignedInteger)) != 0
-                        && asbdFloat != isFloat)
-                CamPipelineDiag.shared.noteAudioQuality(
-                    stage: .inject,
-                    samples: base,
-                    count: outFrames,
-                    rateIn: ringRate,
-                    rateOut: dstRate,
-                    bytesPerSample: sampleBytes,
-                    isFloat: isFloat,
-                    formatMismatch: mismatch
-                )
-            }
-        }
+        // 注入峰改由 AU paint 后的真实 ioData 探针记账（区分空写 vs 探针采错）
         return true
+    }
+
+    /// 从 ring 尾部取最近 frames（failsafe，不跟 mediaTime）
+    private func peekRingTailLocked(into buffer: inout [Int16], frames: Int) -> Int {
+        guard frames > 0, let first = chunks.first, let last = chunks.last else { return 0 }
+        let lastEnd = last.pts + frameDuration(last)
+        let dur = Double(frames) / Double(storeRate)
+        let start = max(first.pts, lastEnd - dur)
+        playhead = lastEnd
+        return peekStartingLocked(at: start, into: &buffer, frames: frames)
     }
 
     @discardableResult

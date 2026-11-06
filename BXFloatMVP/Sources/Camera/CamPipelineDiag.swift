@@ -293,7 +293,9 @@ final class CamPipelineDiag {
         isFloat: Bool = false,
         formatMismatch: Bool = false
     ) {
-        guard count > 8 else {
+        // inject 必须记短缓冲；decode/mic 仍要求 >8 降噪抖动
+        let minCount = (stage == .inject) ? 1 : 9
+        guard count >= minCount else {
             if formatMismatch || rateOut > 0 || bytesPerSample > 0 {
                 noteAUFormatMeta(
                     rateOut: rateOut,
@@ -694,6 +696,42 @@ public func BXFloatDiagNoteAudioRaw(_ tick: Int64, _ tbNum: Int32, _ tbDen: Int3
     CamPipelineDiag.shared.noteAudioRaw(tick: tick, tbNum: tbNum, tbDen: tbDen, rawSec: rawSec)
 }
 
+private func bxFloatPCMToMonoS16(
+    _ data: UnsafeRawPointer,
+    frames: Int,
+    channels: Int,
+    bytesPerSample: Int,
+    isFloat: Bool
+) -> [Int16]? {
+    let ch = max(1, channels)
+    var bps = bytesPerSample
+    if isFloat, bps < 4 { bps = 4 }
+    if !isFloat, bps != 2, bps != 4 { bps = 2 }
+    guard frames > 0, bps > 0 else { return nil }
+    var mono = [Int16](repeating: 0, count: frames)
+    for i in 0..<frames {
+        let off = i * ch * bps
+        let s: Int16
+        if isFloat, bps == 4 {
+            var fl: Float = 0
+            memcpy(&fl, data.advanced(by: off), 4)
+            s = Int16(clamping: Int((Double(fl) * 32767.0).rounded()))
+        } else if bps == 2 {
+            var v: Int16 = 0
+            memcpy(&v, data.advanced(by: off), 2)
+            s = v
+        } else if bps == 4, !isFloat {
+            var v: Int32 = 0
+            memcpy(&v, data.advanced(by: off), 4)
+            s = Int16(clamping: Int(v >> 16))
+        } else {
+            s = 0
+        }
+        mono[i] = s
+    }
+    return mono
+}
+
 /// AU 原麦抽检：把第一路 PCM 转成 s16 记 mic 阶段，用于和推流注入对照。
 @_cdecl("BXFloatAQNoteMicTap")
 public func BXFloatAQNoteMicTap(
@@ -704,42 +742,61 @@ public func BXFloatAQNoteMicTap(
     _ isFloat: Int32
 ) {
     let f = Int(frames)
-    let ch = max(1, Int(channels))
-    var bps = Int(bytesPerSample)
-    let floatMode = isFloat != 0
-    if floatMode, bps < 4 { bps = 4 }
-    if !floatMode, bps != 2, bps != 4 { bps = 2 }
-    guard f > 8, bps > 0 else { return }
+    guard f > 8 else { return }
     // 限频：约每 8 次回调抽一帧，避免 AU 路径过重
     struct Gate { static var n: Int = 0 }
     Gate.n += 1
     if Gate.n % 8 != 0 { return }
-
-    var mono = [Int16](repeating: 0, count: f)
-    let base = data
-    for i in 0..<f {
-        let off = i * ch * bps
-        let s: Int16
-        if floatMode, bps == 4 {
-            var fl: Float = 0
-            memcpy(&fl, base.advanced(by: off), 4)
-            s = Int16(clamping: Int((Double(fl) * 32767.0).rounded()))
-        } else if bps == 2 {
-            var v: Int16 = 0
-            memcpy(&v, base.advanced(by: off), 2)
-            s = v
-        } else if bps == 4, !floatMode {
-            var v: Int32 = 0
-            memcpy(&v, base.advanced(by: off), 4)
-            s = Int16(clamping: Int(v >> 16))
-        } else {
-            s = 0
-        }
-        mono[i] = s
-    }
+    guard let mono = bxFloatPCMToMonoS16(
+        data,
+        frames: f,
+        channels: Int(channels),
+        bytesPerSample: Int(bytesPerSample),
+        isFloat: isFloat != 0
+    ) else { return }
     mono.withUnsafeBufferPointer { buf in
         guard let p = buf.baseAddress else { return }
         CamPipelineDiag.shared.noteAudioQuality(stage: .mic, samples: p, count: f)
+    }
+}
+
+/// AU paint 之后对真实 ioData 取峰 → 注入 pk / A/s out（与 scratchOut 探针解耦）
+@_cdecl("BXFloatAQNoteInjectTap")
+public func BXFloatAQNoteInjectTap(
+    _ data: UnsafeRawPointer,
+    _ frames: Int32,
+    _ channels: Int32,
+    _ bytesPerSample: Int32,
+    _ isFloat: Int32,
+    _ rate: Int32
+) {
+    let f = Int(frames)
+    // 短缓冲也记：抖音偶发极短 render，旧 guard>8 会把有声注入漏记成 0
+    guard f > 0 else { return }
+    struct Gate { static var n: Int = 0 }
+    Gate.n += 1
+    // 每 2 次采一次，兼顾实时峰值与回调负载
+    if Gate.n % 2 != 0 { return }
+    let bps = Int(bytesPerSample)
+    let floatMode = isFloat != 0
+    guard let mono = bxFloatPCMToMonoS16(
+        data,
+        frames: f,
+        channels: Int(channels),
+        bytesPerSample: bps,
+        isFloat: floatMode
+    ) else { return }
+    CamPipelineDiag.shared.noteAudioOutput(samples: mono)
+    mono.withUnsafeBufferPointer { buf in
+        guard let p = buf.baseAddress else { return }
+        CamPipelineDiag.shared.noteAudioQuality(
+            stage: .inject,
+            samples: p,
+            count: f,
+            rateOut: Int(rate),
+            bytesPerSample: floatMode && bps < 4 ? 4 : bps,
+            isFloat: floatMode
+        )
     }
 }
 

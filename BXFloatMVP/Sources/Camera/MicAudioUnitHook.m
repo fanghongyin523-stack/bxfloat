@@ -38,6 +38,16 @@ FOUNDATION_EXPORT void BXFloatAQNoteAUFormat(
     int mismatch
 );
 
+/// paint/memcpy 之后对「同一块」ioData 取峰：注入 pk / A/s out 以这里为准
+FOUNDATION_EXPORT void BXFloatAQNoteInjectTap(
+    const void *data,
+    int frames,
+    int channels,
+    int bytesPerSample,
+    int isFloat,
+    int rate
+);
+
 static OSStatus (*orig_AudioUnitRender)(
     AudioUnit inUnit,
     AudioUnitRenderActionFlags *ioActionFlags,
@@ -344,6 +354,37 @@ static void paintABL(
     }
 }
 
+/// 在 paint 写完后的真实 AU 缓冲上取峰（非 scratchOut）
+static void probeInjectAfterPaint(
+    AudioBufferList *ioData,
+    UInt32 frames,
+    const AudioStreamBasicDescription *asbd
+) {
+    if (!ioData || frames == 0 || ioData->mNumberBuffers == 0) return;
+    int chInBuf = 1, bytesPerSample = 4, isFloat = 1, mismatch = 0;
+    double rate = 48000;
+    if (!resolveFormat(ioData, frames, asbd, &chInBuf, &bytesPerSample, &isFloat, &mismatch, &rate)) {
+        return;
+    }
+    AudioBuffer *b0 = &ioData->mBuffers[0];
+    if (!b0->mData || b0->mDataByteSize == 0) return;
+    // 非交错：每平面 ch=1；交错：按缓冲声道。只采第一路。
+    int probeCh = 1;
+    BOOL multiPlane = (ioData->mNumberBuffers > 1);
+    BOOL asbdNI = asbd && (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved);
+    if (!multiPlane && !asbdNI) {
+        probeCh = chInBuf > 0 ? chInBuf : 1;
+    }
+    BXFloatAQNoteInjectTap(
+        b0->mData,
+        (int)frames,
+        probeCh,
+        bytesPerSample,
+        isFloat,
+        (int)(rate > 0 ? rate : 48000)
+    );
+}
+
 static OSStatus hooked_AudioUnitRender(
     AudioUnit inUnit,
     AudioUnitRenderActionFlags *ioActionFlags,
@@ -385,6 +426,8 @@ static OSStatus hooked_AudioUnitRender(
 
     atomic_fetch_add(&gCallback, 1);
     paintABL(ioData, inNumberFrames, &asbd, mode);
+    // 必须在 paint 之后、return 之前采同一块 ioData（分清空写 / 探针错位 / 事后清零）
+    probeInjectAfterPaint(ioData, inNumberFrames, &asbd);
     atomic_fetch_add(&gPaint, 1);
     return st;
 }

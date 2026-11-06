@@ -42,7 +42,8 @@ final class AVSyncClock {
     private let warmupNeed: Double = 0.35
     private let maxWarmupWall: Double = 0.45
     private let maxSlewPerCall: Double = 0.04
-    private let videoStallSec: Double = 0.35
+    /// 抖音回调间隙常 >0.35s；过短会把有声 ring 冻成静音（注入 pk=0）
+    private let videoStallSec: Double = 1.20
 
     private(set) var driftResyncCount: Int64 = 0
     private(set) var lastAction: Action = .play

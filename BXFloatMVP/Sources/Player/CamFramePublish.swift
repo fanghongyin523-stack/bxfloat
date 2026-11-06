@@ -74,11 +74,8 @@ public func BXFloatMicPaintFrames(
     asbd.mFramesPerPacket = 1
     asbd.mBytesPerPacket = asbd.mBytesPerFrame
 
-    if CamAudioStore.shared.hasFreshAudio {
-        _ = CamAudioStore.shared.fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
-    } else {
-        CamAudioStore.silence(into: dst, byteCount: byteCount)
-    }
+    // 一律走 fillContinuous：内部有 ring-tail failsafe；不要在门外静音短路
+    _ = CamAudioStore.shared.fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
 }
 
 /// 供 ObjC / 诊断查询当前环缓目标采样率（AU 锁定后）
