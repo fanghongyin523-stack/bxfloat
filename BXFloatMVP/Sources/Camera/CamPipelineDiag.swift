@@ -261,12 +261,20 @@ final class CamPipelineDiag {
     private var aqOutN: Int = 0
     private var aqMicN: Int = 0
 
-    // AU paint 三段峰：ring块 / peek / convert后 / 写入dst（归一化前 Int16 峰）
+    // AU paint 分段峰：r=ring块 p=peek c=convert d=写入回读 f=final(ioData探针)
+    // 用窗口峰：tick 时拷到 snap 再清，面板读 snap，避免「刚 tick 就全 0」
     private var gateRingPk: Int32 = 0
     private var gatePeekPk: Int32 = 0
     private var gateConvPk: Int32 = 0
     private var gateDstPk: Int32 = 0
+    private var gateFinalPk: Int32 = 0
     private var gateForceN: Int = 0
+    private var snapGateRingPk: Int32 = 0
+    private var snapGatePeekPk: Int32 = 0
+    private var snapGateConvPk: Int32 = 0
+    private var snapGateDstPk: Int32 = 0
+    private var snapGateFinalPk: Int32 = 0
+    private var snapGateForceN: Int = 0
 
     enum AudioQualityStage: String {
         case decode
@@ -282,15 +290,32 @@ final class CamPipelineDiag {
         if convPk > gateConvPk { gateConvPk = convPk }
         if dstPk > gateDstPk { gateDstPk = dstPk }
         if forced { gateForceN += 1 }
+        let line = String(
+            format: "BXFloatPaintGate r=%.3f p=%.3f c=%.3f d=%.3f f=%.3f force=%d",
+            Double(gateRingPk) / 32768.0,
+            Double(gatePeekPk) / 32768.0,
+            Double(gateConvPk) / 32768.0,
+            Double(gateDstPk) / 32768.0,
+            Double(max(gateFinalPk, gateDstPk)) / 32768.0,
+            gateForceN
+        )
         lock.unlock()
+        appendLogLines([line])
         tickIfNeeded()
     }
 
     func notePaintDstPeak(_ peak: Int32) {
         lock.lock()
         if peak > gateDstPk { gateDstPk = peak }
+        if peak > gateFinalPk { gateFinalPk = peak }
         lock.unlock()
         tickIfNeeded()
+    }
+
+    func notePaintFinalPeak(_ peak: Int32) {
+        lock.lock()
+        if peak > gateFinalPk { gateFinalPk = peak }
+        lock.unlock()
     }
 
     func noteAUFormatMeta(
@@ -445,39 +470,70 @@ final class CamPipelineDiag {
 
     /// 音质对照行：源(decode) / 注入(out) / 原麦(mic)
     func audioQualityPanelLine() -> String {
-        tickIfNeeded()
         lock.lock()
+        // 先读现窗峰，再 tick（避免 tick 清零后面板全 0）
+        let r = max(gateRingPk, snapGateRingPk)
+        let p = max(gatePeekPk, snapGatePeekPk)
+        let c = max(gateConvPk, snapGateConvPk)
+        let d = max(gateDstPk, snapGateDstPk)
+        let f = max(gateFinalPk, snapGateFinalPk, d)
         let ch = CamAudioStore.shared.storeChannels
         let line = String(
-            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %dch %d→%d bps%d f%d mis%d | Gate r%.2f p%.2f c%.2f d%.2f f%d",
+            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %dch %d→%d bps%d float%d mis%d",
             aqSrcPeak, aqSrcRms, aqSrcDc,
             aqOutPeak, aqOutRms, aqOutDc,
             aqMicPeak,
-            ch, aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch,
-            Double(gateRingPk) / 32768.0,
-            Double(gatePeekPk) / 32768.0,
-            Double(gateConvPk) / 32768.0,
-            Double(gateDstPk) / 32768.0,
-            gateForceN
+            ch, aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch
+        )
+        let gate = String(
+            format: "Gate r%.2f p%.2f c%.2f d%.2f f%.2f force%d",
+            Double(r) / 32768.0, Double(p) / 32768.0,
+            Double(c) / 32768.0, Double(d) / 32768.0,
+            Double(f) / 32768.0, max(gateForceN, snapGateForceN)
         )
         lock.unlock()
+        tickIfNeeded()
+        return line + "\n" + gate
+    }
+
+    /// Gate：r=ring p=peek c=conv d=dst写回 f=final(ioData) force=强制拷次数
+    func paintGatePanelLine() -> String {
+        lock.lock()
+        let r = max(gateRingPk, snapGateRingPk)
+        let p = max(gatePeekPk, snapGatePeekPk)
+        let c = max(gateConvPk, snapGateConvPk)
+        let d = max(gateDstPk, snapGateDstPk)
+        let f = max(gateFinalPk, snapGateFinalPk, d)
+        let line = String(
+            format: "Gate r%.2f p%.2f c%.2f d%.2f f%.2f force%d",
+            Double(r) / 32768.0, Double(p) / 32768.0,
+            Double(c) / 32768.0, Double(d) / 32768.0,
+            Double(f) / 32768.0, max(gateForceN, snapGateForceN)
+        )
+        lock.unlock()
+        tickIfNeeded()
         return line
     }
 
-    /// Gate：ring块峰 / peek峰 / convert峰 / dst写入峰 / 强制拷次数
-    func paintGatePanelLine() -> String {
-        tickIfNeeded()
+    /// 复制用：当前面板快照（含 Gate），不依赖 tick 文件
+    func panelSnapshotForCopy() -> String {
         lock.lock()
-        let line = String(
-            format: "Gate ring%.2f peek%.2f conv%.2f dst%.2f force%d",
-            Double(gateRingPk) / 32768.0,
-            Double(gatePeekPk) / 32768.0,
-            Double(gateConvPk) / 32768.0,
-            Double(gateDstPk) / 32768.0,
-            gateForceN
+        let r = max(gateRingPk, snapGateRingPk)
+        let p = max(gatePeekPk, snapGatePeekPk)
+        let c = max(gateConvPk, snapGateConvPk)
+        let d = max(gateDstPk, snapGateDstPk)
+        let f = max(gateFinalPk, snapGateFinalPk, d)
+        let force = max(gateForceN, snapGateForceN)
+        let aq = String(
+            format: "AQ src=%.2f inj=%.2f outN=%d | Gate r=%.2f p=%.2f c=%.2f d=%.2f f=%.2f force=%d | auPaint=%lld",
+            aqSrcPeak, aqOutPeak, aqOutN,
+            Double(r) / 32768.0, Double(p) / 32768.0,
+            Double(c) / 32768.0, Double(d) / 32768.0,
+            Double(f) / 32768.0, force,
+            BXFloatMicAUPaintCount()
         )
         lock.unlock()
-        return line
+        return aq
     }
 
     private func bump(_ body: () -> Void) {
@@ -570,8 +626,15 @@ final class CamPipelineDiag {
         aqSrcPeak = 0; aqSrcRms = 0; aqOutPeak = 0; aqOutRms = 0
         aqMicPeak = 0; aqMicRms = 0; aqMismatch = 0
         aqSrcN = 0; aqOutN = 0; aqMicN = 0
+        // Gate：先落到 snap 再清零，面板可读上一秒峰值
+        snapGateRingPk = gateRingPk
+        snapGatePeekPk = gatePeekPk
+        snapGateConvPk = gateConvPk
+        snapGateDstPk = gateDstPk
+        snapGateFinalPk = gateFinalPk
+        snapGateForceN = gateForceN
         gateRingPk = 0; gatePeekPk = 0; gateConvPk = 0; gateDstPk = 0
-        gateForceN = 0
+        gateFinalPk = 0; gateForceN = 0
         lock.unlock()
 
         let clock = AVSyncClock.shared.diagSnapshot()
@@ -841,6 +904,12 @@ public func BXFloatAQNoteInjectTap(
         isFloat: floatMode
     ) else { return }
     CamPipelineDiag.shared.noteAudioOutput(samples: mono)
+    var peak: Int32 = 0
+    for s in mono {
+        let a = abs(Int32(s))
+        if a > peak { peak = a }
+    }
+    CamPipelineDiag.shared.notePaintFinalPeak(peak)
     mono.withUnsafeBufferPointer { buf in
         guard let p = buf.baseAddress else { return }
         CamPipelineDiag.shared.noteAudioQuality(

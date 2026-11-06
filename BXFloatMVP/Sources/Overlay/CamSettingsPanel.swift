@@ -224,9 +224,11 @@ final class CamSettingsPanel: UIView {
         let vBuf = Int(store.bufferedSeconds() * 1000)
         let aBuf = Int(CamAudioStore.shared.bufferedSeconds() * 1000)
         let diag = CamPipelineDiag.shared.panelLines()
-        let aq = CamPipelineDiag.shared.audioQualityPanelLine()
-        let gate = CamPipelineDiag.shared.paintGatePanelLine()
+        let aqAndGate = CamPipelineDiag.shared.audioQualityPanelLine()
+        // Gate 置顶，避免卡片底部裁切看不到
+        let gateTop = CamPipelineDiag.shared.paintGatePanelLine()
         statusLabel.text = [
+            gateTop,
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
             "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · AQ写 \(BXFloatMicAQPaintCount()) · 延迟 \(String(format: "%.1f", clock.latencySeconds()))s · 沿差 \(String(format: "%.0f", clock.estimatedAVDelta() * 1000))ms",
@@ -234,8 +236,7 @@ final class CamSettingsPanel: UIView {
             diag.0,
             diag.1,
             diag.2,
-            aq,
-            gate,
+            aqAndGate,
             store.frameCount == 0
                 ? (replaceOn
                     ? "收帧=0：电脑未推流到 MediaMTX path=stream（先开 OBS）"
@@ -305,11 +306,22 @@ final class CamSettingsPanel: UIView {
     }
 
     @objc private func copyLogTapped() {
+        let snap = CamPipelineDiag.shared.panelSnapshotForCopy()
+        let gate = CamPipelineDiag.shared.paintGatePanelLine()
+        let panel = statusLabel.text ?? ""
         let exp = CamPipelineDiag.shared.exportLogText()
-        UIPasteboard.general.string = exp.text
-        let mark = exp.exists ? "已复制" : "仍空"
+        let text = [
+            "=== BXFloat Panel Snapshot ===",
+            snap,
+            gate,
+            panel,
+            "=== BXFloatGate Log ===",
+            exp.text,
+        ].joined(separator: "\n")
+        UIPasteboard.general.string = text
+        let mark = (exp.exists || snap.contains("Gate")) ? "已复制" : "仍空"
         copyLogButton.setTitle(mark, for: .normal)
-        NSLog("BXFloatGate export path=%@ exists=%d bytes≈%d", exp.path, exp.exists ? 1 : 0, exp.text.utf8.count)
+        NSLog("BXFloatGate export path=%@ exists=%d bytes≈%d snap=%@", exp.path, exp.exists ? 1 : 0, text.utf8.count, snap)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
             self?.copyLogButton.setTitle("复制Gate日志", for: .normal)
         }

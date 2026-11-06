@@ -331,7 +331,8 @@ final class CamAudioStore {
         }
 
         let target = AVSyncClock.shared.mediaTime()
-        var startPTS = advancePlayhead(target: target, duration: duration)
+        // 仍推进 playhead（给延迟/沿差用），取声以「有能量」为先
+        _ = advancePlayhead(target: target, duration: duration)
         var got = 0
         var forced = false
         var ringPk: Int32 = 0
@@ -340,31 +341,29 @@ final class CamAudioStore {
 
         lock.lock()
         ringPk = max(peakOfLastChunkLocked(), peakOfAnyChunkLocked())
-        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
-        peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-        if got <= 0 || peekPk <= 200 {
-            if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
-                playhead = snap + max(0, duration)
-                startPTS = snap
-                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
-                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-            }
-        }
-        if got <= 0 || peekPk <= 200 {
-            let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
-            let tailPk = Self.peakOf(scratchStore, frames: tailGot, channels: ringCh)
-            if tailGot > 0, tailPk > 200 {
-                got = tailGot
-                peekPk = tailPk
-            }
-        }
-        if got <= 0 || peekPk <= 200, ringPk > 200 {
+        // 主路径：环内有能量就直接拷最新 PCM（PTS peek 多次空读导致注入恒 0）
+        if ringPk > 200 {
             let n = copyLatestFramesLocked(into: &scratchStore, frames: needStore)
             if n > 0 {
                 got = n
                 peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
                 forced = true
                 playhead = (chunks.last.map { $0.pts + frameDuration($0) }) ?? playhead
+            }
+        }
+        if got <= 0 || peekPk <= 200 {
+            if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
+                got = peekStartingLocked(at: snap, into: &scratchStore, frames: needStore)
+                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+                playhead = snap + max(0, duration)
+            }
+        }
+        if got <= 0 || peekPk <= 200 {
+            let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
+            let tailPk = Self.peakOf(scratchStore, frames: tailGot, channels: ringCh)
+            if tailGot > 0, tailPk > peekPk {
+                got = tailGot
+                peekPk = tailPk
             }
         }
         if got > 0 {
