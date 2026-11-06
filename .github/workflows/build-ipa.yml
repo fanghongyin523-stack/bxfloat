@@ -85,7 +85,7 @@ jobs:
     # macos-14 近期无 runner / 秒取消；与 inject 同用 macos-latest
     runs-on: macos-latest
     timeout-minutes: 60
-    continue-on-error: true
+    continue-on-error: false
     defaults:
       run:
         working-directory: BXFloatMVP
@@ -130,17 +130,16 @@ jobs:
           APPBIN="build/Build/Products/Release-iphoneos/BXFloatMVP.app/BXFloatMVP"
           test -f "$APPBIN"
           python3 - <<'PY'
-          import pathlib,sys
+          import pathlib
           p=pathlib.Path("build/Build/Products/Release-iphoneos/BXFloatMVP.app/BXFloatMVP")
           b=p.read_bytes()
           n=len(b)
           print(f"mvp_bin_bytes={n}")
           if n < 2_000_000:
               raise SystemExit(f"MVP binary too small ({n}); FFmpeg likely not linked")
-          if b.find(b"FFmpeg not linked")>=0:
+          # ObjC 宽字符串时 ASCII 子串可能不连续；以体积 + 未编译进 #else 文案为准
+          if b.find(b"FFmpeg not linked") >= 0:
               raise SystemExit("MVP still contains 'FFmpeg not linked' — HAS_FFMPEG off")
-          if b.find(b"ffmpeg playing")<0:
-              raise SystemExit("MVP missing 'ffmpeg playing' string")
           print("mvp_ffmpeg_ok")
           PY
           xcodebuild \

@@ -304,7 +304,7 @@ static int BXFloatFFInterrupt(void *opaque) {
     packet = av_packet_alloc();
     if (!frame || !audioFrame || !packet) goto cleanup;
 
-    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d swr=%d (read∥decode ring)",
+    NSLog(@"BXFloatCam ffmpeg playing %@ %dx%d audio=%d swr=%d (read||decode ring)",
           urlString, codecCtx->width, codecCtx->height, audioIdx >= 0 ? 1 : 0, swr ? 1 : 0);
 
     videoTB = fmt->streams[videoIdx]->time_base;
