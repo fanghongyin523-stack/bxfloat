@@ -335,7 +335,7 @@ final class CamSettingsPanel: UIView {
             snap,
             gate,
             panel,
-            "听分锅：听:环=环缓源 · 听:注=注入写出 · 录后=抖音成片",
+            "听分锅：听:环=环缓源 · 听:注=注入写出 · 录后=抖音成片（监听不改 AudioSession）",
             "=== BXFloatGate Log ===",
             exp.text,
         ].joined(separator: "\n")

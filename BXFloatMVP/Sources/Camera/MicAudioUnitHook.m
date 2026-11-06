@@ -382,19 +382,35 @@ static void paintABL(
     int planeBps = bytesPerSample;
     if (isFloat && planeBps < 4) planeBps = 4;
 
+    // 先清全缓冲再写：禁止残留原麦样点与注入拼接成电流缝
+    for (UInt32 bi = 0; bi < ioData->mNumberBuffers; bi++) {
+        AudioBuffer *buf = &ioData->mBuffers[bi];
+        if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
+    }
+
     if (nonInterleaved) {
         int planes = (int)ioData->mNumberBuffers;
-        if (planes > outCh) planes = outCh;
         for (int p = 0; p < planes; p++) {
             AudioBuffer *buf = &ioData->mBuffers[p];
             if (!buf->mData || buf->mDataByteSize == 0) continue;
             uint8_t *dst = (uint8_t *)buf->mData;
             size_t cap = buf->mDataByteSize;
+            // 声道不足时复用末路，写满平面，避免脏尾
+            int srcCh = p < outCh ? p : (outCh - 1);
+            if (srcCh < 0) srcCh = 0;
+            int16_t last = 0;
             for (UInt32 i = 0; i < frames; i++) {
                 size_t off = (size_t)i * (size_t)planeBps;
-                if (off + (size_t)planeBps > cap) break;
-                int16_t s = pcm[i * outCh + p];
-                writeOneSample(dst + off, s, planeBps, isFloat);
+                if (off + (size_t)planeBps > cap) {
+                    // 容量不够：用 last 填剩余，禁留 memset 静音硬边
+                    while (off + (size_t)planeBps <= cap) {
+                        writeOneSample(dst + off, last, planeBps, isFloat);
+                        off += (size_t)planeBps;
+                    }
+                    break;
+                }
+                last = pcm[i * outCh + srcCh];
+                writeOneSample(dst + off, last, planeBps, isFloat);
             }
         }
     } else {
@@ -402,15 +418,28 @@ static void paintABL(
         if (b0->mData && b0->mDataByteSize) {
             uint8_t *dst = (uint8_t *)b0->mData;
             size_t cap = b0->mDataByteSize;
+            // 缓冲声道数以几何为准，必须写满每一帧的所有声道
             int ch = chInBuf > 0 ? chInBuf : 1;
-            if (ch > outCh) ch = outCh;
+            int16_t lastL = 0, lastR = 0;
+            size_t nextOff = 0;
             for (UInt32 i = 0; i < frames; i++) {
                 for (int c = 0; c < ch; c++) {
                     size_t off = ((size_t)i * (size_t)ch + (size_t)c) * (size_t)planeBps;
-                    if (off + (size_t)planeBps > cap) break;
-                    int16_t s = pcm[i * outCh + c];
+                    if (off + (size_t)planeBps > cap) { nextOff = off; goto fill_rest_i; }
+                    int src = c < outCh ? c : (outCh > 1 ? (c % outCh) : 0);
+                    int16_t s = pcm[i * outCh + src];
+                    if (c == 0) lastL = s;
+                    if (c == 1) lastR = s;
                     writeOneSample(dst + off, s, planeBps, isFloat);
+                    nextOff = off + (size_t)planeBps;
                 }
+            }
+        fill_rest_i:
+            // cap 未写满：末样延续，禁留清零静音硬边
+            for (size_t off = nextOff; off + (size_t)planeBps <= cap; off += (size_t)planeBps) {
+                int c = ch > 0 ? (int)((off / (size_t)planeBps) % (size_t)ch) : 0;
+                int16_t fill = (c == 1 && outCh > 1) ? lastR : lastL;
+                writeOneSample(dst + off, fill, planeBps, isFloat);
             }
         }
     }

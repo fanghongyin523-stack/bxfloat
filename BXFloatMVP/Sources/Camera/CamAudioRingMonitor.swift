@@ -3,6 +3,7 @@ import AVFoundation
 import Foundation
 
 /// 环缓本地监听：环听(源环) / 注听(注入写出) 分锅，对照抖音录后。
+/// 不改 AVAudioSession category/active，避免污染抖音录制轨。
 final class CamAudioRingMonitor {
     static let shared = CamAudioRingMonitor()
 
@@ -47,7 +48,7 @@ final class CamAudioRingMonitor {
         if src != .off {
             startLocked()
         }
-        NSLog("BXFloatMonitor source=%d", src.rawValue)
+        NSLog("BXFloatMonitor source=%d (no session touch)", src.rawValue)
     }
 
     private func startLocked() {
@@ -68,7 +69,7 @@ final class CamAudioRingMonitor {
         var q: AudioQueueRef?
         let status = AudioQueueNewOutput(
             &asbd,
-            { (user, aq, buf) in
+            { (_, aq, buf) in
                 CamAudioRingMonitor.shared.render(aq: aq, buffer: buf)
             },
             nil,
@@ -83,6 +84,10 @@ final class CamAudioRingMonitor {
             return
         }
         queue = q
+        // 监听音量略低，减少外放窜入（注入轨仍走 AU 写，不经此 AQ）
+        var vol: Float32 = 0.85
+        AudioQueueSetParameter(q, kAudioQueueParam_Volume, vol)
+
         let bytes = bufferFrames * asbd.mBytesPerFrame
         for _ in 0..<bufferCount {
             var buf: AudioQueueBufferRef?
@@ -91,15 +96,11 @@ final class CamAudioRingMonitor {
             memset(buf.pointee.mAudioData, 0, Int(bytes))
             AudioQueueEnqueueBuffer(q, buf, 0, nil)
         }
-        try? AVAudioSession.sharedInstance().setCategory(
-            .playAndRecord,
-            options: [.defaultToSpeaker, .mixWithOthers, .allowBluetoothA2DP]
-        )
-        try? AVAudioSession.sharedInstance().setActive(true, options: [])
+        // 关键：不 setCategory / setActive，沿用抖音已开的 session，避免录制轨被改路由
         let st = AudioQueueStart(q, nil)
         started = (st == noErr)
         if !started {
-            NSLog("BXFloatMonitor AQ start fail %d", st)
+            NSLog("BXFloatMonitor AQ start fail %d (session may block output)", st)
             AudioQueueDispose(q, true)
             queue = nil
             source = .off
@@ -113,6 +114,7 @@ final class CamAudioRingMonitor {
         }
         queue = nil
         started = false
+        // 不 deactivate session
     }
 
     private func render(aq: AudioQueueRef, buffer: AudioQueueBufferRef) {
