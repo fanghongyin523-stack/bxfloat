@@ -51,21 +51,24 @@ final class CamAudioStore {
         let rate = sampleRate > 0 ? sampleRate : defaultRate
         let ch = max(1, min(2, channels))
         lock.lock()
+        let prevRate = lockedRate > 0 ? lockedRate : defaultRate
         let rateChanged = targetLocked && lockedRate > 0 && lockedRate != rate
         let firstLock = !targetLocked
         if firstLock || rateChanged {
             lockedRate = rate
             lockedAUChannels = ch
             targetLocked = true
-            if rateChanged {
+            // 首次 AU 锁到与默认/旧环不同的速率时也清环：否则 48k 块按 44.1k 读 PTS，peek 易空/静音
+            let mustFlush = rateChanged || (firstLock && prevRate != rate && (!chunks.isEmpty || !pending.isEmpty))
+            if mustFlush {
                 chunks.removeAll(keepingCapacity: true)
                 pending.removeAll(keepingCapacity: true)
                 playhead = -1
                 envelope = 1.0
             }
             let note = String(
-                format: "AU-lock %dHz %dch float=%d → ring@%dHz",
-                rate, ch, isFloat ? 1 : 0, storeRate
+                format: "AU-lock %dHz %dch float=%d → ring@%dHz flush=%d",
+                rate, ch, isFloat ? 1 : 0, storeRate, mustFlush ? 1 : 0
             )
             lock.unlock()
             CamPipelineDiag.shared.noteAudioFormat(note)
@@ -342,33 +345,51 @@ final class CamAudioStore {
 
         ensureScratch(store: needStore * ringCh, out: outFrames * max(auCh, ringCh))
 
-        // 禁止 2ms 超时空写：锁不上就短等，避免「环满却整段静音」
         var startPTS = advancePlayhead(target: target, duration: duration)
         var got = 0
-        var usedTail = false
+        var forced = false
+        var ringPk: Int32 = 0
+        var peekPk: Int32 = 0
+        var localStore: [Int16] = []
+
+        // 全程持锁：peek→本地拷贝，杜绝多 AU 踩共享 scratch 写成静音
         lock.lock()
+        ringPk = peakOfLastChunkLocked()
         got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
-        if got <= 0 || Self.isNearSilent(scratchStore, frames: got, channels: ringCh) {
+        peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+        if got <= 0 || peekPk <= 200 {
             if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
                 playhead = snap + max(0, duration)
                 startPTS = snap
                 got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
             }
         }
-        // 同步窗仍静音：直接读 ring 尾（保注入能量；不改目标延迟参数）
-        if got <= 0 || Self.isNearSilent(scratchStore, frames: got, channels: ringCh) {
+        if got <= 0 || peekPk <= 200 {
             let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
-            if tailGot > 0, !Self.isNearSilent(scratchStore, frames: tailGot, channels: ringCh) {
+            let tailPk = Self.peakOf(scratchStore, frames: tailGot, channels: ringCh)
+            if tailGot > 0, tailPk > 200 {
                 got = tailGot
-                usedTail = true
+                peekPk = tailPk
             }
+        }
+        // ring 末块有能量但 PTS peek 仍静音 → 直接拷最近 PCM（断点1失败时的硬修复）
+        if (got <= 0 || peekPk <= 200), ringPk > 200 {
+            let n = copyLatestFramesLocked(into: &scratchStore, frames: needStore)
+            if n > 0 {
+                got = n
+                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+                forced = true
+                playhead = (chunks.last.map { $0.pts + frameDuration($0) }) ?? playhead
+            }
+        }
+        if got > 0 {
+            let n = min(needStore, got) * ringCh
+            localStore = Array(scratchStore.prefix(n))
         }
         lock.unlock()
-        if usedTail {
-            NSLog("BXFloatAudio fill ring-tail fallback got=%d need=%d", got, needStore)
-        }
 
-        if got <= 0 {
+        if got <= 0 || localStore.isEmpty {
             CamPipelineDiag.shared.noteAudioUnderrun()
             fillWithEnvelope(
                 into: dst,
@@ -379,17 +400,19 @@ final class CamAudioStore {
                 nonInterleaved: isNonInterleaved,
                 decaying: true
             )
+            CamPipelineDiag.shared.notePaintGate(
+                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: forced
+            )
             return false
         }
 
         // 环率已对齐 AU 时零重采样；仅锁定期前偶发走 Hermite
         let rateConverted: [Int16]
         if dstRate == ringRate {
-            let n = min(needStore, got) * ringCh
-            rateConverted = Array(scratchStore.prefix(n))
+            rateConverted = localStore
         } else {
             rateConverted = resampleHermiteInterleaved(
-                Array(scratchStore.prefix(got * ringCh)),
+                localStore,
                 channels: ringCh,
                 from: ringRate,
                 to: dstRate
@@ -405,7 +428,8 @@ final class CamAudioStore {
         }
         for i in 0..<(outFrames * auCh) { scratchOut[i] = laid[i] }
 
-        // 从真欠载恢复：~30ms 淡入
+        // 从真欠载恢复：~30ms 淡入（禁止整段乘 0）
+        if envelope < 0.05 { envelope = 0.05 }
         if envelope < 0.999 {
             let fade = min(max(1, dstRate / 33), outFrames)
             for i in 0..<fade {
@@ -417,6 +441,8 @@ final class CamAudioStore {
             }
             envelope = 1.0
         }
+
+        let convPk = Self.peakOf(scratchOut, frames: outFrames, channels: auCh)
 
         if outFrames > 0 {
             lastL = scratchOut[(outFrames - 1) * auCh]
@@ -431,8 +457,28 @@ final class CamAudioStore {
             sampleBytes: sampleBytes,
             nonInterleaved: isNonInterleaved
         )
-        // 注入峰改由 AU paint 后的真实 ioData 探针记账（区分空写 vs 探针采错）
-        return true
+        let dstPk = Self.peakOfRaw(
+            dst,
+            frames: outFrames,
+            channels: auCh,
+            isFloat: isFloat,
+            sampleBytes: sampleBytes,
+            nonInterleaved: isNonInterleaved
+        )
+        CamPipelineDiag.shared.notePaintGate(
+            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: dstPk, forced: forced
+        )
+        if forced {
+            NSLog(
+                "BXFloatAudio FORCE ring=%.3f peek=%.3f conv=%.3f dst=%.3f",
+                Double(ringPk) / 32768.0,
+                Double(peekPk) / 32768.0,
+                Double(convPk) / 32768.0,
+                Double(dstPk) / 32768.0
+            )
+        }
+        // 注入峰仍由 AU paint 后 ioData 探针记账
+        return dstPk > 0 || convPk > 0
     }
 
     /// 从 ring 尾部取最近 frames（failsafe，不跟 mediaTime）
@@ -443,6 +489,114 @@ final class CamAudioStore {
         let start = max(first.pts, lastEnd - dur)
         playhead = lastEnd
         return peekStartingLocked(at: start, into: &buffer, frames: frames)
+    }
+
+    private func peakOfLastChunkLocked() -> Int32 {
+        guard let last = chunks.last else { return 0 }
+        return Self.peakOf(last.samples, frames: last.samples.count / max(1, last.channels), channels: last.channels)
+    }
+
+    /// 从最新 chunk 往前拼够 frames（忽略 PTS，专治 peek 空读）
+    private func copyLatestFramesLocked(into buffer: inout [Int16], frames: Int) -> Int {
+        let ch = max(1, storeChannels)
+        guard frames > 0, !chunks.isEmpty else { return 0 }
+        if buffer.count < frames * ch {
+            buffer = Array(repeating: 0, count: frames * ch)
+        }
+        var need = frames
+        var pieces: [(samples: [Int16], frames: Int, channels: Int)] = []
+        for chunk in chunks.reversed() {
+            if need <= 0 { break }
+            let cch = max(1, chunk.channels)
+            let cf = chunk.samples.count / cch
+            guard cf > 0 else { continue }
+            let take = min(need, cf)
+            let start = (cf - take) * cch
+            let slice = Array(chunk.samples[start..<(start + take * cch)])
+            pieces.append((slice, take, cch))
+            need -= take
+        }
+        guard need < frames else { return 0 }
+        // pieces 从新到旧；反转成时间正序
+        pieces.reverse()
+        var written = 0
+        for piece in pieces {
+            let laid = layoutChannels(piece.samples, fromCh: piece.channels, toCh: ch, frames: piece.frames)
+            for i in 0..<piece.frames {
+                let dstBase = (written + i) * ch
+                let srcBase = i * ch
+                for c in 0..<ch {
+                    buffer[dstBase + c] = laid[srcBase + c]
+                }
+            }
+            written += piece.frames
+        }
+        return written
+    }
+
+    private static func peakOf(_ buf: [Int16], frames: Int, channels: Int) -> Int32 {
+        let ch = max(1, channels)
+        let n = min(max(0, frames), buf.count / ch)
+        guard n > 0 else { return 0 }
+        var peak: Int32 = 0
+        let step = max(1, n / 128)
+        var i = 0
+        while i < n {
+            let a = abs(Int32(buf[i * ch]))
+            if a > peak { peak = a }
+            i += step
+        }
+        return peak
+    }
+
+    private static func peakOfRaw(
+        _ dst: UnsafeRawPointer,
+        frames: Int,
+        channels: Int,
+        isFloat: Bool,
+        sampleBytes: Int,
+        nonInterleaved: Bool
+    ) -> Int32 {
+        let ch = max(1, channels)
+        guard frames > 0, sampleBytes > 0 else { return 0 }
+        var peak: Int32 = 0
+        let step = max(1, frames / 128)
+        var i = 0
+        while i < frames {
+            let s: Int16
+            if nonInterleaved {
+                // 第一平面
+                let off = i * sampleBytes
+                if isFloat, sampleBytes == 4 {
+                    var fl: Float = 0
+                    memcpy(&fl, dst.advanced(by: off), 4)
+                    s = Int16(clamping: Int((Double(fl) * 32767.0).rounded()))
+                } else if sampleBytes == 2 {
+                    var v: Int16 = 0
+                    memcpy(&v, dst.advanced(by: off), 2)
+                    s = v
+                } else {
+                    s = 0
+                }
+            } else {
+                let off = (i * ch) * sampleBytes
+                if isFloat, sampleBytes == 4 {
+                    var fl: Float = 0
+                    memcpy(&fl, dst.advanced(by: off), 4)
+                    s = Int16(clamping: Int((Double(fl) * 32767.0).rounded()))
+                } else if sampleBytes == 2 {
+                    var v: Int16 = 0
+                    memcpy(&v, dst.advanced(by: off), 2)
+                    s = v
+                } else {
+                    s = 0
+                }
+            }
+            let a = abs(Int32(s))
+            if a > peak { peak = a }
+            i += step
+        }
+        return peak
     }
 
     @discardableResult

@@ -316,15 +316,19 @@ static void paintABL(
     logFormatThrottled(rate, frames, ioData, chInBuf, bytesPerSample, isFloat, asbd, mismatch);
 
     AudioBuffer *b0 = &ioData->mBuffers[0];
+    // 与 Swift BXFloatMicPaintFrames 一致：float 至少 4 字节，避免按 bps2 拆平面读到半样本→近静音
+    int paintBps = bytesPerSample;
+    if (isFloat && paintBps < 4) paintBps = 4;
+
     if (nonInterleaved || multiPlane) {
         // 立体声：交错取一次再拆平面；禁止「只取 mono 再 memcpy 到 R」把声像抹掉
         int planes = (int)ioData->mNumberBuffers;
         if (planes < 1) planes = 1;
         if (planes > 8) planes = 8;
-        size_t tmpBytes = (size_t)frames * (size_t)planes * (size_t)bytesPerSample;
+        size_t tmpBytes = (size_t)frames * (size_t)planes * (size_t)paintBps;
         if (tmpBytes > sizeof(gPaintTmp) || frames > 4096) {
             // 超限兜底：只写第一平面，避免回调里堆分配
-            BXFloatMicPaintFrames(b0->mData, (int)frames, 1, rate, bytesPerSample, isFloat, mode);
+            BXFloatMicPaintFrames(b0->mData, (int)frames, 1, rate, paintBps, isFloat, mode);
             for (UInt32 i = 1; i < ioData->mNumberBuffers; i++) {
                 AudioBuffer *buf = &ioData->mBuffers[i];
                 if (!buf->mData || buf->mDataByteSize == 0) continue;
@@ -333,23 +337,27 @@ static void paintABL(
             }
         } else {
             memset(gPaintTmp, 0, tmpBytes);
-            BXFloatMicPaintFrames(gPaintTmp, (int)frames, planes, rate, bytesPerSample, isFloat, mode);
+            BXFloatMicPaintFrames(gPaintTmp, (int)frames, planes, rate, paintBps, isFloat, mode);
             for (int p = 0; p < planes; p++) {
                 AudioBuffer *buf = &ioData->mBuffers[p];
                 if (!buf->mData || buf->mDataByteSize == 0) continue;
                 uint8_t *dst = (uint8_t *)buf->mData;
                 size_t planeCap = buf->mDataByteSize;
+                // 平面几何以缓冲为准；paint 侧按 paintBps 交错
+                int planeBps = bytesPerSample > 0 ? bytesPerSample : paintBps;
+                if (planeBps <= 0) planeBps = paintBps;
                 for (UInt32 i = 0; i < frames; i++) {
-                    size_t off = (size_t)i * (size_t)bytesPerSample;
-                    if (off + (size_t)bytesPerSample > planeCap) break;
-                    size_t srcOff = ((size_t)i * (size_t)planes + (size_t)p) * (size_t)bytesPerSample;
-                    memcpy(dst + off, gPaintTmp + srcOff, (size_t)bytesPerSample);
+                    size_t off = (size_t)i * (size_t)planeBps;
+                    if (off + (size_t)planeBps > planeCap) break;
+                    size_t srcOff = ((size_t)i * (size_t)planes + (size_t)p) * (size_t)paintBps;
+                    size_t n = (size_t)planeBps < (size_t)paintBps ? (size_t)planeBps : (size_t)paintBps;
+                    memcpy(dst + off, gPaintTmp + srcOff, n);
                 }
             }
         }
     } else {
         BXFloatMicPaintFrames(
-            b0->mData, (int)frames, chInBuf, rate, bytesPerSample, isFloat, mode
+            b0->mData, (int)frames, chInBuf, rate, paintBps, isFloat, mode
         );
     }
 }

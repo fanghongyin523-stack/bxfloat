@@ -261,10 +261,29 @@ final class CamPipelineDiag {
     private var aqOutN: Int = 0
     private var aqMicN: Int = 0
 
+    // AU paint 三段峰：ring块 / peek / convert后 / 写入dst（归一化前 Int16 峰）
+    private var gateRingPk: Int32 = 0
+    private var gatePeekPk: Int32 = 0
+    private var gateConvPk: Int32 = 0
+    private var gateDstPk: Int32 = 0
+    private var gateForceN: Int = 0
+
     enum AudioQualityStage: String {
         case decode
         case inject
         case mic
+    }
+
+    /// peek→convert→dst 断点峰；面板 Gate 行用
+    func notePaintGate(ringPk: Int32, peekPk: Int32, convPk: Int32, dstPk: Int32, forced: Bool) {
+        lock.lock()
+        if ringPk > gateRingPk { gateRingPk = ringPk }
+        if peekPk > gatePeekPk { gatePeekPk = peekPk }
+        if convPk > gateConvPk { gateConvPk = convPk }
+        if dstPk > gateDstPk { gateDstPk = dstPk }
+        if forced { gateForceN += 1 }
+        lock.unlock()
+        tickIfNeeded()
     }
 
     func noteAUFormatMeta(
@@ -433,6 +452,22 @@ final class CamPipelineDiag {
         return line
     }
 
+    /// Gate：ring块峰 / peek峰 / convert峰 / dst写入峰 / 强制拷次数
+    func paintGatePanelLine() -> String {
+        tickIfNeeded()
+        lock.lock()
+        let line = String(
+            format: "Gate ring%.2f peek%.2f conv%.2f dst%.2f force%d",
+            Double(gateRingPk) / 32768.0,
+            Double(gatePeekPk) / 32768.0,
+            Double(gateConvPk) / 32768.0,
+            Double(gateDstPk) / 32768.0,
+            gateForceN
+        )
+        lock.unlock()
+        return line
+    }
+
     private func bump(_ body: () -> Void) {
         lock.lock()
         body()
@@ -523,6 +558,8 @@ final class CamPipelineDiag {
         aqSrcPeak = 0; aqSrcRms = 0; aqOutPeak = 0; aqOutRms = 0
         aqMicPeak = 0; aqMicRms = 0; aqMismatch = 0
         aqSrcN = 0; aqOutN = 0; aqMicN = 0
+        gateRingPk = 0; gatePeekPk = 0; gateConvPk = 0; gateDstPk = 0
+        gateForceN = 0
         lock.unlock()
 
         let clock = AVSyncClock.shared.diagSnapshot()
