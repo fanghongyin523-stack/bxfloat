@@ -286,6 +286,13 @@ final class CamPipelineDiag {
         tickIfNeeded()
     }
 
+    func notePaintDstPeak(_ peak: Int32) {
+        lock.lock()
+        if peak > gateDstPk { gateDstPk = peak }
+        lock.unlock()
+        tickIfNeeded()
+    }
+
     func noteAUFormatMeta(
         rateOut: Int,
         bytesPerSample: Int,
@@ -442,11 +449,16 @@ final class CamPipelineDiag {
         lock.lock()
         let ch = CamAudioStore.shared.storeChannels
         let line = String(
-            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %dch %d→%d bps%d f%d mis%d",
+            format: "AQ 源pk%.2f rms%.2f dc%.3f | 注入pk%.2f rms%.2f dc%.3f | 麦pk%.2f | %dch %d→%d bps%d f%d mis%d | Gate r%.2f p%.2f c%.2f d%.2f f%d",
             aqSrcPeak, aqSrcRms, aqSrcDc,
             aqOutPeak, aqOutRms, aqOutDc,
             aqMicPeak,
-            ch, aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch
+            ch, aqRateIn, aqRateOut, aqBps, aqFloat, aqMismatch,
+            Double(gateRingPk) / 32768.0,
+            Double(gatePeekPk) / 32768.0,
+            Double(gateConvPk) / 32768.0,
+            Double(gateDstPk) / 32768.0,
+            gateForceN
         )
         lock.unlock()
         return line
@@ -795,6 +807,11 @@ public func BXFloatAQNoteMicTap(
         guard let p = buf.baseAddress else { return }
         CamPipelineDiag.shared.noteAudioQuality(stage: .mic, samples: p, count: f)
     }
+}
+
+@_cdecl("BXFloatAQNotePaintDstPeak")
+public func BXFloatAQNotePaintDstPeak(_ peak: Int32) {
+    CamPipelineDiag.shared.notePaintDstPeak(peak)
 }
 
 /// AU paint 之后对真实 ioData 取峰 → 注入 pk / A/s out（与 scratchOut 探针解耦）

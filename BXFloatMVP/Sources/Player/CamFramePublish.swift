@@ -27,7 +27,27 @@ public func BXFloatPublishAudioPCM(
     )
 }
 
-/// AudioUnit：按共用 mediaTime 写入推流 PCM / 静音。
+/// 从 ring 拉交错 s16（mediaTime优先，空则 latest）。返回峰（0..32767）。
+/// ObjC 负责按 AU 真实 bps/float/平面写入 ioData，避免「fill 有声但平面拷贝后为 0」。
+@_cdecl("BXFloatMicPullS16")
+public func BXFloatMicPullS16(
+    _ dst: UnsafeMutablePointer<Int16>,
+    _ frames: Int32,
+    _ channels: Int32,
+    _ sampleRate: Double
+) -> Int32 {
+    let f = Int(frames)
+    let ch = max(1, min(8, Int(channels)))
+    guard f > 0 else { return 0 }
+    return CamAudioStore.shared.pullInterleavedS16(
+        into: dst,
+        frames: f,
+        channels: ch,
+        sampleRate: sampleRate > 0 ? Int(sampleRate.rounded()) : 0
+    )
+}
+
+/// AudioUnit：按共用 mediaTime 写入推流 PCM / 静音（旧路径保留）。
 @_cdecl("BXFloatMicPaintFrames")
 public func BXFloatMicPaintFrames(
     _ dst: UnsafeMutableRawPointer,
@@ -54,17 +74,32 @@ public func BXFloatMicPaintFrames(
     guard mode == 1 else { return }
 
     let rate = sampleRate > 0 ? sampleRate : 48000
-    // 尽早锁定 AU 目标，让后续解码入环一次对齐到此采样率
     CamAudioStore.shared.lockTargetFromAU(
         sampleRate: Int(rate.rounded()),
         channels: ch,
         isFloat: floatMode
     )
 
+    // 新路径：先拉 s16 再按格式写，避免 ASBD 与平面几何不一致把能量抹掉
+    let tmpCount = f * ch
+    var tmp = [Int16](repeating: 0, count: tmpCount)
+    let peak = tmp.withUnsafeMutableBufferPointer { buf -> Int32 in
+        guard let base = buf.baseAddress else { return 0 }
+        return CamAudioStore.shared.pullInterleavedS16(
+            into: base,
+            frames: f,
+            channels: ch,
+            sampleRate: Int(rate.rounded())
+        )
+    }
+    if peak <= 0 {
+        CamAudioStore.silence(into: dst, byteCount: byteCount)
+        return
+    }
+    // 写入 dst（交错）；多平面由 ObjC 新路径拆分，此旧路径给单缓冲兜底
     var asbd = AudioStreamBasicDescription()
     asbd.mSampleRate = rate
     asbd.mFormatID = kAudioFormatLinearPCM
-    // 交错 PCM（多平面由 hook 拆分）；flags 必须与 bps/float 一致
     asbd.mFormatFlags = floatMode
         ? (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked)
         : (kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked)
@@ -73,9 +108,13 @@ public func BXFloatMicPaintFrames(
     asbd.mBytesPerFrame = UInt32(bps * ch)
     asbd.mFramesPerPacket = 1
     asbd.mBytesPerPacket = asbd.mBytesPerFrame
-
-    // 一律走 fillContinuous：内部有 ring-tail failsafe；不要在门外静音短路
-    _ = CamAudioStore.shared.fillContinuous(into: dst, byteCount: byteCount, asbd: asbd)
+    _ = CamAudioStore.shared.fillFromInterleavedS16(
+        tmp,
+        into: dst,
+        frames: f,
+        channels: ch,
+        asbd: asbd
+    )
 }
 
 /// 供 ObjC / 诊断查询当前环缓目标采样率（AU 锁定后）

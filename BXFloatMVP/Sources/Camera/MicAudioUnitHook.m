@@ -5,6 +5,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #import <stdatomic.h>
+#import <stdint.h>
 #import <string.h>
 
 /// frames=采样帧数；channels=该缓冲声道数（非交错平面恒为 1）
@@ -17,6 +18,16 @@ FOUNDATION_EXPORT void BXFloatMicPaintFrames(
     int isFloat,
     int mode
 );
+
+/// 拉交错 s16，返回峰；由本文件按 AU 真实格式写入 ioData
+FOUNDATION_EXPORT int32_t BXFloatMicPullS16(
+    int16_t *dst,
+    int frames,
+    int channels,
+    double sampleRate
+);
+
+FOUNDATION_EXPORT void BXFloatAQNotePaintDstPeak(int32_t peak);
 
 FOUNDATION_EXPORT void BXFloatAQNoteMicTap(
     const void *data,
@@ -295,6 +306,21 @@ static void tapMicABL(
     BXFloatAQNoteMicTap(b0->mData, (int)frames, ch, bps, isFloat);
 }
 
+/// 把一帧 s16 写入目标（按真实 bps/float）
+static void writeOneSample(void *dst, int16_t s, int bps, int isFloat) {
+    if (isFloat && bps >= 4) {
+        float f = (float)s / 32768.0f;
+        memcpy(dst, &f, 4);
+    } else if (bps == 2) {
+        memcpy(dst, &s, 2);
+    } else if (bps == 4 && !isFloat) {
+        int32_t v = ((int32_t)s) << 16;
+        memcpy(dst, &v, 4);
+    } else {
+        memset(dst, 0, (size_t)bps > 0 ? (size_t)bps : 1);
+    }
+}
+
 static void paintABL(
     AudioBufferList *ioData,
     UInt32 frames,
@@ -315,50 +341,110 @@ static void paintABL(
 
     logFormatThrottled(rate, frames, ioData, chInBuf, bytesPerSample, isFloat, asbd, mismatch);
 
-    AudioBuffer *b0 = &ioData->mBuffers[0];
-    // 与 Swift BXFloatMicPaintFrames 一致：float 至少 4 字节，避免按 bps2 拆平面读到半样本→近静音
-    int paintBps = bytesPerSample;
-    if (isFloat && paintBps < 4) paintBps = 4;
+    int outCh = nonInterleaved ? (int)ioData->mNumberBuffers : chInBuf;
+    if (outCh < 1) outCh = 1;
+    if (outCh > 8) outCh = 8;
+    if (frames > 4096) frames = 4096;
 
-    if (nonInterleaved || multiPlane) {
-        // 立体声：交错取一次再拆平面；禁止「只取 mono 再 memcpy 到 R」把声像抹掉
+    size_t s16Bytes = (size_t)frames * (size_t)outCh * sizeof(int16_t);
+    if (s16Bytes > sizeof(gPaintTmp)) {
+        // 极端超限：退回旧单平面路径
+        AudioBuffer *b0 = &ioData->mBuffers[0];
+        BXFloatMicPaintFrames(b0->mData, (int)frames, 1, rate, bytesPerSample, isFloat, mode);
+        return;
+    }
+
+    int16_t *pcm = (int16_t *)gPaintTmp;
+    memset(pcm, 0, s16Bytes);
+
+    if (mode == 2) {
+        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
+            AudioBuffer *buf = &ioData->mBuffers[i];
+            if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
+        }
+        BXFloatAQNotePaintDstPeak(0);
+        return;
+    }
+
+    // 1) 只拉能量（s16）；2) 再按缓冲几何写入 —— 分段 Gate：conv=拉峰，dst=写后峰
+    int32_t pullPk = BXFloatMicPullS16(pcm, (int)frames, outCh, rate);
+    if (pullPk <= 0) {
+        // 环空：不硬盖静音（短断续主因之一）；保持 AU 原缓冲
+        BXFloatAQNotePaintDstPeak(0);
+        static _Atomic int sPullZeroLog = 0;
+        int n = atomic_fetch_add(&sPullZeroLog, 1);
+        if (n < 8 || (n % 64) == 0) {
+            NSLog(@"BXFloatMic PULL-ZERO keep-mic rate=%.0f ch=%d", rate, outCh);
+        }
+        return;
+    }
+
+    int planeBps = bytesPerSample;
+    if (isFloat && planeBps < 4) planeBps = 4;
+
+    if (nonInterleaved) {
         int planes = (int)ioData->mNumberBuffers;
-        if (planes < 1) planes = 1;
-        if (planes > 8) planes = 8;
-        size_t tmpBytes = (size_t)frames * (size_t)planes * (size_t)paintBps;
-        if (tmpBytes > sizeof(gPaintTmp) || frames > 4096) {
-            // 超限兜底：只写第一平面，避免回调里堆分配
-            BXFloatMicPaintFrames(b0->mData, (int)frames, 1, rate, paintBps, isFloat, mode);
-            for (UInt32 i = 1; i < ioData->mNumberBuffers; i++) {
-                AudioBuffer *buf = &ioData->mBuffers[i];
-                if (!buf->mData || buf->mDataByteSize == 0) continue;
-                size_t n = buf->mDataByteSize < b0->mDataByteSize ? buf->mDataByteSize : b0->mDataByteSize;
-                memcpy(buf->mData, b0->mData, n);
-            }
-        } else {
-            memset(gPaintTmp, 0, tmpBytes);
-            BXFloatMicPaintFrames(gPaintTmp, (int)frames, planes, rate, paintBps, isFloat, mode);
-            for (int p = 0; p < planes; p++) {
-                AudioBuffer *buf = &ioData->mBuffers[p];
-                if (!buf->mData || buf->mDataByteSize == 0) continue;
-                uint8_t *dst = (uint8_t *)buf->mData;
-                size_t planeCap = buf->mDataByteSize;
-                // 平面几何以缓冲为准；paint 侧按 paintBps 交错
-                int planeBps = bytesPerSample > 0 ? bytesPerSample : paintBps;
-                if (planeBps <= 0) planeBps = paintBps;
-                for (UInt32 i = 0; i < frames; i++) {
-                    size_t off = (size_t)i * (size_t)planeBps;
-                    if (off + (size_t)planeBps > planeCap) break;
-                    size_t srcOff = ((size_t)i * (size_t)planes + (size_t)p) * (size_t)paintBps;
-                    size_t n = (size_t)planeBps < (size_t)paintBps ? (size_t)planeBps : (size_t)paintBps;
-                    memcpy(dst + off, gPaintTmp + srcOff, n);
-                }
+        if (planes > outCh) planes = outCh;
+        for (int p = 0; p < planes; p++) {
+            AudioBuffer *buf = &ioData->mBuffers[p];
+            if (!buf->mData || buf->mDataByteSize == 0) continue;
+            uint8_t *dst = (uint8_t *)buf->mData;
+            size_t cap = buf->mDataByteSize;
+            for (UInt32 i = 0; i < frames; i++) {
+                size_t off = (size_t)i * (size_t)planeBps;
+                if (off + (size_t)planeBps > cap) break;
+                int16_t s = pcm[i * outCh + p];
+                writeOneSample(dst + off, s, planeBps, isFloat);
             }
         }
     } else {
-        BXFloatMicPaintFrames(
-            b0->mData, (int)frames, chInBuf, rate, paintBps, isFloat, mode
-        );
+        AudioBuffer *b0 = &ioData->mBuffers[0];
+        if (b0->mData && b0->mDataByteSize) {
+            uint8_t *dst = (uint8_t *)b0->mData;
+            size_t cap = b0->mDataByteSize;
+            int ch = chInBuf > 0 ? chInBuf : 1;
+            if (ch > outCh) ch = outCh;
+            for (UInt32 i = 0; i < frames; i++) {
+                for (int c = 0; c < ch; c++) {
+                    size_t off = ((size_t)i * (size_t)ch + (size_t)c) * (size_t)planeBps;
+                    if (off + (size_t)planeBps > cap) break;
+                    int16_t s = pcm[i * outCh + c];
+                    writeOneSample(dst + off, s, planeBps, isFloat);
+                }
+            }
+        }
+    }
+
+    // 写后峰：读回第一路（与注入探针同几何）
+    int32_t dstPk = 0;
+    AudioBuffer *b0 = &ioData->mBuffers[0];
+    if (b0->mData && b0->mDataByteSize && frames > 0) {
+        if (isFloat && planeBps >= 4) {
+            const float *fp = (const float *)b0->mData;
+            UInt32 n = b0->mDataByteSize / 4;
+            if (n > frames) n = frames;
+            for (UInt32 i = 0; i < n; i += (n > 256 ? n / 128 : 1)) {
+                float a = fp[i] >= 0 ? fp[i] : -fp[i];
+                int32_t v = (int32_t)(a * 32767.0f);
+                if (v > dstPk) dstPk = v;
+            }
+        } else if (planeBps == 2) {
+            const int16_t *sp = (const int16_t *)b0->mData;
+            UInt32 n = b0->mDataByteSize / 2;
+            // 交错时每帧跳 ch；非交错平面每样一点
+            int step = nonInterleaved ? 1 : (chInBuf > 0 ? chInBuf : 1);
+            UInt32 limit = nonInterleaved ? frames : frames;
+            for (UInt32 i = 0; i < limit && (i * (UInt32)step) < n; i += (limit > 256 ? limit / 128 : 1)) {
+                int16_t s = sp[i * (UInt32)step];
+                int32_t a = s >= 0 ? s : -s;
+                if (a > dstPk) dstPk = a;
+            }
+        }
+    }
+    BXFloatAQNotePaintDstPeak(dstPk);
+    if (pullPk > 200 && dstPk <= 200) {
+        NSLog(@"BXFloatMic WRITE-DROP pull=%d dst=%d ch=%d bps=%d float=%d planes=%u",
+              (int)pullPk, (int)dstPk, outCh, planeBps, isFloat, (unsigned)ioData->mNumberBuffers);
     }
 }
 

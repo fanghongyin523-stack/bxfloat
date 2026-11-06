@@ -306,6 +306,177 @@ final class CamAudioStore {
         }
     }
 
+    /// 拉交错 s16：mediaTime → ring-tail → 强制最新块。返回峰。并记 Gate ring/peek/conv。
+    @discardableResult
+    func pullInterleavedS16(
+        into dst: UnsafeMutablePointer<Int16>,
+        frames: Int,
+        channels: Int,
+        sampleRate: Int
+    ) -> Int32 {
+        let auCh = max(1, min(8, channels))
+        let dstRate = sampleRate > 0 ? sampleRate : storeRate
+        lockTargetFromAU(sampleRate: dstRate, channels: min(2, auCh), isFloat: false)
+
+        let ringRate = storeRate
+        let ringCh = max(1, storeChannels)
+        let duration = Double(frames) / Double(dstRate)
+        let needStore = max(1, Int((duration * Double(ringRate)).rounded(.up)) + 2)
+        ensureScratch(store: needStore * ringCh, out: frames * auCh)
+
+        if AVSyncClock.shared.shouldFreezeAudio(), bufferedSeconds() < 0.05 {
+            for i in 0..<(frames * auCh) { dst[i] = 0 }
+            CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
+            return 0
+        }
+
+        let target = AVSyncClock.shared.mediaTime()
+        var startPTS = advancePlayhead(target: target, duration: duration)
+        var got = 0
+        var forced = false
+        var ringPk: Int32 = 0
+        var peekPk: Int32 = 0
+        var localStore: [Int16] = []
+
+        lock.lock()
+        ringPk = max(peakOfLastChunkLocked(), peakOfAnyChunkLocked())
+        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+        peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+        if got <= 0 || peekPk <= 200 {
+            if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
+                playhead = snap + max(0, duration)
+                startPTS = snap
+                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+            }
+        }
+        if got <= 0 || peekPk <= 200 {
+            let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
+            let tailPk = Self.peakOf(scratchStore, frames: tailGot, channels: ringCh)
+            if tailGot > 0, tailPk > 200 {
+                got = tailGot
+                peekPk = tailPk
+            }
+        }
+        if got <= 0 || peekPk <= 200, ringPk > 200 {
+            let n = copyLatestFramesLocked(into: &scratchStore, frames: needStore)
+            if n > 0 {
+                got = n
+                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+                forced = true
+                playhead = (chunks.last.map { $0.pts + frameDuration($0) }) ?? playhead
+            }
+        }
+        if got > 0 {
+            localStore = Array(scratchStore.prefix(min(needStore, got) * ringCh))
+        }
+        lock.unlock()
+
+        guard got > 0, !localStore.isEmpty else {
+            for i in 0..<(frames * auCh) { dst[i] = 0 }
+            CamPipelineDiag.shared.notePaintGate(
+                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: forced
+            )
+            return 0
+        }
+
+        let rateConverted: [Int16]
+        if dstRate == ringRate {
+            rateConverted = localStore
+        } else {
+            rateConverted = resampleHermiteInterleaved(
+                localStore, channels: ringCh, from: ringRate, to: dstRate
+            )
+        }
+        var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: frames)
+        if laid.count < frames * auCh {
+            laid.append(contentsOf: repeatElement(Int16(0), count: frames * auCh - laid.count))
+        } else if laid.count > frames * auCh {
+            laid = Array(laid.prefix(frames * auCh))
+        }
+
+        // ~3ms 交叉淡入接 lastL/R，禁静音硬切（电流/短断）
+        let fadeN = min(frames, max(1, dstRate / 333))
+        for i in 0..<fadeN {
+            let a = Double(i + 1) / Double(fadeN)
+            let inv = 1.0 - a
+            let idxL = i * auCh
+            laid[idxL] = Int16(clamping: Int(Double(laid[idxL]) * a + Double(lastL) * inv))
+            if auCh > 1 {
+                let idxR = idxL + 1
+                laid[idxR] = Int16(clamping: Int(Double(laid[idxR]) * a + Double(lastR) * inv))
+            }
+        }
+        if frames > 0 {
+            lastL = laid[(frames - 1) * auCh]
+            lastR = auCh > 1 ? laid[(frames - 1) * auCh + 1] : lastL
+        }
+        envelope = 1.0
+
+        let convPk = Self.peakOf(laid, frames: frames, channels: auCh)
+        for i in 0..<(frames * auCh) { dst[i] = laid[i] }
+
+        CamPipelineDiag.shared.notePaintGate(
+            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: convPk, forced: forced
+        )
+        // 拉声阶段先记一笔 out，避免「写平面失败时 A/s out 全黑」
+        if convPk > 0 {
+            var mono = [Int16](repeating: 0, count: frames)
+            for i in 0..<frames { mono[i] = laid[i * auCh] }
+            CamPipelineDiag.shared.noteAudioOutput(samples: mono)
+            mono.withUnsafeBufferPointer { buf in
+                if let p = buf.baseAddress {
+                    CamPipelineDiag.shared.noteAudioQuality(
+                        stage: .inject,
+                        samples: p,
+                        count: frames,
+                        rateIn: ringRate,
+                        rateOut: dstRate,
+                        bytesPerSample: 2,
+                        isFloat: false
+                    )
+                }
+            }
+        }
+        return convPk
+    }
+
+    /// 把已拉好的交错 s16 按 asbd 写入 dst（旧 PaintFrames 兜底）
+    @discardableResult
+    func fillFromInterleavedS16(
+        _ samples: [Int16],
+        into dst: UnsafeMutableRawPointer,
+        frames: Int,
+        channels: Int,
+        asbd: AudioStreamBasicDescription
+    ) -> Bool {
+        let auCh = max(1, channels)
+        var isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        var sampleBytes = max(1, Int(asbd.mBitsPerChannel) / 8)
+        if isFloat, sampleBytes < 4 { sampleBytes = 4 }
+        if !isFloat, sampleBytes == 4, (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) == 0 {
+            isFloat = true
+        }
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        ensureScratch(store: 1, out: frames * auCh)
+        let n = min(samples.count, frames * auCh)
+        for i in 0..<n { scratchOut[i] = samples[i] }
+        for i in n..<(frames * auCh) { scratchOut[i] = 0 }
+        writePCM(
+            dst,
+            frames: frames,
+            channels: auCh,
+            isFloat: isFloat,
+            sampleBytes: sampleBytes,
+            nonInterleaved: isNonInterleaved
+        )
+        let dstPk = Self.peakOfRaw(
+            dst, frames: frames, channels: auCh,
+            isFloat: isFloat, sampleBytes: sampleBytes, nonInterleaved: isNonInterleaved
+        )
+        return dstPk > 0
+    }
+
     @discardableResult
     func fillContinuous(
         into dst: UnsafeMutableRawPointer,
@@ -494,6 +665,20 @@ final class CamAudioStore {
     private func peakOfLastChunkLocked() -> Int32 {
         guard let last = chunks.last else { return 0 }
         return Self.peakOf(last.samples, frames: last.samples.count / max(1, last.channels), channels: last.channels)
+    }
+
+    private func peakOfAnyChunkLocked() -> Int32 {
+        var best: Int32 = 0
+        for chunk in chunks.suffix(8) {
+            let pk = Self.peakOf(
+                chunk.samples,
+                frames: chunk.samples.count / max(1, chunk.channels),
+                channels: chunk.channels
+            )
+            if pk > best { best = pk }
+            if best > 4000 { break }
+        }
+        return best
     }
 
     /// 从最新 chunk 往前拼够 frames（忽略 PTS，专治 peek 空读）
@@ -886,26 +1071,9 @@ final class CamAudioStore {
             let chunkFrames = chunk.samples.count / chunkCh
             let chunkEnd = chunk.pts + Double(chunkFrames) / Double(storeRate)
             if chunkEnd <= cursor { continue }
-            if chunk.pts > cursor + 0.02 {
-                let gapSec = chunk.pts - cursor
-                if gapSec > 0.08 {
-                    // 大缺口：跳到包头继续读真 PCM，不填静音（静音垫会让注入探针记 0）
-                    cursor = chunk.pts
-                } else {
-                    let gapFrames = min(
-                        frames - written,
-                        max(0, Int((gapSec * Double(storeRate)).rounded(.down)))
-                    )
-                    // 小缺口：静音，禁止末样平台造成电流/短断感
-                    for i in 0..<gapFrames {
-                        let base = (written + i) * ch
-                        buffer[base] = 0
-                        if ch > 1 { buffer[base + 1] = 0 }
-                    }
-                    written += gapFrames
-                    cursor = chunk.pts
-                    if written >= frames { break }
-                }
+            if chunk.pts > cursor + 0.001 {
+                // 任何缺口都跳到包头读真 PCM；禁止静音/重复样点硬垫（短断续+电流声）
+                cursor = chunk.pts
             }
             let offsetSec = max(0, cursor - chunk.pts)
             var sampleIdx = Int((offsetSec * Double(storeRate)).rounded(.down))
