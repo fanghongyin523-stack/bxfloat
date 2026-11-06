@@ -339,12 +339,27 @@ final class CamAudioStore {
             Self.silence(into: dst, byteCount: byteCount)
             return false
         }
-        let startPTS = advancePlayhead(target: target, duration: duration)
 
         ensureScratch(store: needStore * ringCh, out: outFrames * max(auCh, ringCh))
-        let got: Int
+
+        // 读头必须落在 ring 窗内；窗外 peek 会整段填静音却 got>0 → 注入 pk=0 / A/s out=0
+        var startPTS = advancePlayhead(target: target, duration: duration)
+        var got = 0
         if lock.lock(before: Date().addingTimeInterval(0.002)) {
             got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+            // 空读或整段静音垫：硬拉回环内再读一次（修 playhead 漂移 / 多 AU 超前消耗）
+            if (got <= 0 || Self.isNearSilent(scratchStore, frames: got, channels: ringCh)),
+               let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
+                playhead = snap + max(0, duration)
+                startPTS = snap
+                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+                if got > 0 {
+                    NSLog(
+                        "BXFloatAudio playhead resync → %.3f (target %.3f got %d)",
+                        snap, target, got
+                    )
+                }
+            }
             lock.unlock()
         } else {
             CamPipelineDiag.shared.noteAudioUnderrun()
@@ -607,7 +622,12 @@ final class CamAudioStore {
     private func advancePlayhead(target: Double, duration: Double) -> Double {
         lock.lock()
         defer { lock.unlock() }
-        if playhead < 0 || !playhead.isFinite {
+        if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration),
+           playhead < 0 || !playhead.isFinite
+            || playhead < snap - 0.08 || playhead > snap + 0.35 {
+            // 读头未初始化或已偏离 ring 可读窗：硬对齐，避免整段静音垫当「有数据」
+            playhead = snap
+        } else if playhead < 0 || !playhead.isFinite {
             playhead = max(0, target)
         } else {
             let err = target - playhead
@@ -626,10 +646,46 @@ final class CamAudioStore {
                     playhead += max(-0.008, err * 0.02)
                 }
             }
+            // 软追后仍夹在 ring 内，禁止跑出末端空读
+            if let snap = clampPlayheadIntoRingLocked(target: playhead, duration: duration) {
+                if playhead > snap + 0.02 {
+                    playhead = snap
+                } else if playhead < snap - 0.25 {
+                    // 严重落后（软追太慢）：跳到窗内，修「环满却注入 pk=0」
+                    playhead = snap
+                }
+            }
         }
         let start = playhead
         playhead += max(0, duration)
         return start
+    }
+
+    /// ring 可读起点：夹到 [first, lastEnd - duration]
+    private func clampPlayheadIntoRingLocked(target: Double, duration: Double) -> Double? {
+        guard let first = chunks.first, let last = chunks.last else { return nil }
+        let firstPts = first.pts
+        let lastEnd = last.pts + frameDuration(last)
+        guard lastEnd > firstPts + 0.001 else { return nil }
+        let hi = max(firstPts, lastEnd - max(duration, 0.02))
+        let t = target.isFinite ? target : firstPts
+        return min(max(t, firstPts), hi)
+    }
+
+    private static func isNearSilent(_ buf: [Int16], frames: Int, channels: Int) -> Bool {
+        let ch = max(1, channels)
+        let n = min(frames, buf.count / ch)
+        guard n > 8 else { return frames > 0 }
+        var peak: Int32 = 0
+        let step = max(1, n / 64)
+        var i = 0
+        while i < n {
+            let a = abs(Int32(buf[i * ch]))
+            if a > peak { peak = a }
+            if peak > 200 { return false }
+            i += step
+        }
+        return peak <= 200
     }
 
     private func writePCM(
@@ -673,7 +729,13 @@ final class CamAudioStore {
         if !startPTS.isFinite || startPTS < 0 {
             t = chunks.first!.pts
         }
+        // 起点远在首包之前：直接跳到首包，禁止整段静音垫冒充 got>0（注入 pk=0 根因）
+        let firstPts = chunks.first!.pts
+        if t < firstPts - 0.05 {
+            t = firstPts
+        }
         pruneLocked(before: t - 0.5)
+        guard !chunks.isEmpty else { return 0 }
 
         var written = 0
         var cursor = t
@@ -684,19 +746,25 @@ final class CamAudioStore {
             let chunkEnd = chunk.pts + Double(chunkFrames) / Double(storeRate)
             if chunkEnd <= cursor { continue }
             if chunk.pts > cursor + 0.02 {
-                let gapFrames = min(
-                    frames - written,
-                    max(0, Int(((chunk.pts - cursor) * Double(storeRate)).rounded(.down)))
-                )
-                // 缺口：静音，禁止末样平台造成电流/短断感
-                for i in 0..<gapFrames {
-                    let base = (written + i) * ch
-                    buffer[base] = 0
-                    if ch > 1 { buffer[base + 1] = 0 }
+                let gapSec = chunk.pts - cursor
+                if gapSec > 0.08 {
+                    // 大缺口：跳到包头继续读真 PCM，不填静音（静音垫会让注入探针记 0）
+                    cursor = chunk.pts
+                } else {
+                    let gapFrames = min(
+                        frames - written,
+                        max(0, Int((gapSec * Double(storeRate)).rounded(.down)))
+                    )
+                    // 小缺口：静音，禁止末样平台造成电流/短断感
+                    for i in 0..<gapFrames {
+                        let base = (written + i) * ch
+                        buffer[base] = 0
+                        if ch > 1 { buffer[base + 1] = 0 }
+                    }
+                    written += gapFrames
+                    cursor = chunk.pts
+                    if written >= frames { break }
                 }
-                written += gapFrames
-                cursor = chunk.pts
-                if written >= frames { break }
             }
             let offsetSec = max(0, cursor - chunk.pts)
             var sampleIdx = Int((offsetSec * Double(storeRate)).rounded(.down))

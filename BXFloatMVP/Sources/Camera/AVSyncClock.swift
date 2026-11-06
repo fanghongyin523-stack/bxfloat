@@ -255,9 +255,13 @@ final class AVSyncClock {
     func shouldFreezeAudio() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        // 仅「视频长时间无帧」才冻音频。
-        // hold-last（缓冲临界短抖）不再冻：否则音乐会连续微断 + 包络泵动。
-        return frozenForVideo || lastAction == .freezeAudio
+        // 仅「视频此刻仍停」才冻。禁止用 lastAction==freezeAudio 闩住：
+        // noteVideoPTS 清掉 frozenForVideo 后、下一次 mediaTime 前，闩锁会让 AU 持续写静音 → 注入 pk=0。
+        if frozenForVideo { return true }
+        if lastVideoPTS >= 0, (CACurrentMediaTime() - lastVideoWall) > videoStallSec {
+            return true
+        }
+        return false
     }
 
     func latencySeconds() -> Double {
