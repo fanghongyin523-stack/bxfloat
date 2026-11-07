@@ -356,10 +356,12 @@ final class CamAudioStore {
             : max(1, Int((duration * Double(ringRate)).rounded(.up)) + 2)
         ensureScratch(store: needStore * ringCh + 64, out: frames * auCh)
 
-        if AVSyncClock.shared.shouldFreezeAudio(), bufferedSeconds() < 0.05 {
-            fillHoldSamples(dst, frames: frames, channels: auCh)
+        // 对标 VCamTang：视频恢复期冻音频 → 静音（不是 hold 末样）
+        if AVSyncClock.shared.shouldFreezeAudio() {
+            let n = frames * auCh
+            for i in 0..<n { dst[i] = 0 }
             CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
-            return max(1, abs(Int32(lastL)))
+            return 0
         }
 
         var got = 0
@@ -373,9 +375,10 @@ final class CamAudioStore {
         ringPk = max(peakOfLastChunkLocked(), peakOfAnyChunkLocked())
         guard let first = chunks.first, let last = chunks.last, ringPk > 0 else {
             lock.unlock()
-            fillHoldSamples(dst, frames: frames, channels: auCh)
+            let n = frames * auCh
+            for i in 0..<n { dst[i] = 0 }
             CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
-            return max(1, abs(Int32(lastL)))
+            return 0
         }
         let lastEnd = last.pts + frameDuration(last)
         let firstPts = first.pts
@@ -413,12 +416,12 @@ final class CamAudioStore {
         lock.unlock()
 
         if consumed <= 0 || localStore.isEmpty {
-            fillHoldSamples(dst, frames: frames, channels: auCh)
+            let n = frames * auCh
+            for i in 0..<n { dst[i] = 0 }
             CamPipelineDiag.shared.notePaintGate(
                 ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
             )
-            // 已写 hold：峰按末样；禁回 0 触发 AU 侧静音垫
-            return max(1, abs(Int32(lastL)))
+            return 0
         }
 
         // 环率=AU：直拷连续 PCM；异率仅块级线性 SRC（非 soft-rate 追环）
@@ -535,27 +538,13 @@ final class CamAudioStore {
         }
     }
 
-    /// 硬顶满：给抖音编码留余量。录回放顶 0dBFS=注入过烫→削波/电流尖刺。
-    /// 目标约 -8dBFS（±13000），不是「调响」，是传声不脏。
+    /// 仅防 int16 绕回尖刺；不对标自创压限（VCamTang/BXFloat 直喂素材 PCM）。
     private func applyPeakCeiling(_ buf: inout [Int16], frames: Int, channels: Int) {
-        let lim = 13_000.0
-        let knee = 9_000.0
         let ch = max(1, channels)
         for i in 0..<(frames * ch) {
-            let x = Double(buf[i])
-            let ax = abs(x)
-            if ax <= knee {
-                continue
-            }
-            let y: Double
-            if ax >= lim {
-                y = lim
-            } else {
-                // knee→lim 软过渡，过 lim 硬夹
-                let t = (ax - knee) / (lim - knee)
-                y = knee + (lim - knee) * (t * (2.0 - t))
-            }
-            buf[i] = Int16(clamping: Int((x < 0 ? -y : y).rounded()))
+            let x = Int(buf[i])
+            if x > 32766 { buf[i] = 32766 }
+            else if x < -32766 { buf[i] = -32766 }
         }
     }
 
@@ -989,13 +978,18 @@ final class CamAudioStore {
         AVSyncClock.shared.noteAudioEndPTS(endPTS)
     }
 
-    /// 对标 VCamTang capLiveLatency：积压过大剪旧，禁止靠软变速消化 backlog
+    /// 对标 VCamTang `[AUDIO] backlog capped pending= dropped=`：积压过大剪旧
     private func capLiveLatencyLocked(endPTS: Double) {
         guard let first = chunks.first else { return }
         let buffered = endPTS - first.pts
         guard buffered > capLiveLatencySec else { return }
+        let before = chunks.count
         let keepFrom = endPTS - capLiveLatencySec
         pruneLocked(before: keepFrom)
+        let dropped = before - chunks.count
+        if dropped > 0 {
+            NSLog("[BXFloat][AUDIO] backlog capped buffered_ms=%.0f dropped=%d", buffered * 1000.0, dropped)
+        }
         if playhead >= 0, playhead < keepFrom {
             playhead = keepFrom
         }

@@ -27,6 +27,12 @@ public func BXFloatPublishAudioPCM(
     )
 }
 
+/// 对标 VCamTang hasMaterialAudio / failclosed。
+@_cdecl("BXFloatMicHasMaterialAudio")
+public func BXFloatMicHasMaterialAudio() -> Int32 {
+    CamAudioStore.shared.hasFreshAudio ? 1 : 0
+}
+
 /// 从 ring 拉交错 s16（固定延迟连续拷贝）。返回峰（0..32767）。
 /// ObjC 负责按 AU 真实 bps/float/平面写入 ioData。
 @_cdecl("BXFloatMicPullS16")

@@ -26,6 +26,7 @@ FOUNDATION_EXPORT int32_t BXFloatMicPullS16(
     int channels,
     double sampleRate
 );
+FOUNDATION_EXPORT int BXFloatMicHasMaterialAudio(void);
 
 FOUNDATION_EXPORT void BXFloatMicNoteInjectPCM(
     const int16_t *samples,
@@ -314,28 +315,18 @@ static void tapMicABL(
 }
 
 /// 把一帧 s16 写入目标（按真实 bps/float）
+/// 对标参考：直写素材 PCM，不做自创压限（压限会发闷/不自然）。
 static void writeOneSample(void *dst, int16_t s, int bps, int isFloat) {
-    // s16 侧已顶满；float 再夹到 ±0.40（约 -8dBFS），防抖音后级再推爆成电流尖刺
     if (isFloat && bps >= 4) {
         float f = (float)s / 32768.0f;
-        if (f > 0.40f) f = 0.40f;
-        if (f < -0.40f) f = -0.40f;
         memcpy(dst, &f, 4);
     } else if (bps == 2) {
-        int16_t v = s;
-        if (v > 13000) v = 13000;
-        if (v < -13000) v = -13000;
-        memcpy(dst, &v, 2);
+        memcpy(dst, &s, 2);
     } else if (bps == 4 && !isFloat) {
-        int16_t c = s;
-        if (c > 13000) c = 13000;
-        if (c < -13000) c = -13000;
-        int32_t v = ((int32_t)c) << 16;
+        int32_t v = ((int32_t)s) << 16;
         memcpy(dst, &v, 4);
     } else if (bps == 8 && isFloat) {
         float f = (float)s / 32768.0f;
-        if (f > 0.40f) f = 0.40f;
-        if (f < -0.40f) f = -0.40f;
         uint8_t *p = (uint8_t *)dst;
         memset(p, 0, 8);
         memcpy(p, &f, 4);
@@ -343,15 +334,10 @@ static void writeOneSample(void *dst, int16_t s, int bps, int isFloat) {
         uint8_t *p = (uint8_t *)dst;
         if (bps >= 4) {
             float f = (float)s / 32768.0f;
-            if (f > 0.40f) f = 0.40f;
-            if (f < -0.40f) f = -0.40f;
             for (int off = 0; off + 4 <= bps; off += 4) memcpy(p + off, &f, 4);
         } else if (bps > 0) {
             memset(p, 0, (size_t)bps);
-            int16_t v = s;
-            if (v > 13000) v = 13000;
-            if (v < -13000) v = -13000;
-            if (bps >= 2) memcpy(p, &v, 2);
+            if (bps >= 2) memcpy(p, &s, 2);
         }
     }
 }
@@ -401,16 +387,26 @@ static void paintABL(
         return;
     }
 
-    // 1) 拉推流 s16（固定延迟连续；欠载已 hold 末样）；2) 按 AU 几何整缓冲覆盖
-    // 禁止 pullPk<=0 再 memset 静音垫——那是录中可闻短剁/电流缝的主因之一
+    // 对标 VCamTang failclosed：无素材音频 → 整缓冲静音，禁止 hold 末样/脏缝冒充推流
+    if (!BXFloatMicHasMaterialAudio()) {
+        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
+            AudioBuffer *buf = &ioData->mBuffers[i];
+            if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
+        }
+        BXFloatAQNotePaintDstPeak(0);
+        return;
+    }
+
+    // 1) 拉推流 s16（连续拷贝）；2) 按 AU 几何整缓冲覆盖
     int32_t pullPk = BXFloatMicPullS16(pcm, (int)frames, outCh, rate);
     if (pullPk <= 0) {
-        static _Atomic int sPullZeroLog = 0;
-        int n = atomic_fetch_add(&sPullZeroLog, 1);
-        if (n < 8 || (n % 64) == 0) {
-            NSLog(@"BXFloatMic PULL-HOLD pk=%d rate=%.0f ch=%d (write hold, no zero-pad)",
-                  (int)pullPk, rate, outCh);
+        // failclosed：拉空=静音，不 hold（hold 会电流/不自然）
+        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
+            AudioBuffer *buf = &ioData->mBuffers[i];
+            if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
         }
+        BXFloatAQNotePaintDstPeak(0);
+        return;
     }
 
     int planeBps = bytesPerSample;

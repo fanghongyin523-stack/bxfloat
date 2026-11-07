@@ -249,8 +249,10 @@ final class AVSyncClock {
     func actionName() -> String { lastAction.rawValue }
     func skewMs() -> Double { lastSkewMs }
     func bufferedMs() -> Double { lastBufferedMs }
+    /// 对标 VCamTang target_ms
+    func targetMs() -> Double { targetDelay * 1000.0 }
 
-    /// 面板用：明确不是软变速
+    /// 面板用：对标 [VCAM][AVSYNC] action=
     func actionPanelLabel() -> String {
         switch lastAction {
         case .play: return "play"
@@ -260,6 +262,14 @@ final class AVSyncClock {
         case .waitVideo: return "wait-video"
         case .silence: return "silence"
         }
+    }
+
+    /// 对标 [VCAM][AVSYNC] skew_ms= target_ms= buffered_ms= action=
+    func avsyncPanelLine() -> String {
+        String(
+            format: "AVSYNC skew=%.0fms target=%.0fms buffered=%.0fms action=%@",
+            lastSkewMs, targetDelay * 1000.0, lastBufferedMs, actionPanelLabel()
+        )
     }
 
     func diagSnapshot() -> (epoch: Double, lastVideoPTS: Double, lastAudioEndPTS: Double) {
