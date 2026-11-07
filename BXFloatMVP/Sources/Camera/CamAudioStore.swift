@@ -379,47 +379,36 @@ final class CamAudioStore {
         }
         let lastEnd = last.pts + frameDuration(last)
         let firstPts = first.pts
-        // 目标读点：环尾前固定延迟（约 1.2s）
+        // 连续传声：播头只随已读 PCM 前进，禁止「追 desired」硬跳（听感会一帧帧蹦）。
+        // 仅在未初始化 / 被 drop-old 剪到窗外 / 跑出环尾 时对齐一次。
         let desired = max(firstPts, lastEnd - fixedLatencySec)
-        if playhead < 0 || !playhead.isFinite
-            || playhead < firstPts - 0.02
-            || playhead > lastEnd + 0.02
-        {
+        let hi = max(firstPts, lastEnd - max(duration, 0.004))
+        if playhead < 0 || !playhead.isFinite {
             playhead = desired
             seamJump = true
-        } else if playhead > desired + 0.25 {
-            // 读太近直播边：拉回固定延迟（偶发硬跳+短淡）
-            playhead = desired
+        } else if playhead < firstPts - 0.001 {
+            playhead = firstPts
             seamJump = true
-        } else if playhead < desired - 0.80 {
-            // 落后太多：一次对齐，禁止持续软追拧内容
-            playhead = desired
-            seamJump = true
-        }
-        // 夹在可读窗内，保证有 frames 可读
-        let hi = max(firstPts, lastEnd - max(duration, 0.02))
-        if playhead > hi {
+        } else if playhead > lastEnd + 0.001 {
             playhead = hi
             seamJump = true
+        }
+        if playhead > hi {
+            playhead = hi
         }
         startPTS = playhead
         var endPTS = startPTS
         got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
         peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-        if got < needStore / 2 {
-            // 缺口：不 force 最新块（会错位）；续读 desired
-            playhead = desired
-            startPTS = desired
-            endPTS = desired
-            got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
-            peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-            seamJump = true
-        }
-        let consumed = min(needStore, got)
+        // 欠载：不重锚定；有多少吃多少，其余 hold
+        let consumed = min(needStore, max(0, got))
         if consumed > 0 {
             localStore = Array(scratchStore.prefix(consumed * ringCh))
-            // 用 peek 真实媒体终点推进，避免包间跳读把 playhead 甩后 → 短剁
-            playhead = endPTS
+            if endPTS > startPTS + 0.0001 {
+                playhead = endPTS
+            } else {
+                playhead = startPTS + Double(consumed) / Double(ringRate)
+            }
         }
         lock.unlock()
 
@@ -450,13 +439,12 @@ final class CamAudioStore {
             let seedR = haveFrames > 0
                 ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
                 : lastR
-            // 欠载：末样 hold，禁止淡向 0 垫静音缝
+            // 欠载：末样 hold；不标 seamJump，避免每欠载交叉淡把声拧碎
             holdPadInterleaved(
                 &laid, channels: auCh,
                 fromFrame: haveFrames, toFrame: frames,
                 seedL: seedL, seedR: seedR
             )
-            seamJump = true
         } else if laid.count > frames * auCh {
             laid = Array(laid.prefix(frames * auCh))
         }
@@ -584,23 +572,25 @@ final class CamAudioStore {
         let lastEnd = last.pts + frameDuration(last)
         let dur = Double(frames) / Double(ringRate)
         let desired = max(first.pts, lastEnd - fixedLatencySec)
-        if monitorPlayhead < 0 || monitorPlayhead < first.pts - 0.05
-            || monitorPlayhead > lastEnd + 0.05
-            || monitorPlayhead < desired - 0.80
-            || monitorPlayhead > desired + 0.25
-        {
+        let hi = max(first.pts, lastEnd - max(dur, 0.004))
+        if monitorPlayhead < 0 || !monitorPlayhead.isFinite {
             monitorPlayhead = desired
+        } else if monitorPlayhead < first.pts - 0.001 {
+            monitorPlayhead = first.pts
+        } else if monitorPlayhead > lastEnd + 0.001 {
+            monitorPlayhead = hi
         }
+        if monitorPlayhead > hi { monitorPlayhead = hi }
         let start = monitorPlayhead
         var endPTS = start
         let got = peekStartingLocked(at: start, into: &scratchStore, frames: frames, endPTS: &endPTS)
         if got <= 0 {
-            monitorPlayhead = desired
             return 0
         }
-        monitorPlayhead = endPTS
-        if monitorPlayhead > lastEnd {
-            monitorPlayhead = max(first.pts, lastEnd - dur)
+        if endPTS > start + 0.0001 {
+            monitorPlayhead = endPTS
+        } else {
+            monitorPlayhead = start + Double(got) / Double(ringRate)
         }
         var laid = layoutChannels(
             Array(scratchStore.prefix(got * ringCh)),
@@ -1106,17 +1096,18 @@ final class CamAudioStore {
     private func advancePlayhead(target: Double, duration: Double) -> Double {
         lock.lock()
         defer { lock.unlock() }
-        // fillContinuous 兜底：同样固定延迟，不软拉伸
+        // fillContinuous 兜底：与 pull 同策略——只前进，不追 desired
         if let last = chunks.last, let first = chunks.first {
             let lastEnd = last.pts + frameDuration(last)
             let desired = max(first.pts, lastEnd - fixedLatencySec)
-            if playhead < 0 || !playhead.isFinite
-                || playhead < first.pts - 0.02 || playhead > lastEnd + 0.02
-                || playhead < desired - 0.80 || playhead > desired + 0.25
-            {
+            let hi = max(first.pts, lastEnd - max(duration, 0.004))
+            if playhead < 0 || !playhead.isFinite {
                 playhead = desired
+            } else if playhead < first.pts - 0.001 {
+                playhead = first.pts
+            } else if playhead > lastEnd + 0.001 {
+                playhead = hi
             }
-            let hi = max(first.pts, lastEnd - max(duration, 0.02))
             if playhead > hi { playhead = hi }
         } else if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
             playhead = snap
