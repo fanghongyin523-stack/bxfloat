@@ -1,9 +1,9 @@
 import AudioToolbox
 import Foundation
 
-/// 音频 ring + 连续播放头。
-/// - AU 目标格式一次锁定后，入环即对齐采样率 → 注入回调免短块重采样（接近原音关键）
-/// - 立体声保真；超前视频 pending/rebase；真欠载才包络
+/// 音频 ring + 固定延迟连续拷贝（对标 VCamTang fillAudioBufferList）。
+/// - AVSYNC：play/hold/freeze-audio/drop-old——禁止 soft-rate 拧播头
+/// - AU 锁定后入环 SRC 一次；注入侧直拷连续 PCM
 final class CamAudioStore {
     static let shared = CamAudioStore()
 
@@ -17,8 +17,11 @@ final class CamAudioStore {
     private let lock = NSLock()
     private var chunks: [Chunk] = []
     private var pending: [Chunk] = []
-    private let maxSeconds: Double = 3.5
+    /// 环上限；超则 drop-old（对标 capLiveLatency / backlog）
+    private let maxSeconds: Double = 2.50
     private let maxPendingSeconds: Double = 1.20
+    /// 入环后活延迟上限：超过则剪旧，保持 ~目标延迟可读
+    private let capLiveLatencySec: Double = 1.80
     private let defaultRate = 48_000
     /// AU 锁定后的环缓采样率；未锁定前用 48k
     private var lockedRate: Int = 0
@@ -30,7 +33,7 @@ final class CamAudioStore {
     private(set) var storeChannels = 1
 
     private var playhead: Double = -1
-    /// 固定延迟读环：宁可 ~1.2s 滞后，也不软拉伸拧内容
+    /// 固定目标延迟连续读（~1.2s，对标参考 1～1.5s）
     private let fixedLatencySec: Double = 1.20
     private var lastL: Int16 = 0
     private var lastR: Int16 = 0
@@ -61,7 +64,7 @@ final class CamAudioStore {
 
     private init() {}
 
-    /// AU/采集首次（或变更）锁定目标格式：之后入环按此采样率，注入侧免 Hermite
+    /// AU/采集首次（或变更）锁定目标格式：之后入环按此采样率，注入侧直拷
     func lockTargetFromAU(sampleRate: Int, channels: Int, isFloat: Bool) {
         let rate = sampleRate > 0 ? sampleRate : defaultRate
         let ch = max(1, min(2, channels))
@@ -173,12 +176,12 @@ final class CamAudioStore {
             }
         }
 
-        // 入环一次重采样到 AU 锁定率（包级），注入回调不再 Hermite
+        // 入环一次块级 SRC 对齐 AU 率（格式平面）；禁止在播出时钟上 soft-rate
         let pcm: [Int16]
         if rate == ringRate {
             pcm = interleaved
         } else {
-            pcm = resampleHermiteInterleaved(interleaved, channels: srcCh, from: rate, to: ringRate)
+            pcm = resampleLinearInterleaved(interleaved, channels: srcCh, from: rate, to: ringRate)
         }
         guard !pcm.isEmpty else { return }
 
@@ -429,14 +432,14 @@ final class CamAudioStore {
             return max(1, abs(Int32(lastL)))
         }
 
-        // 环率=AU：直拷，禁止 Hermite 拧内容
+        // 环率=AU：直拷连续 PCM；异率仅块级线性 SRC（非 soft-rate 追环）
         let rateConverted: [Int16]
         if dstRate == ringRate, consumed >= frames {
             rateConverted = Array(localStore.prefix(frames * ringCh))
         } else if dstRate == ringRate {
             rateConverted = localStore
         } else {
-            rateConverted = resampleHermiteInterleaved(
+            rateConverted = resampleLinearInterleaved(
                 localStore, channels: ringCh, from: ringRate, to: dstRate
             )
         }
@@ -753,69 +756,23 @@ final class CamAudioStore {
             isFloat = true
         }
         let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        // 约定：byteCount = frames * auCh * sampleBytes（交错临时缓冲或多平面总字节）
         guard sampleBytes > 0, auCh > 0 else { return false }
         let outFrames = byteCount / (sampleBytes * auCh)
         guard outFrames > 0 else { return false }
 
         let dstRate = asbd.mSampleRate > 0 ? Int(asbd.mSampleRate) : storeRate
-        // 每次注入锁定 AU 目标，使后续入环一次对齐
-        lockTargetFromAU(sampleRate: dstRate, channels: auCh, isFloat: isFloat)
-
-        let ringRate = storeRate
-        let duration = Double(outFrames) / Double(dstRate)
-        let ringCh = max(1, storeChannels)
-        let needStore = max(1, Int((duration * Double(ringRate)).rounded(.up)) + 2)
-
-        let target = AVSyncClock.shared.mediaTime()
-        // 视频短停不再整段静音：环里有声就继续读。否则 AU写++ 但注入 pk 恒 0。
-        if AVSyncClock.shared.shouldFreezeAudio(), bufferedSeconds() < 0.05 {
-            CamPipelineDiag.shared.noteAudioUnderrun()
-            Self.silence(into: dst, byteCount: byteCount)
-            return false
+        // 与 AU PullS16 同一路：固定延迟连续拷贝，禁止 mediaTime soft-rate 追环
+        ensureScratch(store: outFrames * max(1, storeChannels) + 64, out: outFrames * auCh)
+        let pk = scratchOut.withUnsafeMutableBufferPointer { buf -> Int32 in
+            guard let base = buf.baseAddress else { return 0 }
+            return pullInterleavedS16(
+                into: base,
+                frames: outFrames,
+                channels: auCh,
+                sampleRate: dstRate
+            )
         }
-
-        ensureScratch(store: needStore * ringCh, out: outFrames * max(auCh, ringCh))
-
-        var startPTS = advancePlayhead(target: target, duration: duration)
-        var got = 0
-        var ringPk: Int32 = 0
-        var peekPk: Int32 = 0
-        var localStore: [Int16] = []
-
-        // 全程持锁：peek→本地拷贝，杜绝多 AU 踩共享 scratch 写成静音
-        lock.lock()
-        ringPk = peakOfLastChunkLocked()
-        var endPTS = startPTS
-        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
-        peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-        if got <= 0 || peekPk <= 200 {
-            if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
-                playhead = snap + max(0, duration)
-                startPTS = snap
-                endPTS = snap
-                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
-                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-            }
-        }
-        if got <= 0 || peekPk <= 200 {
-            let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
-            let tailPk = Self.peakOf(scratchStore, frames: tailGot, channels: ringCh)
-            if tailGot > 0, tailPk > 200 {
-                got = tailGot
-                peekPk = tailPk
-            }
-        } else {
-            playhead = endPTS
-        }
-        // 禁止 copyLatest force：错位内容；欠载走包络续尾
-        if got > 0 {
-            let n = min(needStore, got) * ringCh
-            localStore = Array(scratchStore.prefix(n))
-        }
-        lock.unlock()
-
-        if got <= 0 || localStore.isEmpty {
+        if pk <= 0 {
             CamPipelineDiag.shared.noteAudioUnderrun()
             fillWithEnvelope(
                 into: dst,
@@ -826,66 +783,8 @@ final class CamAudioStore {
                 nonInterleaved: isNonInterleaved,
                 decaying: true
             )
-            CamPipelineDiag.shared.notePaintGate(
-                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
-            )
             return false
         }
-
-        // 环率已对齐 AU 时零重采样；仅锁定期前偶发走 Hermite
-        let rateConverted: [Int16]
-        if dstRate == ringRate {
-            rateConverted = localStore
-        } else {
-            rateConverted = resampleHermiteInterleaved(
-                localStore,
-                channels: ringCh,
-                from: ringRate,
-                to: dstRate
-            )
-        }
-
-        // 声道布局：ringCh → auCh；不足末样 hold（禁静音垫缝）
-        var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: outFrames)
-        let haveFrames = min(outFrames, rateConverted.count / max(1, ringCh))
-        if haveFrames < outFrames {
-            let seedL = haveFrames > 0 ? laid[(haveFrames - 1) * auCh] : lastL
-            let seedR = haveFrames > 0
-                ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
-                : lastR
-            holdPadInterleaved(
-                &laid, channels: auCh,
-                fromFrame: haveFrames, toFrame: outFrames,
-                seedL: seedL, seedR: seedR
-            )
-        } else if laid.count > outFrames * auCh {
-            laid = Array(laid.prefix(outFrames * auCh))
-        }
-        applyDCBlocker(&laid, frames: outFrames, channels: auCh)
-        applyPeakCeiling(&laid, frames: outFrames, channels: auCh)
-        for i in 0..<(outFrames * auCh) { scratchOut[i] = laid[i] }
-
-        // 从真欠载恢复：~30ms 淡入（禁止整段乘 0）
-        if envelope < 0.05 { envelope = 0.05 }
-        if envelope < 0.999 {
-            let fade = min(max(1, dstRate / 33), outFrames)
-            for i in 0..<fade {
-                let a = envelope + (1.0 - envelope) * (Double(i + 1) / Double(fade))
-                for c in 0..<auCh {
-                    let idx = i * auCh + c
-                    scratchOut[idx] = Int16(clamping: Int(Double(scratchOut[idx]) * a))
-                }
-            }
-            envelope = 1.0
-        }
-
-        let convPk = Self.peakOf(scratchOut, frames: outFrames, channels: auCh)
-
-        if outFrames > 0 {
-            lastL = scratchOut[(outFrames - 1) * auCh]
-            lastR = auCh > 1 ? scratchOut[(outFrames - 1) * auCh + 1] : lastL
-        }
-
         writePCM(
             dst,
             frames: outFrames,
@@ -894,21 +793,8 @@ final class CamAudioStore {
             sampleBytes: sampleBytes,
             nonInterleaved: isNonInterleaved
         )
-        let dstPk = Self.peakOfRaw(
-            dst,
-            frames: outFrames,
-            channels: auCh,
-            isFloat: isFloat,
-            sampleBytes: sampleBytes,
-            nonInterleaved: isNonInterleaved
-        )
-        CamPipelineDiag.shared.notePaintGate(
-            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: dstPk, forced: false
-        )
-        // 注入峰仍由 AU paint 后 ioData 探针记账
-        return dstPk > 0 || convPk > 0
+        return true
     }
-
     /// 从 ring 尾部取最近 frames（failsafe，不跟 mediaTime）
     private func peekRingTailLocked(into buffer: inout [Int16], frames: Int) -> Int {
         guard frames > 0, let first = chunks.first, let last = chunks.last else { return 0 }
@@ -1098,8 +984,21 @@ final class CamAudioStore {
         lastUpdate = Date()
         lastPTS = endPTS
         pruneLocked(before: endPTS - maxSeconds)
+        capLiveLatencyLocked(endPTS: endPTS)
         lock.unlock()
         AVSyncClock.shared.noteAudioEndPTS(endPTS)
+    }
+
+    /// 对标 VCamTang capLiveLatency：积压过大剪旧，禁止靠软变速消化 backlog
+    private func capLiveLatencyLocked(endPTS: Double) {
+        guard let first = chunks.first else { return }
+        let buffered = endPTS - first.pts
+        guard buffered > capLiveLatencySec else { return }
+        let keepFrom = endPTS - capLiveLatencySec
+        pruneLocked(before: keepFrom)
+        if playhead >= 0, playhead < keepFrom {
+            playhead = keepFrom
+        }
     }
 
     private func enqueuePending(
@@ -1441,7 +1340,8 @@ final class CamAudioStore {
         }
     }
 
-    private func resampleHermiteInterleaved(
+    /// 块级线性 SRC（格式对齐）。不是播头 soft-rate，禁止用它追 ring。
+    private func resampleLinearInterleaved(
         _ input: [Int16],
         channels: Int,
         from srcRate: Int,
@@ -1453,25 +1353,16 @@ final class CamAudioStore {
         let inFrames = input.count / ch
         let outFrames = max(1, Int((Double(inFrames) * Double(dstRate) / Double(srcRate)).rounded()))
         var out = [Int16](repeating: 0, count: outFrames * ch)
-        let last = inFrames - 1
+        let last = max(0, inFrames - 1)
         for c in 0..<ch {
             for i in 0..<outFrames {
                 let srcPos = Double(i) * Double(srcRate) / Double(dstRate)
-                let i1 = min(max(Int(srcPos), 0), last)
-                let i0 = max(i1 - 1, 0)
-                let i2 = min(i1 + 1, last)
-                let i3 = min(i1 + 2, last)
-                let t = srcPos - Double(i1)
+                let i0 = min(max(Int(srcPos.rounded(.down)), 0), last)
+                let i1 = min(i0 + 1, last)
+                let t = srcPos - Double(i0)
                 let y0 = Double(input[i0 * ch + c])
                 let y1 = Double(input[i1 * ch + c])
-                let y2 = Double(input[i2 * ch + c])
-                let y3 = Double(input[i3 * ch + c])
-                let c0 = y1
-                let c1 = 0.5 * (y2 - y0)
-                let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3
-                let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2)
-                let v = ((c3 * t + c2) * t + c1) * t + c0
-                out[i * ch + c] = Int16(clamping: Int(v.rounded()))
+                out[i * ch + c] = Int16(clamping: Int((y0 + (y1 - y0) * t).rounded()))
             }
         }
         return out

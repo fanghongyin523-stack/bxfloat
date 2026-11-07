@@ -1,14 +1,14 @@
 import Foundation
 import QuartzCore
 
-/// 音画呈现：软变速跟 ring，禁止周期性硬 hold（会两秒一卡）。
-/// 仅在真正空窗时 hold；缓冲偏低时放慢时钟而不是冻死画面。
+/// 音画呈现：对标 VCamTang AVSYNC 动作表。
+/// play / hold-last / freeze-audio(仅恢复期) / drop-old / wait-video。
+/// 禁止 soft-rate / 软变速拧时钟——那会把连续 PCM 拧成一帧一帧蹦。
 final class AVSyncClock {
     static let shared = AVSyncClock()
 
     enum Action: String {
         case play
-        case slow = "slow"
         case holdLast = "hold-last"
         case freezeAudio = "freeze-audio"
         case dropOld = "drop-old"
@@ -29,20 +29,16 @@ final class AVSyncClock {
     private var frozenForVideo = false
     private var warmupWallStart: CFTimeInterval = 0
 
-    /// 目标呈现滞后
+    /// 目标呈现滞后（与参考 ~1s 同观感；音频侧另有 ~1.2s 固定延迟拷贝）
     private let targetDelay: Double = 1.0
-    /// 缓冲过高才加速追
+    /// 缓冲过高：drop-old 一次跳到目标延迟（不加速拧采样）
     private let maxDelay: Double = 2.2
-    /// 低于此开始放慢（不再硬 hold）
-    private let lowWater: Double = 0.45
-    /// 仅低于此才硬 hold（真欠载）
-    private let criticalLow: Double = 0.06
-    /// 高于此略加速消耗积压
-    private let highWater: Double = 1.55
+    /// 仅低于此才 hold-last（真欠载）
+    private let criticalLow: Double = 0.08
     private let warmupNeed: Double = 0.35
     private let maxWarmupWall: Double = 0.45
-    private let maxSlewPerCall: Double = 0.04
-    /// 抖音回调间隙常 >0.35s；过短会把有声 ring 冻成静音（注入 pk=0）
+    private let maxDropPerCall: Double = 0.08
+    /// 抖音回调间隙常 >0.35s；过短会把有声 ring 冻成静音
     private let videoStallSec: Double = 1.20
 
     private(set) var driftResyncCount: Int64 = 0
@@ -96,40 +92,34 @@ final class AVSyncClock {
         lock.unlock()
     }
 
-    /// 软接纳窗：端点不超视频太多则直接入 ring（覆盖一帧抖动）。
-    /// 故意不放大到数秒——超窗由 CamAudioStore pending/rebase 处理，避免硬拒收断音。
+    /// 软接纳窗：端点不超视频太多则直接入 ring。
     private let audioSoftLead: Double = 0.28
-    /// 可暂存等待视频追上的最大超前（有界，不是无限门限）
+    /// 可暂存等待视频追上的最大超前（failclosed/backlog 有界）
     private let audioHoldLead: Double = 1.20
 
     enum AudioAdmit {
         case accept
-        /// 暂存：视频还没到，不要丢包
         case pending(lead: Double)
-        /// 超前过大：把本包起点对齐到建议值后再入 ring（重对齐，非丢弃）
         case rebase(startPTS: Double, lead: Double)
         case reject
     }
 
-    /// 旧接口：仅表示「能否直接入 ring」。pending/rebase 对调用方视为不可直接入。
     func shouldAcceptAudioEndPTS(_ endPTS: Double) -> Bool {
         if case .accept = admitAudio(endPTS: endPTS, duration: 0) { return true }
         return false
     }
 
-    /// 音频接纳决策（不改 0.28 软窗；超窗走 pending/rebase，禁止连续硬拒收）。
+    /// 音频接纳：超窗 pending/rebase，禁止连续硬拒收断音（对标 failclosed/backlog）。
     func admitAudio(endPTS: Double, duration: Double) -> AudioAdmit {
         guard endPTS.isFinite, endPTS >= 0 else { return .reject }
         let dur = max(0, duration)
         lock.lock()
         defer { lock.unlock() }
         if lastVideoPTS < 0 { return .accept }
-        // 视频刚起步（还没攒够半秒沿）：先放行音频，避免沙盒「有画无音频包」假阴性
         if lastVideoPTS < 0.50 { return .accept }
         let lead = endPTS - lastVideoPTS
         if lead <= audioSoftLead { return .accept }
         if lead <= audioHoldLead { return .pending(lead: lead) }
-        // 重对齐：让本包终点落在 video + softLead/2，保留 PCM
         let newEnd = lastVideoPTS + audioSoftLead * 0.5
         let newStart = max(0, newEnd - dur)
         return .rebase(startPTS: newStart, lead: lead)
@@ -137,7 +127,6 @@ final class AVSyncClock {
 
     func audioSoftLeadSeconds() -> Double { audioSoftLead }
 
-    /// 当前音频相对视频超前秒数（诊断）
     func audioLeadSeconds(endPTS: Double) -> Double {
         lock.lock()
         defer { lock.unlock() }
@@ -145,6 +134,7 @@ final class AVSyncClock {
         return endPTS - lastVideoPTS
     }
 
+    /// 1x 墙钟推进。禁止 rate≠1 的软变速。
     func mediaTime() -> Double {
         lock.lock()
         defer { lock.unlock() }
@@ -181,7 +171,7 @@ final class AVSyncClock {
             wallAnchor = now
         }
 
-        // 视频真停：冻时钟 + 冻音频（短空窗用 soft 即可，阈值略放宽）
+        // 仅视频真停：冻时钟 + 冻音频（恢复期），对标 VCamTang「audio frozen for video recovery」
         if lastVideoPTS >= 0, (now - lastVideoWall) > videoStallSec {
             frozenForVideo = true
             lastAction = .freezeAudio
@@ -191,15 +181,13 @@ final class AVSyncClock {
         }
 
         let wallDelta = max(0, now - wallAnchor)
-        var rate = 1.0
+        // 固定 1x，绝不 soft-rate
+        var t = mediaAnchor + wallDelta
+        var buffered = live - t
         var action: Action = .play
 
-        // 先按 1x 估缓冲，决定变速
-        var tentative = mediaAnchor + wallDelta
-        var buffered = live - tentative
-
         if buffered < criticalLow {
-            // 真欠载：钉住，等源。音频侧应同步冻播放头，避免电流声
+            // 真欠载：hold-last，等源（不放慢拧内容）
             lastAction = .holdLast
             wallAnchor = now
             mediaAnchor = min(mediaAnchor, max(0, live - criticalLow))
@@ -207,43 +195,23 @@ final class AVSyncClock {
             return mediaAnchor
         }
 
-        if buffered < lowWater {
-            // 放慢：0.55～0.9，缓冲越薄越慢，平滑过渡，不两秒一卡
-            let span = max(0.001, lowWater - criticalLow)
-            let x = min(1.0, max(0.0, (buffered - criticalLow) / span))
-            rate = 0.55 + 0.35 * x
-            action = .slow
-        } else if buffered > maxDelay {
-            rate = 1.12
-            action = .dropOld
-            driftResyncCount += 1
-        } else if buffered > highWater {
-            rate = 1.06
-            action = .play
-        } else {
-            // 朝目标缓冲微调
-            let err = buffered - targetDelay
-            if err < -0.12 {
-                rate = 0.92
-                action = .slow
-            } else if err > 0.25 {
-                rate = 1.04
+        // 积压：drop-old 离散跳到目标延迟，禁止 1.06x/1.12x 软加速
+        if buffered > maxDelay {
+            let ideal = max(0, live - targetDelay)
+            let delta = min(maxDropPerCall, max(0, ideal - t))
+            if delta > 0.0005 {
+                t += delta
+                action = .dropOld
+                driftResyncCount += 1
             }
+            buffered = live - t
         }
 
-        var t = mediaAnchor + wallDelta * rate
         // 软钳：不要冲过直播沿
         let maxT = max(0, live - criticalLow)
         if t > maxT {
             t = maxT
-            if action == .play { action = .slow }
-        }
-        // 积压过大时允许小幅快进（有限）
-        if buffered > maxDelay {
-            let ideal = max(0, live - targetDelay)
-            let delta = min(maxSlewPerCall, max(0, ideal - t))
-            t += delta
-            action = .dropOld
+            action = .holdLast
         }
 
         mediaAnchor = t
@@ -256,8 +224,6 @@ final class AVSyncClock {
     func shouldFreezeAudio() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        // 仅「视频此刻仍停」才冻。禁止用 lastAction==freezeAudio 闩住：
-        // noteVideoPTS 清掉 frozenForVideo 后、下一次 mediaTime 前，闩锁会让 AU 持续写静音 → 注入 pk=0。
         if frozenForVideo { return true }
         if lastVideoPTS >= 0, (CACurrentMediaTime() - lastVideoWall) > videoStallSec {
             return true
@@ -284,7 +250,18 @@ final class AVSyncClock {
     func skewMs() -> Double { lastSkewMs }
     func bufferedMs() -> Double { lastBufferedMs }
 
-    /// 只读诊断快照（不改门限/时钟状态）
+    /// 面板用：明确不是软变速
+    func actionPanelLabel() -> String {
+        switch lastAction {
+        case .play: return "play"
+        case .holdLast: return "hold-last"
+        case .freezeAudio: return "freeze-audio"
+        case .dropOld: return "drop-old"
+        case .waitVideo: return "wait-video"
+        case .silence: return "silence"
+        }
+    }
+
     func diagSnapshot() -> (epoch: Double, lastVideoPTS: Double, lastAudioEndPTS: Double) {
         lock.lock()
         defer { lock.unlock() }
@@ -305,8 +282,6 @@ final class AVSyncClock {
     }
 
     private func liveEdgeLocked() -> Double {
-        // 呈现以视频为主：音频超前已在 shouldAccept 拦住；
-        // 音频落后过多时不拖死直播沿（否则又会 wait-video）。
         if lastVideoPTS >= 0 {
             if lastAudioEndPTS >= 0, lastAudioEndPTS + 0.6 >= lastVideoPTS {
                 return min(lastVideoPTS, lastAudioEndPTS)

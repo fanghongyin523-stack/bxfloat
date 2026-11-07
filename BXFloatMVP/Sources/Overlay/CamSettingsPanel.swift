@@ -246,7 +246,7 @@ final class CamSettingsPanel: UIView {
             "收帧 \(store.frameCount) · 更新 \(ageText) · 音频包 \(audioPkts)",
             "画面：\(replaceOn ? "开" : "关") · 挂钩 \(CameraReplaceHooks.wrapCount)/回调 \(CameraReplaceHooks.callbackCount)/写 \(CameraReplaceHooks.paintCount)",
             "麦：\(audioName) · AU写 \(BXFloatMicAUPaintCount()) · AQ写 \(BXFloatMicAQPaintCount()) · 延迟 \(String(format: "%.1f", clock.latencySeconds()))s · 沿差 \(String(format: "%.0f", clock.estimatedAVDelta() * 1000))ms",
-            "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionName()) · \(CamAudioRingMonitor.shared.statusLine)",
+            "ring 画\(vBuf)ms/声\(aBuf)ms · skew \(String(format: "%.0f", clock.skewMs()))ms · \(clock.actionPanelLabel()) · \(CamAudioRingMonitor.shared.statusLine)",
             diag.0,
             diag.1,
             diag.2,
@@ -262,7 +262,7 @@ final class CamSettingsPanel: UIView {
                         && BXFloatMicAQPaintCount() == 0
                         && MicReplaceHooks.paintCount == 0
                         ? "麦未写入：进「开直播」页试麦，或杀抖音重进"
-                        : "运行中 · 软变速跟 ring")),
+                        : "运行中 · \(clock.actionPanelLabel()) 连续播出")),
         ].joined(separator: "\n")
     }
 
