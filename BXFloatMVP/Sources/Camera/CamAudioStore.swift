@@ -356,7 +356,7 @@ final class CamAudioStore {
         if AVSyncClock.shared.shouldFreezeAudio(), bufferedSeconds() < 0.05 {
             fillHoldSamples(dst, frames: frames, channels: auCh)
             CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
-            return abs(Int32(lastL))
+            return max(1, abs(Int32(lastL)))
         }
 
         var got = 0
@@ -372,7 +372,7 @@ final class CamAudioStore {
             lock.unlock()
             fillHoldSamples(dst, frames: frames, channels: auCh)
             CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
-            return abs(Int32(lastL))
+            return max(1, abs(Int32(lastL)))
         }
         let lastEnd = last.pts + frameDuration(last)
         let firstPts = first.pts
@@ -400,20 +400,23 @@ final class CamAudioStore {
             seamJump = true
         }
         startPTS = playhead
-        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+        var endPTS = startPTS
+        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
         peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
         if got < needStore / 2 {
             // 缺口：不 force 最新块（会错位）；续读 desired
             playhead = desired
             startPTS = desired
-            got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+            endPTS = desired
+            got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
             peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
             seamJump = true
         }
         let consumed = min(needStore, got)
         if consumed > 0 {
             localStore = Array(scratchStore.prefix(consumed * ringCh))
-            playhead = startPTS + Double(consumed) / Double(ringRate)
+            // 用 peek 真实媒体终点推进，避免包间跳读把 playhead 甩后 → 短剁
+            playhead = endPTS
         }
         lock.unlock()
 
@@ -422,7 +425,8 @@ final class CamAudioStore {
             CamPipelineDiag.shared.notePaintGate(
                 ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
             )
-            return abs(Int32(lastL))
+            // 已写 hold：峰按末样；禁回 0 触发 AU 侧静音垫
+            return max(1, abs(Int32(lastL)))
         }
 
         // 环率=AU：直拷，禁止 Hermite 拧内容
@@ -443,7 +447,8 @@ final class CamAudioStore {
             let seedR = haveFrames > 0
                 ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
                 : lastR
-            fadePadInterleaved(
+            // 欠载：末样 hold，禁止淡向 0 垫静音缝
+            holdPadInterleaved(
                 &laid, channels: auCh,
                 fromFrame: haveFrames, toFrame: frames,
                 seedL: seedL, seedR: seedR
@@ -453,9 +458,11 @@ final class CamAudioStore {
             laid = Array(laid.prefix(frames * auCh))
         }
 
-        // 仅硬跳才 ~4ms 交叉淡；连续块不碰
-        if seamJump {
-            let fadeN = min(frames, max(1, dstRate / 250))
+        // 接缝 / 硬跳：~10ms 交叉淡；相邻块大台阶也抹 ~2ms（消 30ms 级微断听感）
+        let stepL = frames > 0 ? abs(Int(laid[0]) - Int(lastL)) : 0
+        let needFade = seamJump || stepL > 2500
+        if needFade {
+            let fadeN = min(frames, max(1, seamJump ? (dstRate / 100) : (dstRate / 500)))
             for i in 0..<fadeN {
                 let a = Double(i + 1) / Double(fadeN)
                 let inv = 1.0 - a
@@ -470,6 +477,8 @@ final class CamAudioStore {
 
         // 一阶 DC 阻断（R≈0.995），消大直流/电流感；不改增益曲线
         applyDCBlocker(&laid, frames: frames, channels: auCh)
+        // 禁止顶满削波：软顶 ~-1.2dBFS（消全频尖刺/脏写，非调音质）
+        applyPeakCeiling(&laid, frames: frames, channels: auCh)
 
         if frames > 0 {
             lastL = laid[(frames - 1) * auCh]
@@ -535,6 +544,20 @@ final class CamAudioStore {
         }
     }
 
+    /// 软顶满：DC 后偶发顶到 ±32767 会全频尖刺；压到 ~-1.2dBFS
+    private func applyPeakCeiling(_ buf: inout [Int16], frames: Int, channels: Int) {
+        let lim = 28500.0
+        let room = 32767.0 - lim
+        let ch = max(1, channels)
+        for i in 0..<(frames * ch) {
+            let x = Double(buf[i])
+            let ax = abs(x)
+            guard ax > lim else { continue }
+            let y = lim + (ax - lim) * room / ((ax - lim) + room)
+            buf[i] = Int16(clamping: Int((x < 0 ? -y : y).rounded()))
+        }
+    }
+
     /// AU 写后回灌听:注（与录制轨同内容）
     func noteInjectPCMFromAU(_ samples: [Int16], frames: Int, channels: Int, rate: Int) {
         noteInjectTap(samples, frames: frames, channels: channels, rate: rate)
@@ -566,34 +589,32 @@ final class CamAudioStore {
             monitorPlayhead = desired
         }
         let start = monitorPlayhead
-        let got = peekStartingLocked(at: start, into: &scratchStore, frames: frames)
+        var endPTS = start
+        let got = peekStartingLocked(at: start, into: &scratchStore, frames: frames, endPTS: &endPTS)
         if got <= 0 {
             monitorPlayhead = desired
             return 0
         }
-        monitorPlayhead = start + Double(got) / Double(ringRate)
+        monitorPlayhead = endPTS
         if monitorPlayhead > lastEnd {
             monitorPlayhead = max(first.pts, lastEnd - dur)
         }
-        let laid = layoutChannels(
+        var laid = layoutChannels(
             Array(scratchStore.prefix(got * ringCh)),
             fromCh: ringCh, toCh: outCh, frames: frames
         )
-        let n = min(frames * outCh, laid.count)
-        for i in 0..<n { dst[i] = laid[i] }
-        if n < frames * outCh {
-            let seedL = n >= outCh ? laid[n - outCh] : 0
-            let seedR = (outCh > 1 && n >= outCh) ? laid[n - outCh + 1] : seedL
-            var pad = Array(repeating: Int16(0), count: frames * outCh)
-            for i in 0..<n { pad[i] = laid[i] }
-            fadePadInterleaved(
-                &pad, channels: outCh,
-                fromFrame: n / outCh, toFrame: frames,
+        let have = min(frames, got)
+        if have < frames {
+            let seedL = have > 0 ? laid[(have - 1) * outCh] : 0
+            let seedR = (outCh > 1 && have > 0) ? laid[(have - 1) * outCh + 1] : seedL
+            holdPadInterleaved(
+                &laid, channels: outCh,
+                fromFrame: have, toFrame: frames,
                 seedL: seedL, seedR: seedR
             )
-            for i in 0..<(frames * outCh) { dst[i] = pad[i] }
         }
-        return Self.peakOf(Array(UnsafeBufferPointer(start: dst, count: frames * outCh)), frames: frames, channels: outCh)
+        for i in 0..<(frames * outCh) { dst[i] = laid[i] }
+        return Self.peakOf(laid, frames: frames, channels: outCh)
     }
 
     /// 注听：独立读头连续消耗注入 tap（与环听对照分锅）
@@ -765,13 +786,15 @@ final class CamAudioStore {
         // 全程持锁：peek→本地拷贝，杜绝多 AU 踩共享 scratch 写成静音
         lock.lock()
         ringPk = peakOfLastChunkLocked()
-        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+        var endPTS = startPTS
+        got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
         peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
         if got <= 0 || peekPk <= 200 {
             if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
                 playhead = snap + max(0, duration)
                 startPTS = snap
-                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+                endPTS = snap
+                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
                 peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
             }
         }
@@ -782,6 +805,8 @@ final class CamAudioStore {
                 got = tailGot
                 peekPk = tailPk
             }
+        } else {
+            playhead = endPTS
         }
         // 禁止 copyLatest force：错位内容；欠载走包络续尾
         if got > 0 {
@@ -820,7 +845,7 @@ final class CamAudioStore {
             )
         }
 
-        // 声道布局：ringCh → auCh；不足衰减续尾（禁静音垫缝）
+        // 声道布局：ringCh → auCh；不足末样 hold（禁静音垫缝）
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: outFrames)
         let haveFrames = min(outFrames, rateConverted.count / max(1, ringCh))
         if haveFrames < outFrames {
@@ -828,7 +853,7 @@ final class CamAudioStore {
             let seedR = haveFrames > 0
                 ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
                 : lastR
-            fadePadInterleaved(
+            holdPadInterleaved(
                 &laid, channels: auCh,
                 fromFrame: haveFrames, toFrame: outFrames,
                 seedL: seedL, seedR: seedR
@@ -836,6 +861,8 @@ final class CamAudioStore {
         } else if laid.count > outFrames * auCh {
             laid = Array(laid.prefix(outFrames * auCh))
         }
+        applyDCBlocker(&laid, frames: outFrames, channels: auCh)
+        applyPeakCeiling(&laid, frames: outFrames, channels: auCh)
         for i in 0..<(outFrames * auCh) { scratchOut[i] = laid[i] }
 
         // 从真欠载恢复：~30ms 淡入（禁止整段乘 0）
@@ -888,8 +915,10 @@ final class CamAudioStore {
         let lastEnd = last.pts + frameDuration(last)
         let dur = Double(frames) / Double(storeRate)
         let start = max(first.pts, lastEnd - dur)
-        playhead = lastEnd
-        return peekStartingLocked(at: start, into: &buffer, frames: frames)
+        var end = start
+        let got = peekStartingLocked(at: start, into: &buffer, frames: frames, endPTS: &end)
+        playhead = got > 0 ? end : lastEnd
+        return got
     }
 
     private func peakOfLastChunkLocked() -> Int32 {
@@ -1257,10 +1286,23 @@ final class CamAudioStore {
         }
     }
 
-    /// 取出 frames 帧交错 PCM 到 buffer（长度 frames * storeChannels）
-    private func peekStartingLocked(at startPTS: Double, into buffer: inout [Int16], frames: Int) -> Int {
+    /// 取出 frames 帧交错 PCM 到 buffer（长度 frames * storeChannels）。
+    /// endPTS = 媒体读头真实终点（含包间 hold），供 playhead 连续推进。
+    private func peekStartingLocked(
+        at startPTS: Double,
+        into buffer: inout [Int16],
+        frames: Int,
+        endPTS: inout Double
+    ) -> Int {
         let ch = max(1, storeChannels)
-        guard frames > 0, !chunks.isEmpty else { return 0 }
+        guard frames > 0, !chunks.isEmpty else {
+            endPTS = startPTS
+            return 0
+        }
+        let need = frames * ch
+        if buffer.count < need {
+            buffer = Array(repeating: 0, count: need)
+        }
 
         var t = startPTS
         if !startPTS.isFinite || startPTS < 0 {
@@ -1272,10 +1314,15 @@ final class CamAudioStore {
             t = firstPts
         }
         pruneLocked(before: t - 0.5)
-        guard !chunks.isEmpty else { return 0 }
+        guard !chunks.isEmpty else {
+            endPTS = t
+            return 0
+        }
 
         var written = 0
         var cursor = t
+        var holdL = lastL
+        var holdR = lastR
         for chunk in chunks {
             if written >= frames { break }
             let chunkCh = max(1, chunk.channels)
@@ -1283,8 +1330,27 @@ final class CamAudioStore {
             let chunkEnd = chunk.pts + Double(chunkFrames) / Double(storeRate)
             if chunkEnd <= cursor { continue }
             if chunk.pts > cursor + 0.001 {
-                // 任何缺口都跳到包头读真 PCM；禁止静音/重复样点硬垫（短断续+电流声）
-                cursor = chunk.pts
+                // 包间缺口必须占时间轴（禁跳读甩后 playhead→短剁）
+                // <80ms：末样 hold 抹微缝；≥80ms：静音占位（切歌等源侧长洞原样保留）
+                let gapSec = chunk.pts - cursor
+                let gapFrames = min(frames - written, max(0, Int((gapSec * Double(storeRate)).rounded())))
+                let micro = gapSec < 0.080
+                if gapFrames > 0 {
+                    for i in 0..<gapFrames {
+                        let base = (written + i) * ch
+                        if micro {
+                            buffer[base] = holdL
+                            if ch > 1 { buffer[base + 1] = holdR }
+                        } else {
+                            buffer[base] = 0
+                            if ch > 1 { buffer[base + 1] = 0 }
+                        }
+                    }
+                    written += gapFrames
+                    cursor += Double(gapFrames) / Double(storeRate)
+                }
+                if written >= frames { break }
+                cursor = max(cursor, chunk.pts)
             }
             let offsetSec = max(0, cursor - chunk.pts)
             var sampleIdx = Int((offsetSec * Double(storeRate)).rounded(.down))
@@ -1305,7 +1371,12 @@ final class CamAudioStore {
             }
             written += n
             cursor += Double(n) / Double(storeRate)
+            if n > 0 {
+                holdL = buffer[(written - 1) * ch]
+                if ch > 1 { holdR = buffer[(written - 1) * ch + 1] }
+            }
         }
+        endPTS = cursor
         return written
     }
 
@@ -1347,7 +1418,8 @@ final class CamAudioStore {
         return out
     }
 
-    private func fadePadInterleaved(
+    /// 欠载垫：末样 hold，禁止淡向 0（静音缝=可闻短剁）
+    private func holdPadInterleaved(
         _ buf: inout [Int16],
         channels: Int,
         fromFrame: Int,
@@ -1358,13 +1430,14 @@ final class CamAudioStore {
         let n = toFrame - fromFrame
         guard n > 0 else { return }
         let ch = max(1, channels)
+        if buf.count < toFrame * ch {
+            buf.append(contentsOf: repeatElement(Int16(0), count: toFrame * ch - buf.count))
+        }
         for i in 0..<n {
-            let a = 1.0 - Double(i + 1) / Double(n + 1)
             let base = (fromFrame + i) * ch
-            buf[base] = Int16(clamping: Int(Double(seedL) * a))
-            if ch > 1 {
-                buf[base + 1] = Int16(clamping: Int(Double(seedR) * a))
-            }
+            buf[base] = seedL
+            if ch > 1 { buf[base + 1] = seedR }
+            for c in 2..<ch { buf[base + c] = seedL }
         }
     }
 

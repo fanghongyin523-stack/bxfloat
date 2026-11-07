@@ -323,8 +323,22 @@ static void writeOneSample(void *dst, int16_t s, int bps, int isFloat) {
     } else if (bps == 4 && !isFloat) {
         int32_t v = ((int32_t)s) << 16;
         memcpy(dst, &v, 4);
+    } else if (bps == 8 && isFloat) {
+        // 偶发 double 平面：按 float 写低 4 字节，高位清 0，避免脏半样
+        float f = (float)s / 32768.0f;
+        uint8_t *p = (uint8_t *)dst;
+        memset(p, 0, 8);
+        memcpy(p, &f, 4);
     } else {
-        memset(dst, 0, (size_t)bps > 0 ? (size_t)bps : 1);
+        // 未知宽度：按末样重复写满，禁止 memset 0 脏缝
+        uint8_t *p = (uint8_t *)dst;
+        if (bps >= 4) {
+            float f = (float)s / 32768.0f;
+            for (int off = 0; off + 4 <= bps; off += 4) memcpy(p + off, &f, 4);
+        } else if (bps > 0) {
+            memset(p, 0, (size_t)bps);
+            if (bps >= 2) memcpy(p, &s, 2);
+        }
     }
 }
 
@@ -374,26 +388,21 @@ static void paintABL(
     }
 
     // 1) 拉推流 s16（固定延迟连续；欠载已 hold 末样）；2) 按 AU 几何整缓冲覆盖
+    // 禁止 pullPk<=0 再 memset 静音垫——那是录中可闻短剁/电流缝的主因之一
     int32_t pullPk = BXFloatMicPullS16(pcm, (int)frames, outCh, rate);
     if (pullPk <= 0) {
-        // 仍无内容：不交还原麦（录轨会变原麦）；写 0 并记峰
-        for (UInt32 bi = 0; bi < ioData->mNumberBuffers; bi++) {
-            AudioBuffer *buf = &ioData->mBuffers[bi];
-            if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
-        }
-        BXFloatAQNotePaintDstPeak(0);
         static _Atomic int sPullZeroLog = 0;
         int n = atomic_fetch_add(&sPullZeroLog, 1);
         if (n < 8 || (n % 64) == 0) {
-            NSLog(@"BXFloatMic PULL-ZERO hold-zero rate=%.0f ch=%d", rate, outCh);
+            NSLog(@"BXFloatMic PULL-HOLD pk=%d rate=%.0f ch=%d (write hold, no zero-pad)",
+                  (int)pullPk, rate, outCh);
         }
-        return;
     }
 
     int planeBps = bytesPerSample;
     if (isFloat && planeBps < 4) planeBps = 4;
 
-    // 整缓冲覆盖写满：禁止残留原麦与注入拼缝
+    // 整缓冲覆盖写满：禁止残留原麦与注入拼缝；禁脏静音垫
     if (nonInterleaved) {
         int planes = (int)ioData->mNumberBuffers;
         for (int p = 0; p < planes; p++) {
