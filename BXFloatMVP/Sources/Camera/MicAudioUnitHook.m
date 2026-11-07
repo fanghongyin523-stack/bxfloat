@@ -315,29 +315,43 @@ static void tapMicABL(
 
 /// 把一帧 s16 写入目标（按真实 bps/float）
 static void writeOneSample(void *dst, int16_t s, int bps, int isFloat) {
+    // s16 侧已顶满；float 再夹到 ±0.40（约 -8dBFS），防抖音后级再推爆成电流尖刺
     if (isFloat && bps >= 4) {
         float f = (float)s / 32768.0f;
+        if (f > 0.40f) f = 0.40f;
+        if (f < -0.40f) f = -0.40f;
         memcpy(dst, &f, 4);
     } else if (bps == 2) {
-        memcpy(dst, &s, 2);
+        int16_t v = s;
+        if (v > 13000) v = 13000;
+        if (v < -13000) v = -13000;
+        memcpy(dst, &v, 2);
     } else if (bps == 4 && !isFloat) {
-        int32_t v = ((int32_t)s) << 16;
+        int16_t c = s;
+        if (c > 13000) c = 13000;
+        if (c < -13000) c = -13000;
+        int32_t v = ((int32_t)c) << 16;
         memcpy(dst, &v, 4);
     } else if (bps == 8 && isFloat) {
-        // 偶发 double 平面：按 float 写低 4 字节，高位清 0，避免脏半样
         float f = (float)s / 32768.0f;
+        if (f > 0.40f) f = 0.40f;
+        if (f < -0.40f) f = -0.40f;
         uint8_t *p = (uint8_t *)dst;
         memset(p, 0, 8);
         memcpy(p, &f, 4);
     } else {
-        // 未知宽度：按末样重复写满，禁止 memset 0 脏缝
         uint8_t *p = (uint8_t *)dst;
         if (bps >= 4) {
             float f = (float)s / 32768.0f;
+            if (f > 0.40f) f = 0.40f;
+            if (f < -0.40f) f = -0.40f;
             for (int off = 0; off + 4 <= bps; off += 4) memcpy(p + off, &f, 4);
         } else if (bps > 0) {
             memset(p, 0, (size_t)bps);
-            if (bps >= 2) memcpy(p, &s, 2);
+            int16_t v = s;
+            if (v > 13000) v = 13000;
+            if (v < -13000) v = -13000;
+            if (bps >= 2) memcpy(p, &v, 2);
         }
     }
 }

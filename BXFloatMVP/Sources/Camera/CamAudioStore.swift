@@ -535,16 +535,26 @@ final class CamAudioStore {
         }
     }
 
-    /// 软顶满：DC 后偶发顶到 ±32767 会全频尖刺；压到 ~-1.2dBFS
+    /// 硬顶满：给抖音编码留余量。录回放顶 0dBFS=注入过烫→削波/电流尖刺。
+    /// 目标约 -8dBFS（±13000），不是「调响」，是传声不脏。
     private func applyPeakCeiling(_ buf: inout [Int16], frames: Int, channels: Int) {
-        let lim = 28500.0
-        let room = 32767.0 - lim
+        let lim = 13_000.0
+        let knee = 9_000.0
         let ch = max(1, channels)
         for i in 0..<(frames * ch) {
             let x = Double(buf[i])
             let ax = abs(x)
-            guard ax > lim else { continue }
-            let y = lim + (ax - lim) * room / ((ax - lim) + room)
+            if ax <= knee {
+                continue
+            }
+            let y: Double
+            if ax >= lim {
+                y = lim
+            } else {
+                // knee→lim 软过渡，过 lim 硬夹
+                let t = (ax - knee) / (lim - knee)
+                y = knee + (lim - knee) * (t * (2.0 - t))
+            }
             buf[i] = Int16(clamping: Int((x < 0 ? -y : y).rounded()))
         }
     }
@@ -1331,7 +1341,8 @@ final class CamAudioStore {
         }
     }
 
-    /// 块级线性 SRC（格式对齐）。不是播头 soft-rate，禁止用它追 ring。
+    /// 块级 SRC（仅格式对齐，禁止当播头 soft-rate）。
+    /// 用 Catmull-Rom，比线性少发闷/齿音；仍只在入环或异率 AU 时调用一次。
     private func resampleLinearInterleaved(
         _ input: [Int16],
         channels: Int,
@@ -1345,15 +1356,25 @@ final class CamAudioStore {
         let outFrames = max(1, Int((Double(inFrames) * Double(dstRate) / Double(srcRate)).rounded()))
         var out = [Int16](repeating: 0, count: outFrames * ch)
         let last = max(0, inFrames - 1)
+        func at(_ frame: Int, _ c: Int) -> Double {
+            let f = min(max(frame, 0), last)
+            return Double(input[f * ch + c])
+        }
         for c in 0..<ch {
             for i in 0..<outFrames {
                 let srcPos = Double(i) * Double(srcRate) / Double(dstRate)
-                let i0 = min(max(Int(srcPos.rounded(.down)), 0), last)
-                let i1 = min(i0 + 1, last)
-                let t = srcPos - Double(i0)
-                let y0 = Double(input[i0 * ch + c])
-                let y1 = Double(input[i1 * ch + c])
-                out[i * ch + c] = Int16(clamping: Int((y0 + (y1 - y0) * t).rounded()))
+                let i1 = min(max(Int(srcPos.rounded(.down)), 0), last)
+                let i0 = max(i1 - 1, 0)
+                let i2 = min(i1 + 1, last)
+                let i3 = min(i1 + 2, last)
+                let t = srcPos - Double(i1)
+                let y0 = at(i0, c), y1 = at(i1, c), y2 = at(i2, c), y3 = at(i3, c)
+                let a0 = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3
+                let a1 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3
+                let a2 = -0.5 * y0 + 0.5 * y2
+                let a3 = y1
+                let y = ((a0 * t + a1) * t + a2) * t + a3
+                out[i * ch + c] = Int16(clamping: Int(y.rounded()))
             }
         }
         return out

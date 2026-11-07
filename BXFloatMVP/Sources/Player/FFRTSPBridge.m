@@ -267,17 +267,20 @@ static int BXFloatFFInterrupt(void *opaque) {
                     if (openFmt == AV_SAMPLE_FMT_NONE) {
                         openFmt = AV_SAMPLE_FMT_FLTP;
                     }
+                    // 尽量直接出 AU 目标率，避免环内再线性/块 SRC 发闷
+                    int openWant = (int)BXFloatAudioTargetRate();
+                    if (openWant < 8000) openWant = 48000;
                     swr = swr_alloc_set_opts(
-                        NULL, outLayout, AV_SAMPLE_FMT_S16, 48000,
+                        NULL, outLayout, AV_SAMPLE_FMT_S16, openWant,
                         inLayout, openFmt, inRate, 0, NULL
                     );
                     if (swr) {
-                        av_opt_set_int(swr, "filter_size", 64, 0);
-                        av_opt_set_int(swr, "phase_shift", 12, 0);
-                        av_opt_set_double(swr, "cutoff", 0.96, 0);
+                        av_opt_set_int(swr, "filter_size", 128, 0);
+                        av_opt_set_int(swr, "phase_shift", 14, 0);
+                        av_opt_set_double(swr, "cutoff", 0.92, 0);
                     }
                     audioOutCh = outCh;
-                    audioOutRate = 48000;
+                    audioOutRate = openWant;
                     audioInLayoutBlock = inLayout;
                     audioInFmtBlock = openFmt;
                     audioInRateBlock = inRate;
@@ -468,9 +471,9 @@ static int BXFloatFFInterrupt(void *opaque) {
                             inLayout, inFmt, inRate, 0, NULL
                         );
                         if (nw) {
-                            av_opt_set_int(nw, "filter_size", 64, 0);
-                            av_opt_set_int(nw, "phase_shift", 12, 0);
-                            av_opt_set_double(nw, "cutoff", 0.96, 0);
+                            av_opt_set_int(nw, "filter_size", 128, 0);
+                            av_opt_set_int(nw, "phase_shift", 14, 0);
+                            av_opt_set_double(nw, "cutoff", 0.92, 0);
                         }
                         if (nw && swr_init(nw) >= 0) {
                             if (swrBlock) swr_free(&swrBlock);
