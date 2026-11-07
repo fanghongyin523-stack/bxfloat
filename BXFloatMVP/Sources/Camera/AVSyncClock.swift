@@ -29,7 +29,7 @@ final class AVSyncClock {
     private var frozenForVideo = false
     private var warmupWallStart: CFTimeInterval = 0
 
-    /// 目标呈现滞后（与参考 ~1s 同观感；音频侧另有 ~1.2s 固定延迟拷贝）
+    /// 目标呈现滞后（对标 VCamTang target_ms≈1000；音频固定延迟同为 1.0s）
     private let targetDelay: Double = 1.0
     /// 缓冲过高：drop-old 一次跳到目标延迟（不加速拧采样）
     private let maxDelay: Double = 2.2

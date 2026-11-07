@@ -114,11 +114,60 @@ static _Atomic int64_t gAUStart = 0;
 static _Atomic int gInstalled = 0;
 static _Atomic int gFmtLogTick = 0;
 static _Atomic int gAQFmtLogTick = 0;
+/// 对标 VCamTang AUDIOPATH mode=single：0=未定 1=AU 2=AQ；仅赢家推进环播头
+static _Atomic int gAudioConsumer = 0;
+static _Atomic int64_t gAUPathTicks = 0;
+static _Atomic int64_t gAQPathTicks = 0;
+static _Atomic int64_t gConsumerElectAt = 0;
 // AU/AQ 回调禁止 malloc：固定交错临时区（≤4096 帧 × 8 平面 × 4 字节）
 static uint8_t gPaintTmp[4096 * 8 * 4];
 
+/// path: 1=AU 2=AQ。返回 1 才允许 pull/替麦；输家静音且不拉环。
+static int BXFloatAudioPathMayConsume(int path) {
+    if (path != 1 && path != 2) return 0;
+    int64_t tick = (path == 1)
+        ? atomic_fetch_add(&gAUPathTicks, 1) + 1
+        : atomic_fetch_add(&gAQPathTicks, 1) + 1;
+    int cur = atomic_load(&gAudioConsumer);
+    if (cur == 0) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong(&gAudioConsumer, &expected, path)) {
+            atomic_store(&gConsumerElectAt, tick);
+            NSLog(@"[BXFloat][AUDIOPATH] consumer=%d previous=0 mode=single", path);
+            return 1;
+        }
+        cur = atomic_load(&gAudioConsumer);
+    }
+    if (cur == path) return 1;
+    // 赢家长期不活跃而本路活跃 → 切到本路（防抖音换麦路径）
+    int64_t au = atomic_load(&gAUPathTicks);
+    int64_t aq = atomic_load(&gAQPathTicks);
+    int64_t electAt = atomic_load(&gConsumerElectAt);
+    int64_t now = au + aq;
+    if (now - electAt > 400) {
+        int prefer = (aq > au * 2) ? 2 : ((au > aq * 2) ? 1 : cur);
+        if (prefer != cur && prefer == path) {
+            atomic_store(&gAudioConsumer, prefer);
+            atomic_store(&gConsumerElectAt, now);
+            NSLog(@"[BXFloat][AUDIOPATH] consumer=%d previous=%d mode=single", prefer, cur);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int BXFloatMicAudioConsumer(void) {
+    return atomic_load(&gAudioConsumer);
+}
+
 void BXFloatMicAUSetMode(int mode) {
     atomic_store(&gMode, mode);
+    if (mode != 1) {
+        atomic_store(&gAudioConsumer, 0);
+        atomic_store(&gAUPathTicks, 0);
+        atomic_store(&gAQPathTicks, 0);
+        atomic_store(&gConsumerElectAt, 0);
+    }
 }
 
 int64_t BXFloatMicAUPaintCount(void) {
@@ -346,9 +395,20 @@ static void paintABL(
     AudioBufferList *ioData,
     UInt32 frames,
     const AudioStreamBasicDescription *asbd,
-    int mode
+    int mode,
+    int path // 1=AU 2=AQ
 ) {
     if (!ioData || frames == 0 || mode == 0 || ioData->mNumberBuffers == 0) return;
+
+    // 对标 VCamTang mode=single：非消费者静音且不拉环（防双路抢播头拧节奏）
+    if (mode == 1 && !BXFloatAudioPathMayConsume(path)) {
+        for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
+            AudioBuffer *buf = &ioData->mBuffers[i];
+            if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
+        }
+        BXFloatAQNotePaintDstPeak(0);
+        return;
+    }
 
     int chInBuf = 1, bytesPerSample = 4, isFloat = 1, mismatch = 0;
     double rate = 48000;
@@ -616,7 +676,7 @@ static OSStatus hooked_AudioUnitRender(
     }
 
     atomic_fetch_add(&gCallback, 1);
-    paintABL(ioData, inNumberFrames, &asbd, mode);
+    paintABL(ioData, inNumberFrames, &asbd, mode, 1 /*AU*/);
     // 必须在 paint 之后、return 之前采同一块 ioData（分清空写 / 探针错位 / 事后清零）
     probeInjectAfterPaint(ioData, inNumberFrames, &asbd);
     atomic_fetch_add(&gPaint, 1);
@@ -711,7 +771,7 @@ static void hooked_AudioQueueInputCallback(
             }
 
             // 系统已填好原麦 → 原地改写后再交给宿主回调（与 VCam AQ 路径同序）
-            paintABL(&abl, frames, &asbd, mode);
+            paintABL(&abl, frames, &asbd, mode, 2 /*AQ*/);
             atomic_fetch_add(&gAQPaint, 1);
         }
     } else if (mode == 0 && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0) {

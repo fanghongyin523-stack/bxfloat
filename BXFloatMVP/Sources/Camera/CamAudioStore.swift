@@ -23,18 +23,19 @@ final class CamAudioStore {
     /// 入环后活延迟上限：超过则剪旧，保持 ~目标延迟可读
     private let capLiveLatencySec: Double = 1.80
     private let defaultRate = 48_000
-    /// AU 锁定后的环缓采样率；未锁定前用 48k
-    private var lockedRate: Int = 0
-    private var lockedAUChannels: Int = 0
-    private var targetLocked = false
+    /// 解码入环采样率（对标 VCamTang：环内保持素材钟，播出再 SRC）
+    private var decodeRate: Int = 0
+    /// AU/AQ 仅提示目标率；禁止改环钟 / 清环
+    private var auHintRate: Int = 0
+    private var auHintChannels: Int = 0
     /// 对外：当前环缓采样率
-    var storeRate: Int { lockedRate > 0 ? lockedRate : defaultRate }
-    /// 环缓声道（1 或 2）；由首包 / AU 锁定决定
+    var storeRate: Int { decodeRate > 0 ? decodeRate : defaultRate }
+    /// 环缓声道（1 或 2）；由首包决定
     private(set) var storeChannels = 1
 
     private var playhead: Double = -1
-    /// 固定目标延迟连续读（~1.2s，对标参考 1～1.5s）
-    private let fixedLatencySec: Double = 1.20
+    /// 固定目标延迟连续读（对标 VCamTang target_ms≈1000）
+    private let fixedLatencySec: Double = 1.00
     private var lastL: Int16 = 0
     private var lastR: Int16 = 0
     /// DC 阻断状态（消面板大 dc，非增益/NR）
@@ -64,38 +65,23 @@ final class CamAudioStore {
 
     private init() {}
 
-    /// AU/采集首次（或变更）锁定目标格式：之后入环按此采样率，注入侧直拷
+    /// AU/AQ 只记录宿主格式提示；环钟跟解码（对标 VCamTang：禁止 AU 锁率清环重采样）。
     func lockTargetFromAU(sampleRate: Int, channels: Int, isFloat: Bool) {
         let rate = sampleRate > 0 ? sampleRate : defaultRate
         let ch = max(1, min(2, channels))
         lock.lock()
-        let prevRate = lockedRate > 0 ? lockedRate : defaultRate
-        let rateChanged = targetLocked && lockedRate > 0 && lockedRate != rate
-        let firstLock = !targetLocked
-        if firstLock || rateChanged {
-            lockedRate = rate
-            lockedAUChannels = ch
-            targetLocked = true
-            // 首次 AU 锁到与默认/旧环不同的速率时也清环：否则 48k 块按 44.1k 读 PTS，peek 易空/静音
-            let mustFlush = rateChanged || (firstLock && prevRate != rate && (!chunks.isEmpty || !pending.isEmpty))
-            if mustFlush {
-                chunks.removeAll(keepingCapacity: true)
-                pending.removeAll(keepingCapacity: true)
-                playhead = -1
-                monitorPlayhead = -1
-                envelope = 1.0
-                dcX1L = 0; dcY1L = 0; dcX1R = 0; dcY1R = 0
-            }
+        let changed = auHintRate != rate || auHintChannels != ch
+        auHintRate = rate
+        auHintChannels = ch
+        let ring = storeRate
+        lock.unlock()
+        if changed {
             let note = String(
-                format: "AU-lock %dHz %dch float=%d → ring@%dHz flush=%d",
-                rate, ch, isFloat ? 1 : 0, storeRate, mustFlush ? 1 : 0
+                format: "AU-hint %dHz %dch float=%d ring@%dHz (no flush)",
+                rate, ch, isFloat ? 1 : 0, ring
             )
-            lock.unlock()
             CamPipelineDiag.shared.noteAudioFormat(note)
             NSLog("BXFloatAudio %@", note)
-        } else {
-            if lockedAUChannels != ch { lockedAUChannels = ch }
-            lock.unlock()
         }
     }
 
@@ -127,9 +113,9 @@ final class CamAudioStore {
         envelope = 1.0
         dcX1L = 0; dcY1L = 0; dcX1R = 0; dcY1R = 0
         storeChannels = 1
-        lockedRate = 0
-        lockedAUChannels = 0
-        targetLocked = false
+        decodeRate = 0
+        auHintRate = 0
+        auHintChannels = 0
         lastFormatNote = ""
         injectTap.removeAll(keepingCapacity: true)
         injectTapFrames = 0
@@ -161,8 +147,7 @@ final class CamAudioStore {
         }
 
         let rate = sampleRate > 0 ? sampleRate : defaultRate
-        let ringRate = storeRate
-        // 解码后音质：用第一声道峰/DC 代表源（对齐前）
+        // 解码后音质探针（对齐前）
         var probe = [Int16](repeating: 0, count: frames)
         for i in 0..<frames { probe[i] = interleaved[i * srcCh] }
         probe.withUnsafeBufferPointer { buf in
@@ -176,7 +161,18 @@ final class CamAudioStore {
             }
         }
 
-        // 入环一次块级 SRC 对齐 AU 率（格式平面）；禁止在播出时钟上 soft-rate
+        // 环钟=素材采样率；异率源极少见，入环一次 SRC。播出侧再对 AU 做一次。
+        lock.lock()
+        if decodeRate <= 0 {
+            decodeRate = rate
+        }
+        let ringRate = decodeRate > 0 ? decodeRate : defaultRate
+        if chunks.isEmpty, pending.isEmpty {
+            storeChannels = srcCh
+        }
+        let ringCh = storeChannels
+        lock.unlock()
+
         let pcm: [Int16]
         if rate == ringRate {
             pcm = interleaved
@@ -184,18 +180,6 @@ final class CamAudioStore {
             pcm = resampleLinearInterleaved(interleaved, channels: srcCh, from: rate, to: ringRate)
         }
         guard !pcm.isEmpty else { return }
-
-        lock.lock()
-        if chunks.isEmpty, pending.isEmpty {
-            // AU 已锁声道则优先跟 AU；否则跟源
-            if lockedAUChannels > 0 {
-                storeChannels = lockedAUChannels
-            } else {
-                storeChannels = srcCh
-            }
-        }
-        let ringCh = storeChannels
-        lock.unlock()
 
         let ringPCM: [Int16]
         if srcCh == ringCh {
@@ -221,7 +205,7 @@ final class CamAudioStore {
         }
 
         let rs = (rate == ringRate) ? "rsamp=1:1" : "rsamp=in→ring"
-        let note = "\(ringCh)ch \(ringRate)Hz s16 \(rs) (src \(channels)ch \(rate)Hz lock=\(targetLocked ? 1 : 0))"
+        let note = "\(ringCh)ch \(ringRate)Hz s16 \(rs) (src \(channels)ch \(rate)Hz hintAU=\(auHintRate))"
         if lastFormatNote != note {
             lastFormatNote = note
             CamPipelineDiag.shared.noteAudioFormat(note)
@@ -452,11 +436,9 @@ final class CamAudioStore {
             laid = Array(laid.prefix(frames * auCh))
         }
 
-        // 接缝 / 硬跳：~10ms 交叉淡；相邻块大台阶也抹 ~2ms（消 30ms 级微断听感）
-        let stepL = frames > 0 ? abs(Int(laid[0]) - Int(lastL)) : 0
-        let needFade = seamJump || stepL > 2500
-        if needFade {
-            let fadeN = min(frames, max(1, seamJump ? (dstRate / 100) : (dstRate / 500)))
+        // 仅播头硬 rebase 时做极短交叉淡；禁止常态台阶抹音（听感发闷）
+        if seamJump, frames > 0 {
+            let fadeN = min(frames, max(1, dstRate / 200)) // ~5ms
             for i in 0..<fadeN {
                 let a = Double(i + 1) / Double(fadeN)
                 let inv = 1.0 - a
@@ -469,9 +451,7 @@ final class CamAudioStore {
             }
         }
 
-        // 一阶 DC 阻断（R≈0.995），消大直流/电流感；不改增益曲线
-        applyDCBlocker(&laid, frames: frames, channels: auCh)
-        // 禁止顶满削波：软顶 ~-1.2dBFS（消全频尖刺/脏写，非调音质）
+        // 对标参照：直喂素材 PCM，不做自创 DC/压限听感处理
         applyPeakCeiling(&laid, frames: frames, channels: auCh)
 
         if frames > 0 {

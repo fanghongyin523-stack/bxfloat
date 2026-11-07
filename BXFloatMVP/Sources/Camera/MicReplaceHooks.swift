@@ -339,6 +339,9 @@ func BXFloatMicAUInstall()
 @_silgen_name("BXFloatMicAUSetMode")
 func BXFloatMicAUSetMode(_ mode: Int32)
 
+@_silgen_name("BXFloatMicAudioConsumer")
+func BXFloatMicAudioConsumer() -> Int32
+
 @_silgen_name("BXFloatMicAUPaintCount")
 func BXFloatMicAUPaintCount() -> Int64
 

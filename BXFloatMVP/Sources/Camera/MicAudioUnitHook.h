@@ -8,6 +8,8 @@ FOUNDATION_EXPORT void BXFloatMicAUInstall(void);
 FOUNDATION_EXPORT void BXFloatMicAUSetMode(int mode); // 0=原麦 1=推流 2=静音
 /// 对标 VCamTang hasMaterialAudio：推流环有新鲜素材才允许替麦
 FOUNDATION_EXPORT int BXFloatMicHasMaterialAudio(void);
+/// 对标 AUDIOPATH mode=single：0=未定 1=AU 2=AQ
+FOUNDATION_EXPORT int BXFloatMicAudioConsumer(void);
 FOUNDATION_EXPORT int64_t BXFloatMicAUPaintCount(void);
 FOUNDATION_EXPORT int64_t BXFloatMicAUCallbackCount(void);
 FOUNDATION_EXPORT int64_t BXFloatMicAQPaintCount(void);
