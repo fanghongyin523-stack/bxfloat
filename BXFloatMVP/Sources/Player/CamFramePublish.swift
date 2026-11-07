@@ -27,8 +27,8 @@ public func BXFloatPublishAudioPCM(
     )
 }
 
-/// 从 ring 拉交错 s16（mediaTime优先，空则 latest）。返回峰（0..32767）。
-/// ObjC 负责按 AU 真实 bps/float/平面写入 ioData，避免「fill 有声但平面拷贝后为 0」。
+/// 从 ring 拉交错 s16（固定延迟连续拷贝）。返回峰（0..32767）。
+/// ObjC 负责按 AU 真实 bps/float/平面写入 ioData。
 @_cdecl("BXFloatMicPullS16")
 public func BXFloatMicPullS16(
     _ dst: UnsafeMutablePointer<Int16>,
@@ -44,6 +44,24 @@ public func BXFloatMicPullS16(
         frames: f,
         channels: ch,
         sampleRate: sampleRate > 0 ? Int(sampleRate.rounded()) : 0
+    )
+}
+
+/// AU 写后 PCM → 听:注（与录制轨同内容）
+@_cdecl("BXFloatMicNoteInjectPCM")
+public func BXFloatMicNoteInjectPCM(
+    _ samples: UnsafePointer<Int16>,
+    _ frames: Int32,
+    _ channels: Int32,
+    _ sampleRate: Int32
+) {
+    let f = Int(frames)
+    let ch = max(1, min(2, Int(channels)))
+    guard f > 0 else { return }
+    var copy = [Int16](repeating: 0, count: f * ch)
+    for i in 0..<(f * ch) { copy[i] = samples[i] }
+    CamAudioStore.shared.noteInjectPCMFromAU(
+        copy, frames: f, channels: ch, rate: Int(sampleRate > 0 ? sampleRate : 44100)
     )
 }
 

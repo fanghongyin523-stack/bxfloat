@@ -30,16 +30,18 @@ final class CamAudioStore {
     private(set) var storeChannels = 1
 
     private var playhead: Double = -1
-    /// 软变速：块内微拉伸上限（±2.5%），禁止跳读头造缝
-    private let maxSoftRatio: Double = 0.025
+    /// 固定延迟读环：宁可 ~1.2s 滞后，也不软拉伸拧内容
+    private let fixedLatencySec: Double = 1.20
     private var lastL: Int16 = 0
     private var lastR: Int16 = 0
-    /// 上一拉块结束 PTS；仅硬跳窗才交叉淡
-    private var lastPullEndPTS: Double = -1
-    private var lastHardJump = false
+    /// DC 阻断状态（消面板大 dc，非增益/NR）
+    private var dcX1L: Double = 0
+    private var dcY1L: Double = 0
+    private var dcX1R: Double = 0
+    private var dcY1R: Double = 0
     /// 监听专用读头（不抢注入 playhead）
     private var monitorPlayhead: Double = -1
-    /// 注入写出后的环听缓冲（~2s 交错 s16）
+    /// 注入写出后的环听缓冲（~2s 交错 s16）——听:注 与录制同内容
     private var injectTap: [Int16] = []
     private var injectTapFrames: Int = 0
     private var injectTapWrite: Int = 0
@@ -77,9 +79,9 @@ final class CamAudioStore {
                 chunks.removeAll(keepingCapacity: true)
                 pending.removeAll(keepingCapacity: true)
                 playhead = -1
-                lastPullEndPTS = -1
                 monitorPlayhead = -1
                 envelope = 1.0
+                dcX1L = 0; dcY1L = 0; dcX1R = 0; dcY1R = 0
             }
             let note = String(
                 format: "AU-lock %dHz %dch float=%d → ring@%dHz flush=%d",
@@ -116,11 +118,11 @@ final class CamAudioStore {
         lastUpdate = .distantPast
         lastPTS = -1
         playhead = -1
-        lastPullEndPTS = -1
         monitorPlayhead = -1
         lastL = 0
         lastR = 0
         envelope = 1.0
+        dcX1L = 0; dcY1L = 0; dcX1R = 0; dcY1R = 0
         storeChannels = 1
         lockedRate = 0
         lockedAUChannels = 0
@@ -330,7 +332,7 @@ final class CamAudioStore {
         }
     }
 
-    /// 拉交错 s16：连续播头 + 块内软变速；仅硬跳才交叉淡。返回峰。记 Gate。
+    /// 拉交错 s16：固定延迟连续拷贝 ring（禁止软拉伸/每帧 force）。返回峰。
     @discardableResult
     func pullInterleavedS16(
         into dst: UnsafeMutablePointer<Int16>,
@@ -345,106 +347,97 @@ final class CamAudioStore {
         let ringRate = storeRate
         let ringCh = max(1, storeChannels)
         let duration = Double(frames) / Double(dstRate)
+        // 1:1 时精确 frames；异率才多取边沿
+        let needStore = (dstRate == ringRate)
+            ? max(1, frames)
+            : max(1, Int((duration * Double(ringRate)).rounded(.up)) + 2)
+        ensureScratch(store: needStore * ringCh + 64, out: frames * auCh)
 
         if AVSyncClock.shared.shouldFreezeAudio(), bufferedSeconds() < 0.05 {
+            fillHoldSamples(dst, frames: frames, channels: auCh)
             CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
-            return 0
+            return abs(Int32(lastL))
         }
 
-        let target = AVSyncClock.shared.mediaTime()
-        // 预留软变速最大取窗，避免持锁分配
-        let maxNeed = max(
-            1,
-            Int((Double(frames) * Double(ringRate) / Double(dstRate) * (1.0 + maxSoftRatio)).rounded(.up)) + 2
-        )
-        ensureScratch(store: maxNeed * ringCh, out: frames * auCh)
-
         var got = 0
-        var forced = false
-        var softRatio = 1.0
         var seamJump = false
         var startPTS = 0.0
         var ringPk: Int32 = 0
         var peekPk: Int32 = 0
         var localStore: [Int16] = []
-        var consumed = 0
-        var needStore = frames
 
         lock.lock()
-        // 软变速：块内微拉伸跟钟，禁止每回调跳读头
-        let adv = advancePlayheadSoftLocked(target: target, duration: duration)
-        startPTS = adv.start
-        softRatio = adv.ratio
-        seamJump = adv.hardJump
-        needStore = max(
-            1,
-            Int((Double(frames) * Double(ringRate) / Double(dstRate) * softRatio).rounded(.up)) + 2
-        )
-        if needStore > maxNeed { needStore = maxNeed }
         ringPk = max(peakOfLastChunkLocked(), peakOfAnyChunkLocked())
+        guard let first = chunks.first, let last = chunks.last, ringPk > 0 else {
+            lock.unlock()
+            fillHoldSamples(dst, frames: frames, channels: auCh)
+            CamPipelineDiag.shared.notePaintGate(ringPk: 0, peekPk: 0, convPk: 0, dstPk: 0, forced: false)
+            return abs(Int32(lastL))
+        }
+        let lastEnd = last.pts + frameDuration(last)
+        let firstPts = first.pts
+        // 目标读点：环尾前固定延迟（约 1.2s）
+        let desired = max(firstPts, lastEnd - fixedLatencySec)
+        if playhead < 0 || !playhead.isFinite
+            || playhead < firstPts - 0.02
+            || playhead > lastEnd + 0.02
+        {
+            playhead = desired
+            seamJump = true
+        } else if playhead > desired + 0.25 {
+            // 读太近直播边：拉回固定延迟（偶发硬跳+短淡）
+            playhead = desired
+            seamJump = true
+        } else if playhead < desired - 0.80 {
+            // 落后太多：一次对齐，禁止持续软追拧内容
+            playhead = desired
+            seamJump = true
+        }
+        // 夹在可读窗内，保证有 frames 可读
+        let hi = max(firstPts, lastEnd - max(duration, 0.02))
+        if playhead > hi {
+            playhead = hi
+            seamJump = true
+        }
+        startPTS = playhead
         got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
         peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-        if got <= 0 || peekPk <= 200 {
-            if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
-                playhead = snap
-                startPTS = snap
-                got = peekStartingLocked(at: snap, into: &scratchStore, frames: needStore)
-                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-                seamJump = true
-                softRatio = 1.0
-            }
+        if got < needStore / 2 {
+            // 缺口：不 force 最新块（会错位）；续读 desired
+            playhead = desired
+            startPTS = desired
+            got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore)
+            peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
+            seamJump = true
         }
-        if got <= 0 || peekPk <= 200 {
-            let tailGot = peekRingTailLocked(into: &scratchStore, frames: needStore)
-            let tailPk = Self.peakOf(scratchStore, frames: tailGot, channels: ringCh)
-            if tailGot > 0, tailPk > peekPk {
-                got = tailGot
-                peekPk = tailPk
-                seamJump = true
-            }
-        }
-        if (got <= 0 || peekPk <= 200), ringPk > 200 {
-            let n = copyLatestFramesLocked(into: &scratchStore, frames: needStore)
-            if n > 0 {
-                got = n
-                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-                forced = true
-                seamJump = true
-                if let last = chunks.last {
-                    playhead = last.pts + frameDuration(last)
-                }
-            }
-        }
-        consumed = min(needStore, got)
+        let consumed = min(needStore, got)
         if consumed > 0 {
             localStore = Array(scratchStore.prefix(consumed * ringCh))
-            if !forced {
-                playhead = startPTS + Double(consumed) / Double(ringRate)
-            }
+            playhead = startPTS + Double(consumed) / Double(ringRate)
         }
         lock.unlock()
 
-        guard consumed > 0, !localStore.isEmpty else {
+        if consumed <= 0 || localStore.isEmpty {
+            fillHoldSamples(dst, frames: frames, channels: auCh)
             CamPipelineDiag.shared.notePaintGate(
-                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: forced
+                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
             )
-            return 0
+            return abs(Int32(lastL))
         }
 
-        // 环率=AU 且无拉伸：直拷；否则一次 Hermite 收到恰好 frames（含软变速微拉伸）
+        // 环率=AU：直拷，禁止 Hermite 拧内容
         let rateConverted: [Int16]
-        let needStretch = abs(softRatio - 1.0) > 0.001
-        if dstRate == ringRate, !needStretch, consumed >= frames {
+        if dstRate == ringRate, consumed >= frames {
             rateConverted = Array(localStore.prefix(frames * ringCh))
+        } else if dstRate == ringRate {
+            rateConverted = localStore
         } else {
-            // from/to 用帧数比：consumed → frames，避免二次率换算误差
             rateConverted = resampleHermiteInterleaved(
-                localStore, channels: ringCh, from: max(1, consumed), to: frames
+                localStore, channels: ringCh, from: ringRate, to: dstRate
             )
         }
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: frames)
         let haveFrames = min(frames, rateConverted.count / max(1, ringCh))
-        // 不足：衰减续尾，禁止静音/重复平台垫缝
         if haveFrames < frames {
             let seedL = haveFrames > 0 ? laid[(haveFrames - 1) * auCh] : lastL
             let seedR = haveFrames > 0
@@ -460,9 +453,9 @@ final class CamAudioStore {
             laid = Array(laid.prefix(frames * auCh))
         }
 
-        // 仅硬跳/强制/欠载续尾才交叉淡（~5ms）；软变速连续块不糊边、不过度淡
-        if seamJump || forced {
-            let fadeN = min(frames, max(1, dstRate / 200))
+        // 仅硬跳才 ~4ms 交叉淡；连续块不碰
+        if seamJump {
+            let fadeN = min(frames, max(1, dstRate / 250))
             for i in 0..<fadeN {
                 let a = Double(i + 1) / Double(fadeN)
                 let inv = 1.0 - a
@@ -474,20 +467,23 @@ final class CamAudioStore {
                 }
             }
         }
+
+        // 一阶 DC 阻断（R≈0.995），消大直流/电流感；不改增益曲线
+        applyDCBlocker(&laid, frames: frames, channels: auCh)
+
         if frames > 0 {
             lastL = laid[(frames - 1) * auCh]
             lastR = auCh > 1 ? laid[(frames - 1) * auCh + 1] : lastL
         }
-        lastPullEndPTS = playhead
-        lastHardJump = seamJump || forced
         envelope = 1.0
 
         let convPk = Self.peakOf(laid, frames: frames, channels: auCh)
         for i in 0..<(frames * auCh) { dst[i] = laid[i] }
-        noteInjectTapLocked(laid, frames: frames, channels: auCh, rate: dstRate)
+        // 预写 tap；AU 写后还会用真实缓冲覆盖（听:注=录轨）
+        noteInjectTap(laid, frames: frames, channels: auCh, rate: dstRate)
 
         CamPipelineDiag.shared.notePaintGate(
-            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: convPk, forced: forced
+            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: convPk, forced: false
         )
         if convPk > 0 {
             var mono = [Int16](repeating: 0, count: frames)
@@ -510,7 +506,41 @@ final class CamAudioStore {
         return convPk
     }
 
-    /// 环听：独立读头，从环尾前 ~0.35s 连续取，不抢注入 playhead
+    /// 欠载：续 lastL/R，禁止交还原麦 / 静音块
+    private func fillHoldSamples(_ dst: UnsafeMutablePointer<Int16>, frames: Int, channels: Int) {
+        let ch = max(1, channels)
+        for i in 0..<frames {
+            dst[i * ch] = lastL
+            if ch > 1 { dst[i * ch + 1] = lastR }
+            for c in 2..<ch { dst[i * ch + c] = lastL }
+        }
+    }
+
+    private func applyDCBlocker(_ buf: inout [Int16], frames: Int, channels: Int) {
+        let ch = max(1, channels)
+        let r = 0.995
+        for i in 0..<frames {
+            let xL = Double(buf[i * ch])
+            let yL = xL - dcX1L + r * dcY1L
+            dcX1L = xL
+            dcY1L = yL
+            buf[i * ch] = Int16(clamping: Int(yL.rounded()))
+            if ch > 1 {
+                let xR = Double(buf[i * ch + 1])
+                let yR = xR - dcX1R + r * dcY1R
+                dcX1R = xR
+                dcY1R = yR
+                buf[i * ch + 1] = Int16(clamping: Int(yR.rounded()))
+            }
+        }
+    }
+
+    /// AU 写后回灌听:注（与录制轨同内容）
+    func noteInjectPCMFromAU(_ samples: [Int16], frames: Int, channels: Int, rate: Int) {
+        noteInjectTap(samples, frames: frames, channels: channels, rate: rate)
+    }
+
+    /// 环听：与注入同策略——环尾前固定延迟连续读，不抢注入 playhead
     @discardableResult
     func pullMonitorRingS16(
         into dst: UnsafeMutablePointer<Int16>,
@@ -527,17 +557,18 @@ final class CamAudioStore {
         guard let first = chunks.first, let last = chunks.last else { return 0 }
         let lastEnd = last.pts + frameDuration(last)
         let dur = Double(frames) / Double(ringRate)
-        let live = max(first.pts, lastEnd - 0.35)
+        let desired = max(first.pts, lastEnd - fixedLatencySec)
         if monitorPlayhead < 0 || monitorPlayhead < first.pts - 0.05
             || monitorPlayhead > lastEnd + 0.05
-            || monitorPlayhead < live - 0.80
+            || monitorPlayhead < desired - 0.80
+            || monitorPlayhead > desired + 0.25
         {
-            monitorPlayhead = live
+            monitorPlayhead = desired
         }
         let start = monitorPlayhead
         let got = peekStartingLocked(at: start, into: &scratchStore, frames: frames)
         if got <= 0 {
-            monitorPlayhead = live
+            monitorPlayhead = desired
             return 0
         }
         monitorPlayhead = start + Double(got) / Double(ringRate)
@@ -624,7 +655,7 @@ final class CamAudioStore {
         (storeRate, max(1, storeChannels))
     }
 
-    private func noteInjectTapLocked(_ samples: [Int16], frames: Int, channels: Int, rate: Int) {
+    private func noteInjectTap(_ samples: [Int16], frames: Int, channels: Int, rate: Int) {
         let ch = max(1, min(2, channels))
         let want = max(rate * 2, 8192) // ~2s
         lock.lock()
@@ -727,7 +758,6 @@ final class CamAudioStore {
 
         var startPTS = advancePlayhead(target: target, duration: duration)
         var got = 0
-        var forced = false
         var ringPk: Int32 = 0
         var peekPk: Int32 = 0
         var localStore: [Int16] = []
@@ -753,16 +783,7 @@ final class CamAudioStore {
                 peekPk = tailPk
             }
         }
-        // ring 末块有能量但 PTS peek 仍静音 → 直接拷最近 PCM（断点1失败时的硬修复）
-        if (got <= 0 || peekPk <= 200), ringPk > 200 {
-            let n = copyLatestFramesLocked(into: &scratchStore, frames: needStore)
-            if n > 0 {
-                got = n
-                peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
-                forced = true
-                playhead = (chunks.last.map { $0.pts + frameDuration($0) }) ?? playhead
-            }
-        }
+        // 禁止 copyLatest force：错位内容；欠载走包络续尾
         if got > 0 {
             let n = min(needStore, got) * ringCh
             localStore = Array(scratchStore.prefix(n))
@@ -781,7 +802,7 @@ final class CamAudioStore {
                 decaying: true
             )
             CamPipelineDiag.shared.notePaintGate(
-                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: forced
+                ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
             )
             return false
         }
@@ -855,17 +876,8 @@ final class CamAudioStore {
             nonInterleaved: isNonInterleaved
         )
         CamPipelineDiag.shared.notePaintGate(
-            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: dstPk, forced: forced
+            ringPk: ringPk, peekPk: peekPk, convPk: convPk, dstPk: dstPk, forced: false
         )
-        if forced {
-            NSLog(
-                "BXFloatAudio FORCE ring=%.3f peek=%.3f conv=%.3f dst=%.3f",
-                Double(ringPk) / 32768.0,
-                Double(peekPk) / 32768.0,
-                Double(convPk) / 32768.0,
-                Double(dstPk) / 32768.0
-            )
-        }
         // 注入峰仍由 AU paint 后 ioData 探针记账
         return dstPk > 0 || convPk > 0
     }
@@ -1163,50 +1175,26 @@ final class CamAudioStore {
         )
     }
 
-    /// 连续播头（调用方已持 lock）：小误差 → softRatio 块内拉伸；远离窗 → 硬跳。
-    private func advancePlayheadSoftLocked(
-        target: Double,
-        duration: Double
-    ) -> (start: Double, hardJump: Bool, ratio: Double) {
-        var hard = false
-        var ratio = 1.0
-        if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration),
-           playhead < 0 || !playhead.isFinite
-            || playhead < snap - 0.08 || playhead > snap + 0.35 {
-            playhead = snap
-            hard = true
-        } else if playhead < 0 || !playhead.isFinite {
-            playhead = max(0, target)
-            hard = true
-        } else {
-            let err = target - playhead
-            // 落后于钟：加速读（ratio>1）；超前很多：略减速。不跳读头。
-            if err > 0.05 {
-                ratio = 1.0 + min(maxSoftRatio, err * 0.08)
-            } else if err < -0.25 {
-                ratio = 1.0 - min(maxSoftRatio, (-err - 0.25) * 0.04)
-            }
-            if let snap = clampPlayheadIntoRingLocked(target: playhead, duration: duration * ratio) {
-                if playhead > snap + 0.02 {
-                    playhead = snap
-                    hard = true
-                    ratio = 1.0
-                } else if playhead < snap - 0.30 {
-                    playhead = snap
-                    hard = true
-                    ratio = 1.0
-                }
-            }
-        }
-        return (playhead, hard, ratio)
-    }
-
     private func advancePlayhead(target: Double, duration: Double) -> Double {
         lock.lock()
-        let adv = advancePlayheadSoftLocked(target: target, duration: duration)
-        playhead = adv.start + max(0, duration * adv.ratio)
-        let start = adv.start
-        lock.unlock()
+        defer { lock.unlock() }
+        // fillContinuous 兜底：同样固定延迟，不软拉伸
+        if let last = chunks.last, let first = chunks.first {
+            let lastEnd = last.pts + frameDuration(last)
+            let desired = max(first.pts, lastEnd - fixedLatencySec)
+            if playhead < 0 || !playhead.isFinite
+                || playhead < first.pts - 0.02 || playhead > lastEnd + 0.02
+                || playhead < desired - 0.80 || playhead > desired + 0.25
+            {
+                playhead = desired
+            }
+            let hi = max(first.pts, lastEnd - max(duration, 0.02))
+            if playhead > hi { playhead = hi }
+        } else if let snap = clampPlayheadIntoRingLocked(target: target, duration: duration) {
+            playhead = snap
+        }
+        let start = playhead
+        playhead += max(0, duration)
         return start
     }
 

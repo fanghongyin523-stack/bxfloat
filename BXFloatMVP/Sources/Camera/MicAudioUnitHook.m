@@ -27,6 +27,13 @@ FOUNDATION_EXPORT int32_t BXFloatMicPullS16(
     double sampleRate
 );
 
+FOUNDATION_EXPORT void BXFloatMicNoteInjectPCM(
+    const int16_t *samples,
+    int frames,
+    int channels,
+    int sampleRate
+);
+
 FOUNDATION_EXPORT void BXFloatAQNotePaintDstPeak(int32_t peak);
 
 FOUNDATION_EXPORT void BXFloatAQNoteMicTap(
@@ -366,15 +373,19 @@ static void paintABL(
         return;
     }
 
-    // 1) 只拉能量（s16）；2) 再按缓冲几何写入 —— 分段 Gate：conv=拉峰，dst=写后峰
+    // 1) 拉推流 s16（固定延迟连续；欠载已 hold 末样）；2) 按 AU 几何整缓冲覆盖
     int32_t pullPk = BXFloatMicPullS16(pcm, (int)frames, outCh, rate);
     if (pullPk <= 0) {
-        // 环空：不硬盖静音（短断续主因之一）；保持 AU 原缓冲
+        // 仍无内容：不交还原麦（录轨会变原麦）；写 0 并记峰
+        for (UInt32 bi = 0; bi < ioData->mNumberBuffers; bi++) {
+            AudioBuffer *buf = &ioData->mBuffers[bi];
+            if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
+        }
         BXFloatAQNotePaintDstPeak(0);
         static _Atomic int sPullZeroLog = 0;
         int n = atomic_fetch_add(&sPullZeroLog, 1);
         if (n < 8 || (n % 64) == 0) {
-            NSLog(@"BXFloatMic PULL-ZERO keep-mic rate=%.0f ch=%d", rate, outCh);
+            NSLog(@"BXFloatMic PULL-ZERO hold-zero rate=%.0f ch=%d", rate, outCh);
         }
         return;
     }
@@ -382,12 +393,7 @@ static void paintABL(
     int planeBps = bytesPerSample;
     if (isFloat && planeBps < 4) planeBps = 4;
 
-    // 先清全缓冲再写：禁止残留原麦样点与注入拼接成电流缝
-    for (UInt32 bi = 0; bi < ioData->mNumberBuffers; bi++) {
-        AudioBuffer *buf = &ioData->mBuffers[bi];
-        if (buf->mData && buf->mDataByteSize) memset(buf->mData, 0, buf->mDataByteSize);
-    }
-
+    // 整缓冲覆盖写满：禁止残留原麦与注入拼缝
     if (nonInterleaved) {
         int planes = (int)ioData->mNumberBuffers;
         for (int p = 0; p < planes; p++) {
@@ -395,21 +401,18 @@ static void paintABL(
             if (!buf->mData || buf->mDataByteSize == 0) continue;
             uint8_t *dst = (uint8_t *)buf->mData;
             size_t cap = buf->mDataByteSize;
-            // 声道不足时复用末路，写满平面，避免脏尾
             int srcCh = p < outCh ? p : (outCh - 1);
             if (srcCh < 0) srcCh = 0;
-            int16_t last = 0;
+            int16_t last = pcm[srcCh];
             for (UInt32 i = 0; i < frames; i++) {
                 size_t off = (size_t)i * (size_t)planeBps;
-                if (off + (size_t)planeBps > cap) {
-                    // 容量不够：用 last 填剩余，禁留 memset 静音硬边
-                    while (off + (size_t)planeBps <= cap) {
-                        writeOneSample(dst + off, last, planeBps, isFloat);
-                        off += (size_t)planeBps;
-                    }
-                    break;
-                }
+                if (off + (size_t)planeBps > cap) break;
                 last = pcm[i * outCh + srcCh];
+                writeOneSample(dst + off, last, planeBps, isFloat);
+            }
+            // 写满 cap：末样延续，禁静音硬边
+            size_t off = (size_t)frames * (size_t)planeBps;
+            for (; off + (size_t)planeBps <= cap; off += (size_t)planeBps) {
                 writeOneSample(dst + off, last, planeBps, isFloat);
             }
         }
@@ -418,7 +421,6 @@ static void paintABL(
         if (b0->mData && b0->mDataByteSize) {
             uint8_t *dst = (uint8_t *)b0->mData;
             size_t cap = b0->mDataByteSize;
-            // 缓冲声道数以几何为准，必须写满每一帧的所有声道
             int ch = chInBuf > 0 ? chInBuf : 1;
             int16_t lastL = 0, lastR = 0;
             size_t nextOff = 0;
@@ -435,7 +437,6 @@ static void paintABL(
                 }
             }
         fill_rest_i:
-            // cap 未写满：末样延续，禁留清零静音硬边
             for (size_t off = nextOff; off + (size_t)planeBps <= cap; off += (size_t)planeBps) {
                 int c = ch > 0 ? (int)((off / (size_t)planeBps) % (size_t)ch) : 0;
                 int16_t fill = (c == 1 && outCh > 1) ? lastR : lastL;
@@ -444,29 +445,77 @@ static void paintABL(
         }
     }
 
-    // 写后峰：读回第一路（与注入探针同几何）
+    // 写后峰 + 听:注：从真实 AU 缓冲回读 s16（与录制轨同内容）
     int32_t dstPk = 0;
     AudioBuffer *b0 = &ioData->mBuffers[0];
     if (b0->mData && b0->mDataByteSize && frames > 0) {
+        int tapCh = nonInterleaved ? 1 : (chInBuf > 0 ? chInBuf : 1);
+        if (tapCh > 2) tapCh = 2;
+        int16_t *tap = pcm; // 复用 tmp：重填为写后内容
         if (isFloat && planeBps >= 4) {
-            const float *fp = (const float *)b0->mData;
-            UInt32 n = b0->mDataByteSize / 4;
-            if (n > frames) n = frames;
-            for (UInt32 i = 0; i < n; i += (n > 256 ? n / 128 : 1)) {
-                float a = fp[i] >= 0 ? fp[i] : -fp[i];
-                int32_t v = (int32_t)(a * 32767.0f);
-                if (v > dstPk) dstPk = v;
+            if (nonInterleaved) {
+                const float *fp = (const float *)b0->mData;
+                UInt32 n = b0->mDataByteSize / 4;
+                if (n > frames) n = frames;
+                for (UInt32 i = 0; i < n; i++) {
+                    float v = fp[i];
+                    int32_t s = (int32_t)(v * 32767.0f);
+                    if (s > 32767) s = 32767;
+                    if (s < -32768) s = -32768;
+                    tap[i] = (int16_t)s;
+                    int32_t a = s >= 0 ? s : -s;
+                    if (a > dstPk) dstPk = a;
+                }
+                tapCh = 1;
+                BXFloatMicNoteInjectPCM(tap, (int)n, 1, (int)rate);
+            } else {
+                const float *fp = (const float *)b0->mData;
+                int ch = chInBuf > 0 ? chInBuf : 1;
+                UInt32 n = b0->mDataByteSize / (4 * (size_t)ch);
+                if (n > frames) n = frames;
+                for (UInt32 i = 0; i < n; i++) {
+                    for (int c = 0; c < tapCh && c < ch; c++) {
+                        float v = fp[i * ch + c];
+                        int32_t s = (int32_t)(v * 32767.0f);
+                        if (s > 32767) s = 32767;
+                        if (s < -32768) s = -32768;
+                        tap[i * tapCh + c] = (int16_t)s;
+                        if (c == 0) {
+                            int32_t a = s >= 0 ? s : -s;
+                            if (a > dstPk) dstPk = a;
+                        }
+                    }
+                }
+                BXFloatMicNoteInjectPCM(tap, (int)n, tapCh, (int)rate);
             }
         } else if (planeBps == 2) {
-            const int16_t *sp = (const int16_t *)b0->mData;
-            UInt32 n = b0->mDataByteSize / 2;
-            // 交错时每帧跳 ch；非交错平面每样一点
-            int step = nonInterleaved ? 1 : (chInBuf > 0 ? chInBuf : 1);
-            UInt32 limit = nonInterleaved ? frames : frames;
-            for (UInt32 i = 0; i < limit && (i * (UInt32)step) < n; i += (limit > 256 ? limit / 128 : 1)) {
-                int16_t s = sp[i * (UInt32)step];
-                int32_t a = s >= 0 ? s : -s;
-                if (a > dstPk) dstPk = a;
+            if (nonInterleaved) {
+                const int16_t *sp = (const int16_t *)b0->mData;
+                UInt32 n = b0->mDataByteSize / 2;
+                if (n > frames) n = frames;
+                for (UInt32 i = 0; i < n; i++) {
+                    int16_t s = sp[i];
+                    tap[i] = s;
+                    int32_t a = s >= 0 ? s : -s;
+                    if (a > dstPk) dstPk = a;
+                }
+                BXFloatMicNoteInjectPCM(tap, (int)n, 1, (int)rate);
+            } else {
+                const int16_t *sp = (const int16_t *)b0->mData;
+                int ch = chInBuf > 0 ? chInBuf : 1;
+                UInt32 n = b0->mDataByteSize / (2 * (size_t)ch);
+                if (n > frames) n = frames;
+                for (UInt32 i = 0; i < n; i++) {
+                    for (int c = 0; c < tapCh && c < ch; c++) {
+                        int16_t s = sp[i * ch + c];
+                        tap[i * tapCh + c] = s;
+                        if (c == 0) {
+                            int32_t a = s >= 0 ? s : -s;
+                            if (a > dstPk) dstPk = a;
+                        }
+                    }
+                }
+                BXFloatMicNoteInjectPCM(tap, (int)n, tapCh, (int)rate);
             }
         }
     }
