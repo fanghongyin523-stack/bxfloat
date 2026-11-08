@@ -13,7 +13,21 @@ cd "$OUT/_tmp"
 
 for lib in "${LIBS[@]}"; do
   echo ">> fetch $lib"
-  curl -fsSL -o "${lib}.zip" "${BASE}/${lib}.zip"
+  # GitHub release CDN 偶发 504；加重试避免整次 CI 白挂
+  ok=0
+  for attempt in 1 2 3 4 5; do
+    if curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+        -o "${lib}.zip" "${BASE}/${lib}.zip"; then
+      ok=1
+      break
+    fi
+    echo "fetch $lib attempt $attempt failed; sleep and retry" >&2
+    sleep $((attempt * 3))
+  done
+  if [[ "$ok" -ne 1 ]]; then
+    echo "ERROR: failed to fetch ${lib}.zip from ${BASE}" >&2
+    exit 1
+  fi
   rm -rf "${lib}_x"
   mkdir -p "${lib}_x"
   unzip -q "${lib}.zip" -d "${lib}_x"
