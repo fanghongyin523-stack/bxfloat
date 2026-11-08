@@ -108,10 +108,10 @@ final class AVSyncClock {
         lock.unlock()
     }
 
-    /// 软接纳窗：约等于 targetDelay，让 1s 延迟音频直接入环（过窄→声环长期偏浅→欠载）。
-    private let audioSoftLead: Double = 1.05
+    /// 软接纳窗：覆盖 target≈1.2s，避免音频长期进 pending→声环偏浅→连续短断
+    private let audioSoftLead: Double = 1.35
     /// 可暂存等待视频追上的最大超前（failclosed/backlog 有界）
-    private let audioHoldLead: Double = 1.80
+    private let audioHoldLead: Double = 2.00
 
     enum AudioAdmit {
         case accept
