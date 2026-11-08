@@ -23,8 +23,10 @@ final class CamAudioStore {
     private let maxPendingSeconds: Double = 1.20
     /// pending 条数上限（对标 VCam pending 计数裁剪）
     private let maxPendingChunks: Int = 24
-    /// 入环活延迟上限：对标 capLiveLatency，略高于 target_ms(1s)
-    private let capLiveLatencySec: Double = 1.50
+    /// 入环活延迟上限：对标 capLiveLatency；须明显高于 target，避免环深被裁到欠载
+    private let capLiveLatencySec: Double = 1.80
+    /// 拉环侧最少保留（略高于 fixedLatency，防声环长期 <1s）
+    private let minLiveLatencySec: Double = 1.15
     private let defaultRate = 48_000
     /// 解码入环采样率（对标 VCamTang：环内保持素材钟，播出再 SRC）
     private var decodeRate: Int = 0
@@ -255,23 +257,9 @@ final class CamAudioStore {
             commitToRing(ringPCM, channels: ringCh, startPTS: startPTS, endPTS: endPTS, reason: "accept")
         case .pending(let lead):
             enqueuePending(ringPCM, channels: ringCh, startPTS: startPTS, endPTS: endPTS, lead: lead)
-        case .rebase(let newStart, let lead):
-            startPTS = newStart
-            endPTS = startPTS + duration
-            CamPipelineDiag.shared.noteAudioGate(
-                accepted: true,
-                endPTS: endPTS,
-                reason: "rebase",
-                leadMs: lead * 1000.0
-            )
-            commitToRing(
-                ringPCM,
-                channels: ringCh,
-                startPTS: startPTS,
-                endPTS: endPTS,
-                reason: "rebase",
-                gateAlreadyNoted: true
-            )
+        case .rebase(_, let lead):
+            // 禁止 rebase 挖 PTS 洞（洞→欠载→一帧帧）；超窗改 pending，由 backlog 裁旧
+            enqueuePending(ringPCM, channels: ringCh, startPTS: startPTS, endPTS: endPTS, lead: lead)
         case .reject:
             CamPipelineDiag.shared.noteAudioGate(
                 accepted: false,
@@ -313,22 +301,13 @@ final class CamAudioStore {
                 pending.append(chunk)
                 trimPendingLocked()
                 lock.unlock()
-            case .rebase(let newStart, let lead):
-                let newEnd = newStart + dur
-                CamPipelineDiag.shared.noteAudioGate(
-                    accepted: true,
-                    endPTS: newEnd,
-                    reason: "flush-rebase",
-                    leadMs: lead * 1000.0
-                )
-                commitToRing(
-                    chunk.samples,
-                    channels: chunk.channels,
-                    startPTS: newStart,
-                    endPTS: newEnd,
-                    reason: "flush-rebase",
-                    gateAlreadyNoted: true
-                )
+            case .rebase(_, let lead):
+                // admit 已不再 rebase；若仍落到此分支，退回 pending
+                _ = lead
+                lock.lock()
+                pending.append(chunk)
+                trimPendingLocked()
+                lock.unlock()
             case .reject:
                 CamPipelineDiag.shared.noteAudioGate(
                     accepted: false,
@@ -421,14 +400,7 @@ final class CamAudioStore {
         lock.unlock()
 
         if consumed <= 0 || localStore.isEmpty {
-            // 环里还有素材但本回调 peek 空：hold 末样保连续（静音垫=一帧帧缝）
-            if ringPk > 0 {
-                fillHoldSamples(dst, frames: frames, channels: auCh)
-                CamPipelineDiag.shared.notePaintGate(
-                    ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
-                )
-                return max(1, abs(Int32(lastL)))
-            }
+            // 对标 VCamTang failclosed：拉空=静音。hold 末样=电流/一帧帧，禁止。
             let n = frames * auCh
             for i in 0..<n { dst[i] = 0 }
             CamPipelineDiag.shared.notePaintGate(
@@ -451,16 +423,8 @@ final class CamAudioStore {
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: frames)
         let haveFrames = min(frames, rateConverted.count / max(1, ringCh))
         if haveFrames < frames {
-            // 微欠载：hold 末样连续填满回调，禁止静音尾缝（听感一帧帧）
-            let seedL = haveFrames > 0 ? laid[(haveFrames - 1) * auCh] : lastL
-            let seedR = haveFrames > 0
-                ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
-                : lastR
-            holdPadInterleaved(
-                &laid, channels: auCh,
-                fromFrame: haveFrames, toFrame: frames,
-                seedL: seedL, seedR: seedR
-            )
+            // 微欠载尾：静音垫（failclosed）；禁止末样 hold
+            silencePadInterleaved(&laid, channels: auCh, fromFrame: haveFrames, toFrame: frames)
         } else if laid.count > frames * auCh {
             laid = Array(laid.prefix(frames * auCh))
         }
@@ -480,7 +444,7 @@ final class CamAudioStore {
             }
         }
 
-        // 对标参照：直喂素材 PCM，不做自创 DC/压限听感处理
+        // 轻量防轨顶（~-1.5dBFS）：给抖音编码留余量；非 -8dB 重压
         applyPeakCeiling(&laid, frames: frames, channels: auCh)
 
         if frames > 0 {
@@ -518,16 +482,6 @@ final class CamAudioStore {
         return convPk
     }
 
-    /// 欠载：续 lastL/R，禁止交还原麦 / 静音块
-    private func fillHoldSamples(_ dst: UnsafeMutablePointer<Int16>, frames: Int, channels: Int) {
-        let ch = max(1, channels)
-        for i in 0..<frames {
-            dst[i * ch] = lastL
-            if ch > 1 { dst[i * ch + 1] = lastR }
-            for c in 2..<ch { dst[i * ch + c] = lastL }
-        }
-    }
-
     private func applyDCBlocker(_ buf: inout [Int16], frames: Int, channels: Int) {
         let ch = max(1, channels)
         let r = 0.995
@@ -547,13 +501,14 @@ final class CamAudioStore {
         }
     }
 
-    /// 仅防 int16 绕回尖刺；不对标自创压限（VCamTang/BXFloat 直喂素材 PCM）。
+    /// 轻量轨顶 ~-1.5dBFS（27500），防抖音编码撞 0dBFS 电流；非 -8dB 重压。
     private func applyPeakCeiling(_ buf: inout [Int16], frames: Int, channels: Int) {
         let ch = max(1, channels)
+        let lim = 27500
         for i in 0..<(frames * ch) {
             let x = Int(buf[i])
-            if x > 32766 { buf[i] = 32766 }
-            else if x < -32766 { buf[i] = -32766 }
+            if x > lim { buf[i] = Int16(lim) }
+            else if x < -lim { buf[i] = Int16(-lim) }
         }
     }
 
@@ -606,13 +561,7 @@ final class CamAudioStore {
         )
         let have = min(frames, got)
         if have < frames {
-            let seedL = have > 0 ? laid[(have - 1) * outCh] : 0
-            let seedR = (outCh > 1 && have > 0) ? laid[(have - 1) * outCh + 1] : seedL
-            holdPadInterleaved(
-                &laid, channels: outCh,
-                fromFrame: have, toFrame: frames,
-                seedL: seedL, seedR: seedR
-            )
+            silencePadInterleaved(&laid, channels: outCh, fromFrame: have, toFrame: frames)
         }
         for i in 0..<(frames * outCh) { dst[i] = laid[i] }
         return Self.peakOf(laid, frames: frames, channels: outCh)
@@ -988,12 +937,16 @@ final class CamAudioStore {
     }
 
     /// 对标 VCamTang `[AUDIO] backlog capped pending=%ld dropped=%lld`
+    /// 裁到 capLive，但保留 ≥ minLive，避免声环被裁到欠载。
     private func capLiveLatencyLocked(endPTS: Double) {
         guard let first = chunks.first else { return }
         let buffered = endPTS - first.pts
         guard buffered > capLiveLatencySec else { return }
         let before = chunks.count
-        let keepFrom = endPTS - capLiveLatencySec
+        let safeKeep = endPTS - capLiveLatencySec
+        // 若裁完会低于 minLive，则只裁到 minLive 窗口
+        let minKeep = endPTS - minLiveLatencySec
+        let keepFrom = min(safeKeep, minKeep)
         pruneLocked(before: keepFrom)
         let dropped = Int64(before - chunks.count)
         if dropped > 0 {
@@ -1226,8 +1179,6 @@ final class CamAudioStore {
 
         var written = 0
         var cursor = t
-        var holdL = lastL
-        var holdR = lastR
         for chunk in chunks {
             if written >= frames { break }
             let chunkCh = max(1, chunk.channels)
@@ -1235,21 +1186,14 @@ final class CamAudioStore {
             let chunkEnd = chunk.pts + Double(chunkFrames) / Double(storeRate)
             if chunkEnd <= cursor { continue }
             if chunk.pts > cursor + 0.001 {
-                // 包间缺口必须占时间轴（禁跳读甩后 playhead→短剁）
-                // <120ms：末样 hold 抹微缝（AAC/回调间隙）；更长才静音占位
+                // 包间缺口占时间轴：一律静音（failclosed）。末样 hold=电流/一帧帧。
                 let gapSec = chunk.pts - cursor
                 let gapFrames = min(frames - written, max(0, Int((gapSec * Double(storeRate)).rounded())))
-                let micro = gapSec < 0.120
                 if gapFrames > 0 {
                     for i in 0..<gapFrames {
                         let base = (written + i) * ch
-                        if micro {
-                            buffer[base] = holdL
-                            if ch > 1 { buffer[base + 1] = holdR }
-                        } else {
-                            buffer[base] = 0
-                            if ch > 1 { buffer[base + 1] = 0 }
-                        }
+                        buffer[base] = 0
+                        if ch > 1 { buffer[base + 1] = 0 }
                     }
                     written += gapFrames
                     cursor += Double(gapFrames) / Double(storeRate)
@@ -1276,10 +1220,6 @@ final class CamAudioStore {
             }
             written += n
             cursor += Double(n) / Double(storeRate)
-            if n > 0 {
-                holdL = buffer[(written - 1) * ch]
-                if ch > 1 { holdR = buffer[(written - 1) * ch + 1] }
-            }
         }
         endPTS = cursor
         return written
@@ -1312,27 +1252,26 @@ final class CamAudioStore {
         for i in 0..<use {
             let l = input[i * fCh]
             let r = fCh > 1 ? input[i * fCh + 1] : l
-            // 先折成单声道素材电平；多声道 AU 只写左、右置 0。
-            // 抖音录制常把立体声麦 L+R 直接相加（无 /2）：L=R=满幅 → 录回放顶 0dBFS/电流。
+            // 折 mono；立体声 AU 写 L=R=mono/2——宿主取 L、或 L+R 未 /2 都不顶满。
             let mono: Int16 = fCh > 1 ? Int16(clamping: (Int(l) + Int(r)) / 2) : l
             if tCh == 1 {
                 out[i] = mono
             } else {
-                out[i * tCh] = mono
-                for c in 1..<tCh { out[i * tCh + c] = 0 }
+                let half = Int16(clamping: Int(mono) / 2)
+                out[i * tCh] = half
+                out[i * tCh + 1] = half
+                for c in 2..<tCh { out[i * tCh + c] = half }
             }
         }
         return out
     }
 
-    /// 欠载垫：末样 hold，禁止淡向 0（静音缝=可闻短剁）
-    private func holdPadInterleaved(
+    /// failclosed 欠载垫：静音，禁止末样 hold
+    private func silencePadInterleaved(
         _ buf: inout [Int16],
         channels: Int,
         fromFrame: Int,
-        toFrame: Int,
-        seedL: Int16,
-        seedR: Int16
+        toFrame: Int
     ) {
         let n = toFrame - fromFrame
         guard n > 0 else { return }
@@ -1342,9 +1281,7 @@ final class CamAudioStore {
         }
         for i in 0..<n {
             let base = (fromFrame + i) * ch
-            buf[base] = seedL
-            if ch > 1 { buf[base + 1] = seedR }
-            for c in 2..<ch { buf[base + c] = seedL }
+            for c in 0..<ch { buf[base + c] = 0 }
         }
     }
 

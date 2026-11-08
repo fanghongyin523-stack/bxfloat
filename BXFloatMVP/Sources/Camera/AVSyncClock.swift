@@ -108,14 +108,15 @@ final class AVSyncClock {
         lock.unlock()
     }
 
-    /// 软接纳窗：端点不超视频太多则直接入 ring。
-    private let audioSoftLead: Double = 0.28
+    /// 软接纳窗：约等于 targetDelay，让 1s 延迟音频直接入环（过窄→声环长期偏浅→欠载）。
+    private let audioSoftLead: Double = 1.05
     /// 可暂存等待视频追上的最大超前（failclosed/backlog 有界）
-    private let audioHoldLead: Double = 1.20
+    private let audioHoldLead: Double = 1.80
 
     enum AudioAdmit {
         case accept
         case pending(lead: Double)
+        /// 保留枚举兼容调用方；实现上不再挖 PTS 洞，改为 pending
         case rebase(startPTS: Double, lead: Double)
         case reject
     }
@@ -125,20 +126,17 @@ final class AVSyncClock {
         return false
     }
 
-    /// 音频接纳：超窗 pending/rebase，禁止连续硬拒收断音（对标 failclosed/backlog）。
+    /// 音频接纳：超窗 pending + backlog 裁旧；禁止 rebase 挖洞（洞→一帧帧）。
     func admitAudio(endPTS: Double, duration: Double) -> AudioAdmit {
         guard endPTS.isFinite, endPTS >= 0 else { return .reject }
-        let dur = max(0, duration)
+        _ = duration
         lock.lock()
         defer { lock.unlock() }
         if lastVideoPTS < 0 { return .accept }
         if lastVideoPTS < 0.50 { return .accept }
         let lead = endPTS - lastVideoPTS
         if lead <= audioSoftLead { return .accept }
-        if lead <= audioHoldLead { return .pending(lead: lead) }
-        let newEnd = lastVideoPTS + audioSoftLead * 0.5
-        let newStart = max(0, newEnd - dur)
-        return .rebase(startPTS: newStart, lead: lead)
+        return .pending(lead: lead)
     }
 
     func audioSoftLeadSeconds() -> Double { audioSoftLead }
