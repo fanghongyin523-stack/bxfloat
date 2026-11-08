@@ -16,6 +16,11 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     /// 供面板 present 时避开自己的窗（禁止从空 rootVC 弹相册抢焦点）
     static var overlayWindow: UIWindow? { shared.floatWindow }
 
+    /// 输完 IP / 收起面板后：把 key 还给抖音，否则悬浮窗一直占 key → 主页像卡住
+    static func restoreHostKeyWindow() {
+        shared.restoreHostKeyWindow()
+    }
+
     private var floatWindow: BXFloatPassthroughWindow?
     private var bubbleView: FloatingBubbleView?
     private var settingsPanel: CamSettingsPanel?
@@ -283,18 +288,38 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             panel.delegate = self
             settingsPanel = panel
             host.addSubview(panel)
+            // 先 layout：否则 card.bounds=0 → hitTest 全穿透，面板看得见点不着
+            panel.layoutIfNeeded()
         } else {
             settingsPanel?.reloadFromStore()
             settingsPanel?.isHidden = false
             host.bringSubviewToFront(settingsPanel!)
+            settingsPanel?.layoutIfNeeded()
         }
     }
 
     private func hidePanel() {
         panelVisible = false
+        settingsPanel?.endEditing(true)
         settingsPanel?.removeFromSuperview()
         settingsPanel = nil
         bubbleView?.isHidden = false
+        restoreHostKeyWindow()
+    }
+
+    private func restoreHostKeyWindow() {
+        guard let float = floatWindow, float.isKeyWindow else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        var windows: [UIWindow] = []
+        for scene in scenes { windows.append(contentsOf: scene.windows) }
+        if windows.isEmpty { windows = UIApplication.shared.windows }
+        let host = windows
+            .filter { $0 !== float && !($0 is BXFloatPassthroughWindow) && !$0.isHidden && $0.alpha > 0.01 }
+            .max(by: {
+                ($0.bounds.width * $0.bounds.height) < ($1.bounds.width * $1.bounds.height)
+            })
+        host?.makeKey()
+        NSLog("BXFloatCam restoreHostKeyWindow host=%@", host?.description ?? "nil")
     }
 
     func camSettingsPanelDidCollapse(_ panel: CamSettingsPanel) {

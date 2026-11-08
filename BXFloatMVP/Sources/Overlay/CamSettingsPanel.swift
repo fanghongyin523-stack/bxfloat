@@ -178,6 +178,10 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         styleField(ipField, placeholder: "电脑 IP，例如 192.168.1.191")
         ipField.keyboardType = .decimalPad
         ipField.addTarget(self, action: #selector(ipEdited), for: .editingDidEnd)
+        // 数字键盘无 Return：点面板空白处也要收键盘并把 key 还给抖音
+        let tapBlank = UITapGestureRecognizer(target: self, action: #selector(cardBlankTapped))
+        tapBlank.cancelsTouchesInView = false
+        card.addGestureRecognizer(tapBlank)
         styleFilledButton(pasteButton, title: "粘贴")
         pasteButton.addTarget(self, action: #selector(pasteTapped), for: .touchUpInside)
         styleFilledButton(pickLocalButton, title: "选视频")
@@ -224,6 +228,8 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         blendSlider.maximumValue = 100
         blendSlider.tintColor = accent
         blendSlider.addTarget(self, action: #selector(blendSliderChanged), for: .valueChanged)
+        blendSlider.addTarget(self, action: #selector(blendSliderCommitted), for: .touchUpInside)
+        blendSlider.addTarget(self, action: #selector(blendSliderCommitted), for: .touchUpOutside)
         blendHint.font = .systemFont(ofSize: 11)
         blendHint.textColor = textSecondary
         blendHint.numberOfLines = 0
@@ -465,11 +471,20 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     }
 
     @objc private func modeChanged() { updateModeHint(); commit() }
-    @objc private func ipEdited() { commit() }
+    @objc private func ipEdited() {
+        commit()
+        FloatingOverlayController.restoreHostKeyWindow()
+    }
+    @objc private func cardBlankTapped() {
+        endEditing(true)
+        FloatingOverlayController.restoreHostKeyWindow()
+    }
     @objc private func replaceChanged() { commit() }
     @objc private func audioChanged() { commit() }
     @objc private func blendChanged() { commit() }
-    @objc private func blendSliderChanged() { updateAdvancedChrome(); commit() }
+    /// 拖动中只改文案，松手再 commit，避免拖一次 apply 几十次
+    @objc private func blendSliderChanged() { updateAdvancedChrome() }
+    @objc private func blendSliderCommitted() { updateAdvancedChrome(); commit() }
     @objc private func timedChanged() { CamReplacePolicy.resetCycle(); commit() }
     @objc private func timedParamsChanged() { CamReplacePolicy.resetCycle(); commit() }
 
@@ -569,6 +584,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     @objc private func collapseTapped() {
         endEditing(true)
         commit()
+        FloatingOverlayController.restoreHostKeyWindow()
         delegate?.camSettingsPanelDidCollapse(self)
     }
 

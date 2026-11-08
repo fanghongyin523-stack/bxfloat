@@ -720,16 +720,9 @@ final class CamAudioStore {
             )
         }
         if pk <= 0 {
+            // failclosed：与 AU PullS16 一致，欠载整段静音；禁止 envelope 托末样（电流根因）
             CamPipelineDiag.shared.noteAudioUnderrun()
-            fillWithEnvelope(
-                into: dst,
-                frames: outFrames,
-                auChannels: auCh,
-                isFloat: isFloat,
-                sampleBytes: sampleBytes,
-                nonInterleaved: isNonInterleaved,
-                decaying: true
-            )
+            Self.silence(into: dst, byteCount: byteCount)
             return false
         }
         writePCM(
