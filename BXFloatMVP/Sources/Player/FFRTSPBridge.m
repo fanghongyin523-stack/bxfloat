@@ -267,8 +267,9 @@ static int BXFloatFFInterrupt(void *opaque) {
                     if (openFmt == AV_SAMPLE_FMT_NONE) {
                         openFmt = AV_SAMPLE_FMT_FLTP;
                     }
-                    // 对标 VCamTang：环内保持素材采样钟；swr 只做 s16/声道，不追 AU 率
-                    int openWant = inRate > 0 ? inRate : 48000;
+                    // 优先 AU 目标率（有则入环即 1:1）；未锁 AU 前跟源率
+                    int openWant = (int)BXFloatAudioTargetRate();
+                    if (openWant < 8000) openWant = inRate > 0 ? inRate : 48000;
                     swr = swr_alloc_set_opts(
                         NULL, outLayout, AV_SAMPLE_FMT_S16, openWant,
                         inLayout, openFmt, inRate, 0, NULL
@@ -455,8 +456,9 @@ static int BXFloatFFInterrupt(void *opaque) {
                     if (inFmt == AV_SAMPLE_FMT_NONE) inFmt = audioInFmtBlock;
                     if (inFmt == AV_SAMPLE_FMT_NONE) inFmt = AV_SAMPLE_FMT_FLTP;
                     int64_t inLayout = av_get_default_channel_layout(inCh);
-                    // 保持素材 rate；播出侧 pull 再 SRC 到 AU（禁止解码追 AU 反复重建 swr）
-                    int wantRate = inRate > 0 ? inRate : 48000;
+                    // 有 AU 锁则 swr 直接出 AU 率；否则跟源（避免拉环块 SRC→一帧帧）
+                    int wantRate = (int)BXFloatAudioTargetRate();
+                    if (wantRate < 8000) wantRate = inRate > 0 ? inRate : 48000;
                     const int och = inCh >= 2 ? 2 : 1;
                     const int64_t outLayout = och == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
                     BOOL needSwr = (swrBlock == NULL)

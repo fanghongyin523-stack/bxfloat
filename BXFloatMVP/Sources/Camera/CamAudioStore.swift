@@ -68,20 +68,33 @@ final class CamAudioStore {
 
     private init() {}
 
-    /// AU/AQ 只记录宿主格式提示；环钟跟解码（对标 VCamTang：禁止 AU 锁率清环重采样）。
+    /// AU 首次给出宿主率：环钟对齐到 AU，之后入环/拉环 1:1（消灭每次回调块 SRC→一帧帧感）。
+    /// 仅在速率真正变化时清环一次；禁止播中反复清。
     func lockTargetFromAU(sampleRate: Int, channels: Int, isFloat: Bool) {
         let rate = sampleRate > 0 ? sampleRate : defaultRate
         let ch = max(1, min(2, channels))
         lock.lock()
-        let changed = auHintRate != rate || auHintChannels != ch
+        let hintChanged = auHintRate != rate || auHintChannels != ch
         auHintRate = rate
         auHintChannels = ch
+        var didFlush = false
+        if decodeRate != rate {
+            decodeRate = rate
+            if !chunks.isEmpty || !pending.isEmpty {
+                chunks.removeAll(keepingCapacity: true)
+                pending.removeAll(keepingCapacity: true)
+                playhead = -1
+                monitorPlayhead = -1
+                envelope = 1.0
+                didFlush = true
+            }
+        }
         let ring = storeRate
         lock.unlock()
-        if changed {
+        if hintChanged || didFlush {
             let note = String(
-                format: "AU-hint %dHz %dch float=%d ring@%dHz (no flush)",
-                rate, ch, isFloat ? 1 : 0, ring
+                format: "AU-lock %dHz %dch float=%d ring@%dHz flush=%d (1:1 pull)",
+                rate, ch, isFloat ? 1 : 0, ring, didFlush ? 1 : 0
             )
             CamPipelineDiag.shared.noteAudioFormat(note)
             NSLog("BXFloatAudio %@", note)
@@ -167,9 +180,11 @@ final class CamAudioStore {
             }
         }
 
-        // 环钟=素材采样率；异率源极少见，入环一次 SRC。播出侧再对 AU 做一次。
+        // 环钟优先 AU 率（有 hint 则入环一次 SRC）；拉环 1:1，避免每回调块 SRC 听成一帧帧。
         lock.lock()
-        if decodeRate <= 0 {
+        if auHintRate > 0 {
+            decodeRate = auHintRate
+        } else if decodeRate <= 0 {
             decodeRate = rate
         }
         let ringRate = decodeRate > 0 ? decodeRate : defaultRate
@@ -406,6 +421,14 @@ final class CamAudioStore {
         lock.unlock()
 
         if consumed <= 0 || localStore.isEmpty {
+            // 环里还有素材但本回调 peek 空：hold 末样保连续（静音垫=一帧帧缝）
+            if ringPk > 0 {
+                fillHoldSamples(dst, frames: frames, channels: auCh)
+                CamPipelineDiag.shared.notePaintGate(
+                    ringPk: ringPk, peekPk: peekPk, convPk: 0, dstPk: 0, forced: false
+                )
+                return max(1, abs(Int32(lastL)))
+            }
             let n = frames * auCh
             for i in 0..<n { dst[i] = 0 }
             CamPipelineDiag.shared.notePaintGate(
@@ -414,7 +437,7 @@ final class CamAudioStore {
             return 0
         }
 
-        // 环率=AU：直拷连续 PCM；异率仅块级线性 SRC（非 soft-rate 追环）
+        // 环率=AU：直拷；仅残余异率才块 SRC（正常路径应 1:1）
         let rateConverted: [Int16]
         if dstRate == ringRate, consumed >= frames {
             rateConverted = Array(localStore.prefix(frames * ringCh))
@@ -428,11 +451,16 @@ final class CamAudioStore {
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: frames)
         let haveFrames = min(frames, rateConverted.count / max(1, ringCh))
         if haveFrames < frames {
-            // failclosed：欠载尾垫静音，禁止 hold 末样冒充素材
-            let ch = max(1, auCh)
-            for i in haveFrames..<frames {
-                for c in 0..<ch { laid[i * ch + c] = 0 }
-            }
+            // 微欠载：hold 末样连续填满回调，禁止静音尾缝（听感一帧帧）
+            let seedL = haveFrames > 0 ? laid[(haveFrames - 1) * auCh] : lastL
+            let seedR = haveFrames > 0
+                ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
+                : lastR
+            holdPadInterleaved(
+                &laid, channels: auCh,
+                fromFrame: haveFrames, toFrame: frames,
+                seedL: seedL, seedR: seedR
+            )
         } else if laid.count > frames * auCh {
             laid = Array(laid.prefix(frames * auCh))
         }
@@ -1208,10 +1236,10 @@ final class CamAudioStore {
             if chunkEnd <= cursor { continue }
             if chunk.pts > cursor + 0.001 {
                 // 包间缺口必须占时间轴（禁跳读甩后 playhead→短剁）
-                // <80ms：末样 hold 抹微缝；≥80ms：静音占位（切歌等源侧长洞原样保留）
+                // <120ms：末样 hold 抹微缝（AAC/回调间隙）；更长才静音占位
                 let gapSec = chunk.pts - cursor
                 let gapFrames = min(frames - written, max(0, Int((gapSec * Double(storeRate)).rounded())))
-                let micro = gapSec < 0.080
+                let micro = gapSec < 0.120
                 if gapFrames > 0 {
                     for i in 0..<gapFrames {
                         let base = (written + i) * ch
