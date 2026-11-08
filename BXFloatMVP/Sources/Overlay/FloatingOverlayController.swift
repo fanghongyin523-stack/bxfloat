@@ -3,7 +3,8 @@ import UIKit
 /// 点击穿透：只让悬浮球/面板吃到触摸，其它交给下面的抖音窗口。
 /// 永远不能成为 keyWindow：否则主页滑动会被抖音当成失焦而暂停。
 final class BXFloatPassthroughWindow: UIWindow {
-    override var canBecomeKeyWindow: Bool { false }
+    // iOS 15+ / 新 Xcode：属性名是 canBecomeKey（旧名 canBecomeKeyWindow 已改名）
+    override var canBecomeKey: Bool { false }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let view = super.hitTest(point, with: event)
