@@ -1312,12 +1312,14 @@ final class CamAudioStore {
         for i in 0..<use {
             let l = input[i * fCh]
             let r = fCh > 1 ? input[i * fCh + 1] : l
+            // 先折成单声道素材电平；多声道 AU 只写左、右置 0。
+            // 抖音录制常把立体声麦 L+R 直接相加（无 /2）：L=R=满幅 → 录回放顶 0dBFS/电流。
+            let mono: Int16 = fCh > 1 ? Int16(clamping: (Int(l) + Int(r)) / 2) : l
             if tCh == 1 {
-                out[i] = fCh > 1 ? Int16(clamping: (Int(l) + Int(r)) / 2) : l
+                out[i] = mono
             } else {
-                out[i * tCh] = l
-                out[i * tCh + 1] = r
-                for c in 2..<tCh { out[i * tCh + c] = l }
+                out[i * tCh] = mono
+                for c in 1..<tCh { out[i * tCh + c] = 0 }
             }
         }
         return out

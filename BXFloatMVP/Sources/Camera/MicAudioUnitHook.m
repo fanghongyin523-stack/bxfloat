@@ -472,54 +472,37 @@ static void paintABL(
     int planeBps = bytesPerSample;
     if (isFloat && planeBps < 4) planeBps = 4;
 
-    // 整缓冲覆盖写满：禁止残留原麦与注入拼缝；禁脏静音垫
+    // 先清整缓冲盖掉原麦，再只写 inNumberFrames；禁止用末样灌满 cap（会变成可闻台阶）
     if (nonInterleaved) {
         int planes = (int)ioData->mNumberBuffers;
         for (int p = 0; p < planes; p++) {
             AudioBuffer *buf = &ioData->mBuffers[p];
             if (!buf->mData || buf->mDataByteSize == 0) continue;
+            memset(buf->mData, 0, buf->mDataByteSize);
             uint8_t *dst = (uint8_t *)buf->mData;
             size_t cap = buf->mDataByteSize;
             int srcCh = p < outCh ? p : (outCh - 1);
             if (srcCh < 0) srcCh = 0;
-            int16_t last = pcm[srcCh];
             for (UInt32 i = 0; i < frames; i++) {
                 size_t off = (size_t)i * (size_t)planeBps;
                 if (off + (size_t)planeBps > cap) break;
-                last = pcm[i * outCh + srcCh];
-                writeOneSample(dst + off, last, planeBps, isFloat);
-            }
-            // 写满 cap：末样延续，禁静音硬边
-            size_t off = (size_t)frames * (size_t)planeBps;
-            for (; off + (size_t)planeBps <= cap; off += (size_t)planeBps) {
-                writeOneSample(dst + off, last, planeBps, isFloat);
+                writeOneSample(dst + off, pcm[i * outCh + srcCh], planeBps, isFloat);
             }
         }
     } else {
         AudioBuffer *b0 = &ioData->mBuffers[0];
         if (b0->mData && b0->mDataByteSize) {
+            memset(b0->mData, 0, b0->mDataByteSize);
             uint8_t *dst = (uint8_t *)b0->mData;
             size_t cap = b0->mDataByteSize;
             int ch = chInBuf > 0 ? chInBuf : 1;
-            int16_t lastL = 0, lastR = 0;
-            size_t nextOff = 0;
             for (UInt32 i = 0; i < frames; i++) {
                 for (int c = 0; c < ch; c++) {
                     size_t off = ((size_t)i * (size_t)ch + (size_t)c) * (size_t)planeBps;
-                    if (off + (size_t)planeBps > cap) { nextOff = off; goto fill_rest_i; }
-                    int src = c < outCh ? c : (outCh > 1 ? (c % outCh) : 0);
-                    int16_t s = pcm[i * outCh + src];
-                    if (c == 0) lastL = s;
-                    if (c == 1) lastR = s;
-                    writeOneSample(dst + off, s, planeBps, isFloat);
-                    nextOff = off + (size_t)planeBps;
+                    if (off + (size_t)planeBps > cap) break;
+                    int src = c < outCh ? c : 0;
+                    writeOneSample(dst + off, pcm[i * outCh + src], planeBps, isFloat);
                 }
-            }
-        fill_rest_i:
-            for (size_t off = nextOff; off + (size_t)planeBps <= cap; off += (size_t)planeBps) {
-                int c = ch > 0 ? (int)((off / (size_t)planeBps) % (size_t)ch) : 0;
-                int16_t fill = (c == 1 && outCh > 1) ? lastR : lastL;
-                writeOneSample(dst + off, fill, planeBps, isFloat);
             }
         }
     }
