@@ -62,7 +62,7 @@ final class FloatingBubbleView: UIView {
         layer.cornerRadius = min(bounds.width, bounds.height) / 2
         label.frame = bounds
         replaceDot.frame = CGRect(x: bounds.width - 14, y: 6, width: 8, height: 8)
-        closeButton.frame = CGRect(x: -2, y: -2, width: 20, height: 20)
+        closeButton.frame = CGRect(x: 2, y: 2, width: 20, height: 20)
     }
 
     @objc private func tapped() {

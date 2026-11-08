@@ -1,7 +1,7 @@
 import UIKit
 
 /// 点击穿透：只让悬浮球/面板吃到触摸，其它交给下面的抖音窗口。
-private final class BXFloatPassthroughWindow: UIWindow {
+final class BXFloatPassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let view = super.hitTest(point, with: event)
         if view === self || view === rootViewController?.view { return nil }
@@ -12,6 +12,9 @@ private final class BXFloatPassthroughWindow: UIWindow {
 /// 悬浮球挂在独立 UIWindow；默认不播画面。开「替换」才拉流盖摄像预览区。
 final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleViewDelegate {
     static let shared = FloatingOverlayController()
+
+    /// 供面板 present 时避开自己的窗（禁止从空 rootVC 弹相册抢焦点）
+    static var overlayWindow: UIWindow? { shared.floatWindow }
 
     private var floatWindow: BXFloatPassthroughWindow?
     private var bubbleView: FloatingBubbleView?
@@ -123,7 +126,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         let bubbleMissing = bubbleView == nil
         let bubbleOrphan = bubbleView.map { $0.superview !== fw } ?? false
 
-        // 定时器：窗口/场景/气泡都正常时不做整套同步（避免每秒 syncPuller）
+        // 定时器：结构正常时只刷策略（定时露真切麦），禁止每秒 syncPuller 重入
         if reason == "timer",
            !missingWindow,
            !sceneMismatch,
@@ -131,6 +134,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
            !bubbleOrphan,
            !fw.isHidden
         {
+            syncReplaceForCurrentSurface()
             return
         }
 
@@ -148,7 +152,10 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         fw.alpha = 1
         didMakeKeyOnce = true
         syncReplaceForCurrentSurface()
-        syncPuller(MediaConfigStore.shared.config)
+        // win/active 只保结构+策略；拉流只在 apply/配置变更时同步，避免抖音弹窗频繁重置环
+        if reason != "win", reason != "active", reason != "scene" {
+            syncPuller(MediaConfigStore.shared.config)
+        }
     }
 
     private func ensureFloatWindow(preferring scene: UIWindowScene?) {
@@ -196,8 +203,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         guard let host = floatWindow else { return }
         host.isHidden = false
 
+        // 禁止 startAndWait：主线程 sleep 最多 2.5s → 点面板/切模式像整机卡死（参照不会这么做）
         if config.connectionMode == .usb {
-            USBStreamBridge.shared.startAndWait()
+            USBStreamBridge.shared.start()
         } else {
             USBStreamBridge.shared.stop()
         }

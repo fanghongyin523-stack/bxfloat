@@ -18,19 +18,7 @@ final class USBStreamBridge {
 
     private init() {}
 
-    func startAndWait() {
-        queue.async { self.startLocked() }
-        let deadline = Date().addingTimeInterval(2.5)
-        while Date() < deadline {
-            var ok = false
-            queue.sync {
-                ok = self.isRunning && self.channels.allSatisfy(\.isReady)
-            }
-            if ok { return }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-    }
-
+    /// 异步启动；禁止在主线程忙等（旧 startAndWait 会 sleep 卡死 UI）。
     func start() {
         queue.async { self.startLocked() }
     }

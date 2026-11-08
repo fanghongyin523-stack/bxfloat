@@ -499,19 +499,21 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     }
 
     @objc private func pickLocalTapped() {
-        guard let host = parentViewController() else { return }
+        // 必须从抖音 keyWindow 的 VC present：从悬浮窗空 root 弹会 makeKey + 系统 dim，整屏变暗像卡死
+        guard let host = presentationHost() else { return }
         let sheet = UIAlertController(title: "选择本地视频", message: nil, preferredStyle: .actionSheet)
         if UIImagePickerController.isSourceTypeAvailable(.photoLibrary) {
             sheet.addAction(UIAlertAction(title: "相册", style: .default) { [weak self] _ in
+                guard let self, let host = self.presentationHost() else { return }
                 let picker = UIImagePickerController()
                 picker.sourceType = .photoLibrary
                 picker.mediaTypes = ["public.movie"]
                 picker.delegate = self
                 host.present(picker, animated: true)
-                _ = self
             })
         }
         sheet.addAction(UIAlertAction(title: "文件", style: .default) { [weak self] _ in
+            guard let self, let host = self.presentationHost() else { return }
             let picker: UIDocumentPickerViewController
             if #available(iOS 14, *) {
                 picker = UIDocumentPickerViewController(
@@ -526,7 +528,6 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             }
             picker.delegate = self
             host.present(picker, animated: true)
-            _ = self
         })
         sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
         if let pop = sheet.popoverPresentationController {
@@ -587,12 +588,38 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         }
     }
 
-    private func parentViewController() -> UIViewController? {
-        var r: UIResponder? = self
-        while let cur = r {
-            if let vc = cur as? UIViewController { return vc }
-            r = cur.next
+    /// 抖音前台 keyWindow 的顶层 VC；绝不返回悬浮窗自己的空 root。
+    private func presentationHost() -> UIViewController? {
+        let float = FloatingOverlayController.overlayWindow
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        var windows: [UIWindow] = []
+        for scene in scenes { windows.append(contentsOf: scene.windows) }
+        if windows.isEmpty { windows = UIApplication.shared.windows }
+
+        let usable = windows.filter { w in
+            w !== float
+                && !(w is BXFloatPassthroughWindow)
+                && !w.isHidden
+                && w.alpha > 0.01
+                && w.bounds.width > 1
         }
-        return nil
+        let preferred =
+            usable.first(where: { $0.isKeyWindow })
+            ?? usable.max(by: {
+                ($0.bounds.width * $0.bounds.height) < ($1.bounds.width * $1.bounds.height)
+            })
+        guard let root = preferred?.rootViewController else { return nil }
+        return topMost(root)
+    }
+
+    private func topMost(_ root: UIViewController) -> UIViewController {
+        if let presented = root.presentedViewController { return topMost(presented) }
+        if let nav = root as? UINavigationController, let visible = nav.visibleViewController {
+            return topMost(visible)
+        }
+        if let tab = root as? UITabBarController, let selected = tab.selectedViewController {
+            return topMost(selected)
+        }
+        return root
     }
 }
