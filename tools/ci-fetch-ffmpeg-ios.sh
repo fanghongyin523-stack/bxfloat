@@ -13,18 +13,32 @@ cd "$OUT/_tmp"
 
 for lib in "${LIBS[@]}"; do
   echo ">> fetch $lib"
-  # GitHub release CDN 偶发 504；加重试避免整次 CI 白挂
+  # Actions 上匿名 CDN 常 504；优先用 gh（带 GITHUB_TOKEN）拉 release 资产
   ok=0
-  for attempt in 1 2 3 4 5; do
-    if curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
-        -o "${lib}.zip" "${BASE}/${lib}.zip"; then
-      ok=1
-      break
-    fi
-    echo "fetch $lib attempt $attempt failed; sleep and retry" >&2
-    sleep $((attempt * 3))
-  done
+  if command -v gh >/dev/null 2>&1; then
+    for attempt in 1 2 3 4 5; do
+      rm -f "${lib}.zip"
+      if gh release download "${VER}" -R monsoir/FFmpeg-iOS -p "${lib}.zip" --clobber; then
+        if [[ -s "${lib}.zip" ]]; then ok=1; break; fi
+      fi
+      echo "gh fetch $lib attempt $attempt failed; sleep and retry" >&2
+      sleep $((attempt * 4))
+    done
+  fi
   if [[ "$ok" -ne 1 ]]; then
+    for attempt in 1 2 3 4 5; do
+      if curl -fsSL --retry 3 --retry-all-errors --retry-delay 3 \
+          -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+          -H "Accept: application/octet-stream" \
+          -o "${lib}.zip" "${BASE}/${lib}.zip"; then
+        ok=1
+        break
+      fi
+      echo "curl fetch $lib attempt $attempt failed; sleep and retry" >&2
+      sleep $((attempt * 4))
+    done
+  fi
+  if [[ "$ok" -ne 1 || ! -s "${lib}.zip" ]]; then
     echo "ERROR: failed to fetch ${lib}.zip from ${BASE}" >&2
     exit 1
   fi
