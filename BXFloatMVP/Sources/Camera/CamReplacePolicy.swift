@@ -16,7 +16,8 @@ enum CamReplacePolicy {
         lock.lock()
         defer { lock.unlock() }
         if cycleAnchor <= 0 { cycleAnchor = now }
-        let interval = max(60, Double(cfg.timedRealIntervalSec))
+        // 允许手填；下限 10 秒间隔 / 1 秒露真（面板可自定义）
+        let interval = max(10, Double(cfg.timedRealIntervalSec))
         let show = max(1, Double(cfg.timedRealShowSec))
         if now < revealingUntil { return true }
         let elapsed = now - cycleAnchor

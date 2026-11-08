@@ -1,7 +1,10 @@
 import UIKit
 
 /// 点击穿透：只让悬浮球/面板吃到触摸，其它交给下面的抖音窗口。
+/// 永远不能成为 keyWindow：否则主页滑动会被抖音当成失焦而暂停。
 final class BXFloatPassthroughWindow: UIWindow {
+    override var canBecomeKeyWindow: Bool { false }
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let view = super.hitTest(point, with: event)
         if view === self || view === rootViewController?.view { return nil }
@@ -16,7 +19,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     /// 供面板 present 时避开自己的窗（禁止从空 rootVC 弹相册抢焦点）
     static var overlayWindow: UIWindow? { shared.floatWindow }
 
-    /// 输完 IP / 收起面板后：把 key 还给抖音，否则悬浮窗一直占 key → 主页像卡住
+    /// 兼容旧调用：本窗永不抢 key，仍尝试把 key 钉回抖音
     static func restoreHostKeyWindow() {
         shared.restoreHostKeyWindow()
     }
@@ -25,9 +28,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private var bubbleView: FloatingBubbleView?
     private var settingsPanel: CamSettingsPanel?
     private var panelVisible = false
+    private var pickerChromeHidden = false
     private var reattachTimer: Timer?
-    private var didMakeKeyOnce = false
-    private var pullURL: String?
+    private var pullKey: String?
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -63,6 +66,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         syncReplaceForCurrentSurface()
         apply(MediaConfigStore.shared.config)
         startReattachTimer()
+        restoreHostKeyWindow()
     }
 
     func refreshSceneIfNeeded(_ scene: UIWindowScene?) {
@@ -78,17 +82,20 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     func applyOpacityLive(_ opacity: Float) {
-        // 悬浮球模式暂不跟透明度；保留接口兼容
         MediaConfigStore.shared.update(postNotification: false) { $0.opacity = max(0.2, min(opacity, 1)) }
     }
 
     @objc private func configChanged() { apply(MediaConfigStore.shared.config) }
-    @objc private func appActive() { reattachIfNeeded(reason: "active") }
+    @objc private func appActive() {
+        reattachIfNeeded(reason: "active")
+        restoreHostKeyWindow()
+    }
     @objc private func sceneActive() { reattachIfNeeded(reason: "scene") }
     @objc private func windowVisible(_ note: Notification) {
         guard let w = note.object as? UIWindow, w !== floatWindow else { return }
         DispatchQueue.main.async { [weak self] in
             self?.reattachIfNeeded(reason: "win")
+            self?.restoreHostKeyWindow()
         }
     }
 
@@ -104,16 +111,15 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
     private func syncReplaceForCurrentSurface() {
         let cfg = MediaConfigStore.shared.config
-        // 真替换：只走 sample 画帧；盖层窗会挡住开播按钮/标题，永久关掉
         PreviewCover.stop()
-        // 硬约束：未手动开替换则绝不注入
         CameraReplaceHooks.applyReplaceMode(cfg.replaceCameraEnabled)
-        // 定时露真会强制现场麦，故每秒同步一次
         MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
     }
 
     private func reattachIfNeeded(reason: String) {
         guard MediaConfigStore.shared.config.overlayEnabled else { return }
+        if pickerChromeHidden { return }
+
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
@@ -131,7 +137,6 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         let bubbleMissing = bubbleView == nil
         let bubbleOrphan = bubbleView.map { $0.superview !== fw } ?? false
 
-        // 定时器：结构正常时只刷策略（定时露真切麦），禁止每秒 syncPuller 重入
         if reason == "timer",
            !missingWindow,
            !sceneMismatch,
@@ -151,13 +156,12 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             NSLog("BXFloatCam reattach bubble reason=%@", reason)
             fw.addSubview(bubble)
         }
-        // 对标 VCamTang 悬浮面板：显示即可，禁止 makeKey 抢抖音焦点（主页滑动暂停根因）
         fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
-        fw.isHidden = false
+        if !pickerChromeHidden {
+            fw.isHidden = false
+        }
         fw.alpha = 1
-        didMakeKeyOnce = true
         syncReplaceForCurrentSurface()
-        // win/active 只保结构+策略；拉流只在 apply/配置变更时同步，避免抖音弹窗频繁重置环
         if reason != "win", reason != "active", reason != "scene" {
             syncPuller(MediaConfigStore.shared.config)
         }
@@ -187,7 +191,6 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         fw.rootViewController = root
         fw.isHidden = false
         floatWindow = fw
-        didMakeKeyOnce = false
     }
 
     private func apply(_ config: MediaConfig) {
@@ -206,9 +209,10 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
         ensureFloatWindow(preferring: nil)
         guard let host = floatWindow else { return }
-        host.isHidden = false
+        if !pickerChromeHidden {
+            host.isHidden = false
+        }
 
-        // 禁止 startAndWait：主线程 sleep 最多 2.5s → 点面板/切模式像整机卡死（参照不会这么做）
         if config.connectionMode == .usb {
             USBStreamBridge.shared.start()
         } else {
@@ -217,32 +221,34 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
         ensureBubble(on: host)
         bubbleView?.setReplaceActive(config.replaceCameraEnabled)
-        bubbleView?.isHidden = panelVisible
-        if panelVisible, let panel = settingsPanel {
+        bubbleView?.isHidden = panelVisible || pickerChromeHidden
+        if panelVisible, !pickerChromeHidden, let panel = settingsPanel {
             host.bringSubviewToFront(panel)
         }
 
         syncPuller(config)
     }
 
-    /// 开「替换摄像头」或「推流声音」时拉源（对标 VCam：rtsp / usb 隧道 / 本地文件分派）。
+    /// 模式/URL/开关变化时先停干净再起，避免局域网↔数据线↔本地切换粘连旧环。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
         let needPull = (config.replaceCameraEnabled || config.audioCaptureMode == .stream) && !url.isEmpty
-        guard needPull else {
-            stopPuller()
+        let key = needPull
+            ? "\(config.connectionMode.rawValue)|\(url)"
+            : "off"
+        if pullKey == key {
             return
         }
+        stopPuller()
+        pullKey = key
+        guard needPull else { return }
+
         switch config.connectionMode {
         case .localVideo:
-            FFRTSPController.stop()
             LocalVideoPlayer.shared.start(urlString: url)
-            pullURL = url
         case .lan, .usb, .manual:
-            LocalVideoPlayer.shared.stop()
             if url.hasPrefix("rtsp://") || url.lowercased().hasPrefix("http") {
                 FFRTSPController.start(urlString: url)
-                pullURL = url
             } else {
                 stopPuller()
             }
@@ -252,7 +258,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private func stopPuller() {
         FFRTSPController.stop()
         LocalVideoPlayer.shared.stop()
-        pullURL = nil
+        CamFrameStore.shared.reset()
+        pullKey = nil
     }
 
     private func ensureBubble(on host: UIWindow) {
@@ -267,7 +274,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         let created = FloatingBubbleView(
             frame: CGRect(
                 x: host.bounds.width - side - 16,
-                y: host.bounds.height * 0.55,
+                y: host.bounds.height * 0.42,
                 width: side,
                 height: side
             )
@@ -288,7 +295,6 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             panel.delegate = self
             settingsPanel = panel
             host.addSubview(panel)
-            // 先 layout：否则 card.bounds=0 → hitTest 全穿透，面板看得见点不着
             panel.layoutIfNeeded()
         } else {
             settingsPanel?.reloadFromStore()
@@ -296,6 +302,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             host.bringSubviewToFront(settingsPanel!)
             settingsPanel?.layoutIfNeeded()
         }
+        restoreHostKeyWindow()
     }
 
     private func hidePanel() {
@@ -303,23 +310,50 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         settingsPanel?.endEditing(true)
         settingsPanel?.removeFromSuperview()
         settingsPanel = nil
-        bubbleView?.isHidden = false
+        bubbleView?.isHidden = pickerChromeHidden
         restoreHostKeyWindow()
     }
 
+    /// 选相册/文件时整窗隐藏，避免盖住系统选片器。
+    func camSettingsPanelSetPickerMode(_ on: Bool) {
+        pickerChromeHidden = on
+        guard let fw = floatWindow else { return }
+        if on {
+            fw.isHidden = true
+            restoreHostKeyWindow()
+        } else {
+            fw.isHidden = false
+            fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
+            if panelVisible {
+                settingsPanel?.isHidden = false
+                bubbleView?.isHidden = true
+            } else {
+                bubbleView?.isHidden = false
+            }
+            restoreHostKeyWindow()
+        }
+    }
+
     private func restoreHostKeyWindow() {
-        guard let float = floatWindow, float.isKeyWindow else { return }
+        let float = floatWindow
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         var windows: [UIWindow] = []
         for scene in scenes { windows.append(contentsOf: scene.windows) }
         if windows.isEmpty { windows = UIApplication.shared.windows }
         let host = windows
-            .filter { $0 !== float && !($0 is BXFloatPassthroughWindow) && !$0.isHidden && $0.alpha > 0.01 }
+            .filter {
+                $0 !== float
+                    && !($0 is BXFloatPassthroughWindow)
+                    && !$0.isHidden
+                    && $0.alpha > 0.01
+                    && $0.bounds.width > 1
+            }
             .max(by: {
                 ($0.bounds.width * $0.bounds.height) < ($1.bounds.width * $1.bounds.height)
             })
-        host?.makeKey()
-        NSLog("BXFloatCam restoreHostKeyWindow host=%@", host?.description ?? "nil")
+        guard let host, !host.isKeyWindow else { return }
+        host.makeKey()
+        NSLog("BXFloatCam restoreHostKeyWindow host=%@", host.description)
     }
 
     func camSettingsPanelDidCollapse(_ panel: CamSettingsPanel) {

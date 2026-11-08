@@ -4,14 +4,18 @@ import MobileCoreServices
 
 protocol CamSettingsPanelDelegate: AnyObject {
     func camSettingsPanelDidCollapse(_ panel: CamSettingsPanel)
+    /// 选相册/文件时隐藏悬浮窗，避免挡住系统选片器
+    func camSettingsPanelSetPickerMode(_ on: Bool)
 }
 
 /// 设置面板：功能结构对齐目标照片；视觉深灰中间档通透。
-/// 修复：禁止全屏遮罩锁死抖音；卡片外触摸穿透；收起按钮固定可见。
+/// - 卡片外穿透；可拖动；默认偏上，少挡抖音底栏/选片
+/// - 定时露真支持手填秒数；选视频前整窗隐藏
 final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
     weak var delegate: CamSettingsPanelDelegate?
 
     private let card = UIView()
+    private let dragHandle = UIView()
     private let scroll = UIScrollView()
     private let content = UIView()
     private let footer = UIView()
@@ -21,6 +25,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     private let modeHint = UILabel()
     private let ipField = UITextField()
     private let pasteButton = UIButton(type: .system)
+    private let editIPButton = UIButton(type: .system)
     private let pickLocalButton = UIButton(type: .system)
     private let replaceRow = UIStackView()
     private let replaceLabel = UILabel()
@@ -36,8 +41,9 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     private let blendSlider = UISlider()
     private let blendHint = UILabel()
     private let timedRow = makeSwitchRow(title: "定时显示真实镜头")
-    private let intervalControl = UISegmentedControl(items: ["30分", "1小时", "2小时"])
-    private let showControl = UISegmentedControl(items: ["1秒", "2秒", "3秒"])
+    private let intervalField = UITextField()
+    private let showSecField = UITextField()
+    private let timedPreset = UISegmentedControl(items: ["30分", "1小时", "2小时"])
     private let timedHint = UILabel()
 
     private let statusLabel = UILabel()
@@ -48,8 +54,9 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     private var advancedExpanded = false
     private var statusTimer: Timer?
     private var cardHeightConstraint: NSLayoutConstraint?
+    private var cardCenterYConstraint: NSLayoutConstraint?
+    private var cardDragOffset: CGFloat = -72
 
-    /// 深灰 + 中间档透明度（不用系统 semantic，避免注入宿主 trait 导致看不见控件）
     private let cardBg = UIColor(white: 0.16, alpha: 0.88)
     private let fieldBg = UIColor(white: 1.0, alpha: 0.12)
     private let textPrimary = UIColor.white
@@ -68,7 +75,6 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         statusTimer?.invalidate()
     }
 
-    /// 卡片外不吃触摸 → 抖音可继续滑，不会「整屏卡住」
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let p = convert(point, to: card)
         if card.bounds.contains(p) {
@@ -79,10 +85,12 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let h = min(max(bounds.height * 0.62, 300), bounds.height * 0.78)
+        let h = min(max(bounds.height * 0.52, 280), bounds.height * 0.68)
         if abs((cardHeightConstraint?.constant ?? 0) - h) > 0.5 {
             cardHeightConstraint?.constant = h
         }
+        clampCardOffset()
+        cardCenterYConstraint?.constant = cardDragOffset
     }
 
     func reloadFromStore() {
@@ -99,17 +107,18 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         case .microphone: audioControl.selectedSegmentIndex = 1
         case .mute: audioControl.selectedSegmentIndex = 2
         }
-        // 打开时默认收起高级区，避免卡片过高
         advancedExpanded = false
         blendRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn = cfg.blendRealCamera
         blendSlider.value = Float(cfg.blendOBSPercent)
         timedRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn = cfg.timedRealCamera
+        intervalField.text = "\(max(10, cfg.timedRealIntervalSec))"
+        showSecField.text = "\(max(1, min(60, cfg.timedRealShowSec)))"
         switch cfg.timedRealIntervalSec {
-        case ...1800: intervalControl.selectedSegmentIndex = 0
-        case ...3600: intervalControl.selectedSegmentIndex = 1
-        default: intervalControl.selectedSegmentIndex = 2
+        case 1800: timedPreset.selectedSegmentIndex = 0
+        case 3600: timedPreset.selectedSegmentIndex = 1
+        case 7200: timedPreset.selectedSegmentIndex = 2
+        default: timedPreset.selectedSegmentIndex = UISegmentedControl.noSegment
         }
-        showControl.selectedSegmentIndex = max(0, min(2, cfg.timedRealShowSec - 1))
         rotateButton.setTitle("旋转 \(cfg.rotationDegrees)°", for: .normal)
         mirrorButton.isSelected = cfg.mirrored
         updateModeHint()
@@ -128,6 +137,10 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         card.layer.borderColor = UIColor.white.withAlphaComponent(0.14).cgColor
         addSubview(card)
 
+        dragHandle.backgroundColor = UIColor(white: 1, alpha: 0.28)
+        dragHandle.layer.cornerRadius = 2.5
+        card.addSubview(dragHandle)
+
         footer.backgroundColor = UIColor(white: 0.12, alpha: 0.95)
         card.addSubview(footer)
         card.addSubview(scroll)
@@ -136,24 +149,30 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         scroll.addSubview(content)
 
         card.translatesAutoresizingMaskIntoConstraints = false
+        dragHandle.translatesAutoresizingMaskIntoConstraints = false
         footer.translatesAutoresizingMaskIntoConstraints = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         content.translatesAutoresizingMaskIntoConstraints = false
 
-        // 卡片固定占比高度（避免 UIVisualEffect/模糊高度算坏 → 只剩全屏遮罩像卡住）
-        cardHeightConstraint = card.heightAnchor.constraint(equalToConstant: 420)
+        cardHeightConstraint = card.heightAnchor.constraint(equalToConstant: 380)
+        cardCenterYConstraint = card.centerYAnchor.constraint(equalTo: centerYAnchor, constant: cardDragOffset)
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            card.centerYAnchor.constraint(equalTo: centerYAnchor),
+            cardCenterYConstraint!,
             cardHeightConstraint!,
+
+            dragHandle.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+            dragHandle.centerXAnchor.constraint(equalTo: card.centerXAnchor),
+            dragHandle.widthAnchor.constraint(equalToConstant: 36),
+            dragHandle.heightAnchor.constraint(equalToConstant: 5),
 
             footer.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: card.bottomAnchor),
             footer.heightAnchor.constraint(equalToConstant: 52),
 
-            scroll.topAnchor.constraint(equalTo: card.topAnchor),
+            scroll.topAnchor.constraint(equalTo: dragHandle.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: footer.topAnchor),
@@ -165,9 +184,13 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             content.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
         ])
 
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleCardPan(_:)))
+        pan.cancelsTouchesInView = false
+        card.addGestureRecognizer(pan)
+
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = textPrimary
-        titleLabel.text = "素材分辨率：—"
+        titleLabel.text = "素材分辨率：— · 拖顶条可移动面板"
 
         styleSegment(modeControl)
         modeControl.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
@@ -175,16 +198,14 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         modeHint.textColor = textSecondary
         modeHint.numberOfLines = 0
 
-        styleField(ipField, placeholder: "电脑 IP，例如 192.168.1.191")
-        ipField.keyboardType = .decimalPad
-        ipField.addTarget(self, action: #selector(ipEdited), for: .editingDidEnd)
-        // 数字键盘无 Return：点面板空白处也要收键盘并把 key 还给抖音
-        let tapBlank = UITapGestureRecognizer(target: self, action: #selector(cardBlankTapped))
-        tapBlank.cancelsTouchesInView = false
-        card.addGestureRecognizer(tapBlank)
+        // 悬浮窗禁止成为 keyWindow → 本框只展示；改 IP 用抖音窗弹框，避免主页暂停
+        styleField(ipField, placeholder: "电脑 IP（点填写/粘贴）")
+        ipField.isEnabled = false
         styleFilledButton(pasteButton, title: "粘贴")
         pasteButton.addTarget(self, action: #selector(pasteTapped), for: .touchUpInside)
-        styleFilledButton(pickLocalButton, title: "选视频")
+        styleFilledButton(editIPButton, title: "填写")
+        editIPButton.addTarget(self, action: #selector(editIPTapped), for: .touchUpInside)
+        styleFilledButton(pickLocalButton, title: "选视频（相册/文件）")
         pickLocalButton.addTarget(self, action: #selector(pickLocalTapped), for: .touchUpInside)
 
         replaceLabel.text = "替换摄像头画面"
@@ -238,17 +259,34 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         timedRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.addTarget(
             self, action: #selector(timedChanged), for: .valueChanged
         )
-        styleSegment(intervalControl)
-        styleSegment(showControl)
-        intervalControl.addTarget(self, action: #selector(timedParamsChanged), for: .valueChanged)
-        showControl.addTarget(self, action: #selector(timedParamsChanged), for: .valueChanged)
+        styleField(intervalField, placeholder: "间隔秒，如 1800")
+        intervalField.keyboardType = .numberPad
+        intervalField.addTarget(self, action: #selector(timedParamsChanged), for: .editingDidEnd)
+        styleField(showSecField, placeholder: "露真秒，如 2")
+        showSecField.keyboardType = .numberPad
+        showSecField.addTarget(self, action: #selector(timedParamsChanged), for: .editingDidEnd)
+        // 定时字段在抖音窗填写更稳：点框弹 alert
+        intervalField.isEnabled = false
+        showSecField.isEnabled = false
+        let editTimed = UIButton(type: .system)
+        styleFilledButton(editTimed, title: "填写间隔/露真秒")
+        editTimed.addTarget(self, action: #selector(editTimedTapped), for: .touchUpInside)
+        styleSegment(timedPreset)
+        timedPreset.addTarget(self, action: #selector(timedPresetChanged), for: .valueChanged)
         timedHint.font = .systemFont(ofSize: 11)
         timedHint.textColor = UIColor(red: 1, green: 0.62, blue: 0.28, alpha: 1)
         timedHint.numberOfLines = 0
-        timedHint.text = "重要：露真时全屏真镜头，内录音频同步切现场。"
+        timedHint.text = "重要：露真时全屏真镜头，内录音频同步切现场。可手填任意秒数。"
 
-        [orient, blendRow, makeCaption("OBS 画面"), blendSlider, blendHint,
-         timedRow, makeCaption("每隔"), intervalControl, makeCaption("显示"), showControl, timedHint]
+        let timedRowFields = UIStackView(arrangedSubviews: [intervalField, showSecField])
+        timedRowFields.axis = .horizontal
+        timedRowFields.spacing = 8
+        timedRowFields.distribution = .fillEqually
+        intervalField.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        showSecField.heightAnchor.constraint(equalToConstant: 40).isActive = true
+
+        [orient, blendRow, makeCaption("OBS 画面占比"), blendSlider, blendHint,
+         timedRow, makeCaption("快捷间隔"), timedPreset, timedRowFields, editTimed, timedHint]
             .forEach { advancedBox.addArrangedSubview($0) }
 
         statusLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -280,7 +318,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         content.addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
@@ -311,11 +349,13 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     }
 
     private func makeIPRow() -> UIView {
-        let row = UIStackView(arrangedSubviews: [ipField, pasteButton])
+        let row = UIStackView(arrangedSubviews: [ipField, editIPButton, pasteButton])
         row.axis = .horizontal
         row.spacing = 8
-        pasteButton.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        pasteButton.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        editIPButton.widthAnchor.constraint(equalToConstant: 56).isActive = true
         pasteButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        editIPButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
         ipField.heightAnchor.constraint(equalToConstant: 40).isActive = true
         return row
     }
@@ -332,12 +372,8 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     }
 
     private func styleSwitchRow(_ row: UIStackView) {
-        row.arrangedSubviews.compactMap { $0 as? UILabel }.forEach {
-            $0.textColor = textPrimary
-        }
-        row.arrangedSubviews.compactMap { $0 as? UISwitch }.forEach {
-            $0.onTintColor = accent
-        }
+        row.arrangedSubviews.compactMap { $0 as? UILabel }.forEach { $0.textColor = textPrimary }
+        row.arrangedSubviews.compactMap { $0 as? UISwitch }.forEach { $0.onTintColor = accent }
     }
 
     private func makeCaption(_ t: String) -> UILabel {
@@ -389,14 +425,31 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         b.contentEdgeInsets = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
     }
 
+    private func clampCardOffset() {
+        let cardH = cardHeightConstraint?.constant ?? 380
+        let maxUp = -(bounds.height - cardH) / 2 + 24
+        let maxDown = (bounds.height - cardH) / 2 - 24
+        cardDragOffset = min(max(cardDragOffset, maxUp), maxDown)
+    }
+
+    @objc private func handleCardPan(_ g: UIPanGestureRecognizer) {
+        let t = g.translation(in: self).y
+        if g.state == .changed || g.state == .ended {
+            cardDragOffset += t
+            clampCardOffset()
+            cardCenterYConstraint?.constant = cardDragOffset
+            g.setTranslation(.zero, in: self)
+        }
+    }
+
     private func updateModeHint() {
         pickLocalButton.isHidden = modeControl.selectedSegmentIndex != 2
         ipField.superview?.isHidden = modeControl.selectedSegmentIndex == 2
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：插线信任，电脑开 MediaMTX+OBS+USB助手。"
+            modeHint.text = "数据线：插线信任，电脑开 MediaMTX+OBS+USB助手（窗口勿关）。"
         case 2:
-            modeHint.text = "本地视频：选文件后，再手动打开「替换摄像头画面」。"
+            modeHint.text = "本地视频：点选视频→相册/文件；选片时面板会自动躲开。"
         default:
             modeHint.text = "局域网：手机和电脑同一 Wi‑Fi，只填电脑 IP。"
         }
@@ -419,8 +472,8 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         monitorButton.setTitle(CamAudioRingMonitor.shared.statusLine, for: .normal)
         let store = CamFrameStore.shared
         titleLabel.text = store.width > 0
-            ? "素材分辨率：\(store.width) × \(store.height)"
-            : "素材分辨率：—"
+            ? "素材 \(store.width)×\(store.height) · 拖顶条可移动"
+            : "素材 — · 拖顶条可移动面板"
         let cfg = MediaConfigStore.shared.config
         let clock = AVSyncClock.shared
         _ = clock.mediaTime()
@@ -429,6 +482,16 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             "画面：\(cfg.replaceCameraEnabled ? "开" : "关") · \(clock.avsyncPanelLine())",
             cfg.replaceCameraEnabled ? "运行中 · \(clock.actionPanelLabel())" : "替换未开（须手动打开才注入）",
         ].joined(separator: "\n")
+    }
+
+    private func parsedIntervalSec() -> Int {
+        let v = Int(intervalField.text ?? "") ?? MediaConfigStore.shared.config.timedRealIntervalSec
+        return max(10, min(24 * 3600, v))
+    }
+
+    private func parsedShowSec() -> Int {
+        let v = Int(showSecField.text ?? "") ?? MediaConfigStore.shared.config.timedRealShowSec
+        return max(1, min(60, v))
     }
 
     private func commit() {
@@ -444,13 +507,6 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         case 2: audioMode = .mute
         default: audioMode = .stream
         }
-        let interval: Int
-        switch intervalControl.selectedSegmentIndex {
-        case 0: interval = 30 * 60
-        case 1: interval = 3600
-        default: interval = 2 * 3600
-        }
-        let showSec = showControl.selectedSegmentIndex + 1
         let blendOn = blendRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn == true
         let timedOn = timedRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn == true
         MediaConfigStore.shared.update { cfg in
@@ -463,30 +519,36 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             cfg.blendRealCamera = blendOn
             cfg.blendOBSPercent = Int(blendSlider.value)
             cfg.timedRealCamera = timedOn
-            cfg.timedRealIntervalSec = interval
-            cfg.timedRealShowSec = showSec
+            cfg.timedRealIntervalSec = parsedIntervalSec()
+            cfg.timedRealShowSec = parsedShowSec()
             cfg.advancedExpanded = advancedExpanded
         }
         updateAdvancedChrome()
     }
 
     @objc private func modeChanged() { updateModeHint(); commit() }
-    @objc private func ipEdited() {
-        commit()
-        FloatingOverlayController.restoreHostKeyWindow()
-    }
-    @objc private func cardBlankTapped() {
-        endEditing(true)
-        FloatingOverlayController.restoreHostKeyWindow()
-    }
     @objc private func replaceChanged() { commit() }
     @objc private func audioChanged() { commit() }
     @objc private func blendChanged() { commit() }
-    /// 拖动中只改文案，松手再 commit，避免拖一次 apply 几十次
     @objc private func blendSliderChanged() { updateAdvancedChrome() }
     @objc private func blendSliderCommitted() { updateAdvancedChrome(); commit() }
     @objc private func timedChanged() { CamReplacePolicy.resetCycle(); commit() }
-    @objc private func timedParamsChanged() { CamReplacePolicy.resetCycle(); commit() }
+    @objc private func timedParamsChanged() {
+        intervalField.text = "\(parsedIntervalSec())"
+        showSecField.text = "\(parsedShowSec())"
+        CamReplacePolicy.resetCycle()
+        commit()
+    }
+
+    @objc private func timedPresetChanged() {
+        switch timedPreset.selectedSegmentIndex {
+        case 0: intervalField.text = "\(30 * 60)"
+        case 1: intervalField.text = "\(3600)"
+        case 2: intervalField.text = "\(2 * 3600)"
+        default: break
+        }
+        timedParamsChanged()
+    }
 
     @objc private func pasteTapped() {
         let clip = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -494,6 +556,51 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             ipField.text = clip
             commit()
         }
+    }
+
+    @objc private func editIPTapped() {
+        guard let host = presentationHost() else { return }
+        let alert = UIAlertController(title: "电脑 IP", message: "在抖音窗口填写，避免悬浮窗抢焦点", preferredStyle: .alert)
+        alert.addTextField { [weak self] tf in
+            tf.keyboardType = .decimalPad
+            tf.text = self?.ipField.text
+            tf.placeholder = "192.168.x.x"
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self] _ in
+            guard let self else { return }
+            self.ipField.text = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.commit()
+        })
+        host.present(alert, animated: true)
+    }
+
+    @objc private func editTimedTapped() {
+        guard let host = presentationHost() else { return }
+        let alert = UIAlertController(
+            title: "定时露真",
+            message: "间隔秒数 / 每次露真秒数（可自定义）",
+            preferredStyle: .alert
+        )
+        alert.addTextField { [weak self] tf in
+            tf.keyboardType = .numberPad
+            tf.text = self?.intervalField.text
+            tf.placeholder = "间隔秒 如 1800"
+        }
+        alert.addTextField { [weak self] tf in
+            tf.keyboardType = .numberPad
+            tf.text = self?.showSecField.text
+            tf.placeholder = "露真秒 如 2"
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self] _ in
+            guard let self else { return }
+            self.intervalField.text = alert.textFields?[0].text
+            self.showSecField.text = alert.textFields?[1].text
+            self.timedPreset.selectedSegmentIndex = UISegmentedControl.noSegment
+            self.timedParamsChanged()
+        })
+        host.present(alert, animated: true)
     }
 
     @objc private func rotateTapped() {
@@ -514,21 +621,36 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     }
 
     @objc private func pickLocalTapped() {
-        // 必须从抖音 keyWindow 的 VC present：从悬浮窗空 root 弹会 makeKey + 系统 dim，整屏变暗像卡死
         guard let host = presentationHost() else { return }
         let sheet = UIAlertController(title: "选择本地视频", message: nil, preferredStyle: .actionSheet)
         if UIImagePickerController.isSourceTypeAvailable(.photoLibrary) {
             sheet.addAction(UIAlertAction(title: "相册", style: .default) { [weak self] _ in
-                guard let self, let host = self.presentationHost() else { return }
-                let picker = UIImagePickerController()
-                picker.sourceType = .photoLibrary
-                picker.mediaTypes = ["public.movie"]
-                picker.delegate = self
-                host.present(picker, animated: true)
+                self?.presentMediaPicker(from: host, kind: .album)
             })
         }
         sheet.addAction(UIAlertAction(title: "文件", style: .default) { [weak self] _ in
-            guard let self, let host = self.presentationHost() else { return }
+            self?.presentMediaPicker(from: host, kind: .files)
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        if let pop = sheet.popoverPresentationController {
+            pop.sourceView = pickLocalButton
+            pop.sourceRect = pickLocalButton.bounds
+        }
+        host.present(sheet, animated: true)
+    }
+
+    private enum PickerKind { case album, files }
+
+    private func presentMediaPicker(from host: UIViewController, kind: PickerKind) {
+        delegate?.camSettingsPanelSetPickerMode(true)
+        switch kind {
+        case .album:
+            let picker = UIImagePickerController()
+            picker.sourceType = .photoLibrary
+            picker.mediaTypes = ["public.movie"]
+            picker.delegate = self
+            host.present(picker, animated: true)
+        case .files:
             let picker: UIDocumentPickerViewController
             if #available(iOS 14, *) {
                 picker = UIDocumentPickerViewController(
@@ -543,29 +665,34 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             }
             picker.delegate = self
             host.present(picker, animated: true)
-        })
-        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
-        if let pop = sheet.popoverPresentationController {
-            pop.sourceView = pickLocalButton
-            pop.sourceRect = pickLocalButton.bounds
         }
-        host.present(sheet, animated: true)
+    }
+
+    private func endPickerMode() {
+        delegate?.camSettingsPanelSetPickerMode(false)
     }
 
     func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-        picker.dismiss(animated: true)
+        picker.dismiss(animated: true) { [weak self] in self?.endPickerMode() }
     }
 
     func imagePickerController(
         _ picker: UIImagePickerController,
         didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
     ) {
-        picker.dismiss(animated: true)
-        guard let url = info[.mediaURL] as? URL else { return }
-        applyLocalURL(url)
+        let url = info[.mediaURL] as? URL
+        picker.dismiss(animated: true) { [weak self] in
+            self?.endPickerMode()
+            if let url { self?.applyLocalURL(url) }
+        }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        endPickerMode()
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        defer { endPickerMode() }
         guard let url = urls.first else { return }
         _ = url.startAccessingSecurityScopedResource()
         applyLocalURL(url)
@@ -604,7 +731,6 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         }
     }
 
-    /// 抖音前台 keyWindow 的顶层 VC；绝不返回悬浮窗自己的空 root。
     private func presentationHost() -> UIViewController? {
         let float = FloatingOverlayController.overlayWindow
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
