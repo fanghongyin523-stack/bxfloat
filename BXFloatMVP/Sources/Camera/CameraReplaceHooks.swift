@@ -43,9 +43,10 @@ enum CameraReplaceHooks {
     private static var lastCameraSeenAt: CFAbsoluteTime = 0
     private static let stickyAwaySec: CFAbsoluteTime = 4.0
     /// stopRunning 后保持注入直到 startRunning/回到拍摄面；与离开相机 4s TTL 分开，不靠拉长 TTL
+    /// 对标 VCamTang：会话 pause→start 仅短粘（hold last / 恢复），禁止自创 180s 粘替换
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
-    private static let pauseStickyMaxSec: CFAbsoluteTime = 180.0
+    private static let pauseStickyMaxSec: CFAbsoluteTime = 2.0
     private static var resumeFirstFramePending = false
 
     /// 仅当抖音原回调是 main/nil 时改挂此队列，避免触摸卡死；非 main 原队列保持不动
@@ -498,8 +499,18 @@ enum CamBufferPainter {
         let dh = CVPixelBufferGetHeight(dst)
         guard dw > 0, dh > 0 else { return false }
 
+        // 定时露真 / 未开替换：透传真摄像头（对标目标面板「定时显示真实镜头」）
+        if CamReplacePolicy.shouldPassThroughRealCamera() {
+            return true
+        }
+
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
+        let blendFrac = CamReplacePolicy.obsBlendFraction()
+        var realSnapshot: CVPixelBuffer?
+        if blendFrac < 0.999 {
+            realSnapshot = cloneBuffer(dst)
+        }
 
         if !loggedFormat {
             loggedFormat = true
@@ -511,6 +522,7 @@ enum CamBufferPainter {
             width: dw, height: dh, format: fmt
         ), copyPixels(from: prepared, to: dst) {
             rememberGood(prepared, width: dw, height: dh, format: fmt)
+            finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
             return true
         }
 
@@ -520,6 +532,7 @@ enum CamBufferPainter {
             if let good = copyLastGood(width: dw, height: dh, format: fmt),
                copyPixels(from: good, to: dst)
             {
+                finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
                 return true
             }
             return fillBlack(dst)
@@ -535,16 +548,74 @@ enum CamBufferPainter {
            copyPixels(from: src, to: dst)
         {
             rememberGood(src, width: dw, height: dh, format: fmt)
+            finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
             return true
         }
 
         if let good = copyLastGood(width: dw, height: dh, format: fmt),
            copyPixels(from: good, to: dst)
         {
+            finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
             return true
         }
 
         return fillBlack(dst)
+    }
+
+    /// 融合真实摄像头：dst=OBS，real=真机，frac=OBS 占比
+    private static func finishBlend(dst: CVPixelBuffer, real: CVPixelBuffer?, frac: CGFloat) {
+        guard let real, frac < 0.999 else { return }
+        blendPixels(obs: dst, real: real, obsFrac: frac)
+    }
+
+    private static func cloneBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(src)
+        let h = CVPixelBufferGetHeight(src)
+        let fmt = CVPixelBufferGetPixelFormatType(src)
+        var out: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        guard CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, attrs as CFDictionary, &out) == kCVReturnSuccess,
+              let out
+        else { return nil }
+        _ = copyPixels(from: src, to: out)
+        return out
+    }
+
+    private static func blendPixels(obs: CVPixelBuffer, real: CVPixelBuffer, obsFrac: CGFloat) {
+        guard CVPixelBufferGetPixelFormatType(obs) == kCVPixelFormatType_32BGRA,
+              CVPixelBufferGetPixelFormatType(real) == kCVPixelFormatType_32BGRA
+        else { return }
+        let w = CVPixelBufferGetWidth(obs)
+        let h = CVPixelBufferGetHeight(obs)
+        guard w == CVPixelBufferGetWidth(real), h == CVPixelBufferGetHeight(real) else { return }
+        CVPixelBufferLockBaseAddress(obs, [])
+        CVPixelBufferLockBaseAddress(real, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(real, .readOnly)
+            CVPixelBufferUnlockBaseAddress(obs, [])
+        }
+        guard let oBase = CVPixelBufferGetBaseAddress(obs)?.assumingMemoryBound(to: UInt8.self),
+              let rBase = CVPixelBufferGetBaseAddress(real)?.assumingMemoryBound(to: UInt8.self)
+        else { return }
+        let oRow = CVPixelBufferGetBytesPerRow(obs)
+        let rRow = CVPixelBufferGetBytesPerRow(real)
+        let a = max(0, min(1, obsFrac))
+        let b = 1 - a
+        for y in 0..<h {
+            let oLine = oBase.advanced(by: y * oRow)
+            let rLine = rBase.advanced(by: y * rRow)
+            for x in 0..<w {
+                let i = x * 4
+                for c in 0..<3 {
+                    let ov = CGFloat(oLine[i + c])
+                    let rv = CGFloat(rLine[i + c])
+                    oLine[i + c] = UInt8(max(0, min(255, ov * a + rv * b)))
+                }
+            }
+        }
     }
 
     private static func rememberGood(_ buf: CVPixelBuffer, width: Int, height: Int, format: OSType) {

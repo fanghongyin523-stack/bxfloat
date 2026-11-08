@@ -15,7 +15,7 @@ enum MicReplaceHooks {
     private static let stickyAwaySec: CFAbsoluteTime = 4.0
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
-    private static let pauseStickyMaxSec: CFAbsoluteTime = 180.0
+    private static let pauseStickyMaxSec: CFAbsoluteTime = 2.0
 
     static func markPauseStickyFromStopRunning() {
         lock.lock()
@@ -60,15 +60,18 @@ enum MicReplaceHooks {
     }
 
     /// mode=推流/静音时注入；原麦则 unwrap 透传。
+    /// 定时露真期间强制现场麦（对标目标面板：内录音频同步切现场）。
     static func applyAudioMode(_ mode: AudioCaptureMode) {
         installIfNeeded()
         let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
-        let modeWantsInject = (mode == .stream || mode == .mute)
+        let forceLive = CamReplacePolicy.shouldForceLiveMic()
+        let effective: AudioCaptureMode = forceLive ? .microphone : mode
+        let modeWantsInject = (effective == .stream || effective == .mute)
         let now = CFAbsoluteTimeGetCurrent()
 
         lock.lock()
         let wasActive = injectActive
-        currentMode = mode
+        currentMode = effective
         if onCamera {
             lastCameraSeenAt = now
             pauseSticky = false
@@ -95,7 +98,7 @@ enum MicReplaceHooks {
         let auMode: Int32
         if !want {
             auMode = 0
-        } else if mode == .mute {
+        } else if effective == .mute {
             auMode = 2
         } else {
             auMode = 1

@@ -98,7 +98,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         let cfg = MediaConfigStore.shared.config
         // 真替换：只走 sample 画帧；盖层窗会挡住开播按钮/标题，永久关掉
         PreviewCover.stop()
+        // 硬约束：未手动开替换则绝不注入
         CameraReplaceHooks.applyReplaceMode(cfg.replaceCameraEnabled)
+        // 定时露真会强制现场麦，故每秒同步一次
         MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
     }
 
@@ -140,16 +142,11 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             NSLog("BXFloatCam reattach bubble reason=%@", reason)
             fw.addSubview(bubble)
         }
+        // 对标 VCamTang 悬浮面板：显示即可，禁止 makeKey 抢抖音焦点（主页滑动暂停根因）
         fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
         fw.isHidden = false
         fw.alpha = 1
-        if !didMakeKeyOnce {
-            fw.makeKeyAndVisible()
-            didMakeKeyOnce = true
-            DispatchQueue.main.async {
-                scene?.windows.first { $0 !== fw && !$0.isHidden }?.makeKey()
-            }
-        }
+        didMakeKeyOnce = true
         syncReplaceForCurrentSurface()
         syncPuller(MediaConfigStore.shared.config)
     }
@@ -215,22 +212,33 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         syncPuller(config)
     }
 
-    /// 开「替换摄像头」或「推流声音」时拉 RTSP（画面+音频同流）。
+    /// 开「替换摄像头」或「推流声音」时拉源（对标 VCam：rtsp / usb 隧道 / 本地文件分派）。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
-        let needPull = (config.replaceCameraEnabled || config.audioCaptureMode == .stream)
-            && !url.isEmpty
-            && url.hasPrefix("rtsp://")
-        if needPull {
-            FFRTSPController.start(urlString: url)
-            pullURL = url
-        } else {
+        let needPull = (config.replaceCameraEnabled || config.audioCaptureMode == .stream) && !url.isEmpty
+        guard needPull else {
             stopPuller()
+            return
+        }
+        switch config.connectionMode {
+        case .localVideo:
+            FFRTSPController.stop()
+            LocalVideoPlayer.shared.start(urlString: url)
+            pullURL = url
+        case .lan, .usb, .manual:
+            LocalVideoPlayer.shared.stop()
+            if url.hasPrefix("rtsp://") || url.lowercased().hasPrefix("http") {
+                FFRTSPController.start(urlString: url)
+                pullURL = url
+            } else {
+                stopPuller()
+            }
         }
     }
 
     private func stopPuller() {
         FFRTSPController.stop()
+        LocalVideoPlayer.shared.stop()
         pullURL = nil
     }
 

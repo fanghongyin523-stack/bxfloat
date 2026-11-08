@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// 数据线方案（无 Wi‑Fi）：
+/// 数据线方案（无 Wi‑Fi）——自研 usbmux 隧道，对标 VCamUSBPuller「进画」目标，零依赖参照 dylib。
 /// - RTSP：手机 `127.0.0.1:18554` ←隧道 19889← 电脑 MediaMTX RTSP（替换摄像头用）
 /// - HLS：手机 `127.0.0.1:18888` ←隧道 19888← 电脑 MediaMTX HLS（兼容旧预览）
 final class USBStreamBridge {

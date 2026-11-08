@@ -614,7 +614,7 @@ cleanup:
 
     enum AVPixelFormat srcFmt = (enum AVPixelFormat)frame->format;
         *swsInOut = sws_getCachedContext(
-        *swsInOut, w, h, srcFmt, w, h, AV_PIX_FMT_BGRA, SWS_FAST_BILINEAR, NULL, NULL, NULL
+        *swsInOut, w, h, srcFmt, w, h, AV_PIX_FMT_BGRA, SWS_BICUBIC, NULL, NULL, NULL
     );
     if (!*swsInOut) return NO;
 

@@ -19,14 +19,14 @@ final class CamAudioStore {
     private var pending: [Chunk] = []
     /// 环硬上限（秒）；超过再 prune
     private let maxSeconds: Double = 2.50
-    /// pending 秒数上限：超则丢弃（对标 backlog capped dropped，禁止硬塞进 ring）
-    private let maxPendingSeconds: Double = 1.20
+    /// pending 秒数上限：超则丢弃（对标 VCamTang backlog capped dropped）
+    private let maxPendingSeconds: Double = 1.00
     /// pending 条数上限（对标 VCam pending 计数裁剪）
     private let maxPendingChunks: Int = 24
     /// 入环活延迟上限：对标 VCamTang capLiveLatency
     private let capLiveLatencySec: Double = 2.00
-    /// 拉环侧最少保留（明显高于 target，防声环偏浅→连续短断）
-    private let minLiveLatencySec: Double = 1.35
+    /// 拉环侧最少保留：与 target_ms≈1000 同簇，禁止自创加深
+    private let minLiveLatencySec: Double = 1.00
     private let defaultRate = 48_000
     /// 解码入环采样率（对标 VCamTang：环内保持素材钟，播出再 SRC）
     private var decodeRate: Int = 0
@@ -39,9 +39,9 @@ final class CamAudioStore {
     private(set) var storeChannels = 1
 
     private var playhead: Double = -1
-    /// 固定目标延迟（略深于 1s，对标 alignLiveRing 留足可借深度）
-    private let fixedLatencySec: Double = 1.20
-    /// 入环 PTS 与环尾偏差 ≤ 此值则粘到连续样本钟（消 AAC 微缝静音断点）
+    /// 固定目标延迟：对标 VCamTang target_ms≈1000
+    private let fixedLatencySec: Double = 1.00
+    /// 入环 PTS 与环尾偏差 ≤ 此值则粘到连续样本钟（对标 alignLiveRing 连续样本钟）
     private let stitchPtsSec: Double = 0.080
     /// peek 微缝：跳粘不插静音
     private let glueGapSec: Double = 0.050
@@ -403,11 +403,11 @@ final class CamAudioStore {
         if playhead > hi {
             playhead = hi
         }
-        // 对标 alignLiveRingToVideo：可播深度不足时回借到目标延迟，消灭连续微欠载短断
+        // 对标 VCamTang alignLiveRingToVideo：播头对齐到目标延迟深度，连续拉环（禁止自创二次回借）
         let liveAhead = lastEnd - playhead
-        if playhead >= firstPts, liveAhead < duration * 2.5 {
+        if playhead >= firstPts, liveAhead + 0.001 < fixedLatencySec {
             let aligned = max(firstPts, lastEnd - fixedLatencySec)
-            if aligned + 0.0005 < playhead {
+            if abs(aligned - playhead) > 0.0005 {
                 playhead = aligned
                 seamJump = true
             }
@@ -415,18 +415,6 @@ final class CamAudioStore {
         startPTS = playhead
         var endPTS = startPTS
         got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
-        // 仍短：再回借一次（有历史才借）
-        if got < needStore {
-            let needSec = Double(needStore - got) / Double(ringRate)
-            let borrow = max(firstPts, playhead - needSec - 0.002)
-            if borrow + 0.001 < playhead {
-                playhead = borrow
-                startPTS = playhead
-                endPTS = startPTS
-                got = peekStartingLocked(at: startPTS, into: &scratchStore, frames: needStore, endPTS: &endPTS)
-                seamJump = true
-            }
-        }
         peekPk = Self.peakOf(scratchStore, frames: got, channels: ringCh)
         let consumed = min(needStore, max(0, got))
         if consumed > 0 {
@@ -463,35 +451,18 @@ final class CamAudioStore {
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: frames)
         let haveFrames = min(frames, rateConverted.count / max(1, ringCh))
         if haveFrames < frames {
-            // 仍短：1ms 淡到 0 再静音——硬切 0 会电流；禁止末样 hold
-            fadeToSilencePad(&laid, channels: auCh, fromFrame: haveFrames, toFrame: frames, rate: dstRate)
+            // 对标 VCamTang failclosed：真欠载整段静音，禁止末样 hold / 自创淡出垫
+            silenceZeroPad(&laid, channels: auCh, fromFrame: haveFrames, toFrame: frames)
         } else if laid.count > frames * auCh {
             laid = Array(laid.prefix(frames * auCh))
         }
-
-        // 仅播头硬 rebase 时做极短交叉淡
-        if seamJump, frames > 0 {
-            let fadeN = min(frames, max(1, dstRate / 200)) // ~5ms
-            for i in 0..<fadeN {
-                let a = Double(i + 1) / Double(fadeN)
-                let inv = 1.0 - a
-                let idxL = i * auCh
-                laid[idxL] = Int16(clamping: Int(Double(laid[idxL]) * a + Double(lastL) * inv))
-                if auCh > 1 {
-                    let idxR = idxL + 1
-                    laid[idxR] = Int16(clamping: Int(Double(laid[idxR]) * a + Double(lastR) * inv))
-                }
-            }
-        }
-
-        // 软顶 ~-3dBFS，消砖墙削波电流
-        applyPeakCeiling(&laid, frames: frames, channels: auCh)
 
         if frames > 0 {
             lastL = laid[(frames - 1) * auCh]
             lastR = auCh > 1 ? laid[(frames - 1) * auCh + 1] : lastL
         }
         envelope = 1.0
+        _ = seamJump
 
         let convPk = Self.peakOf(laid, frames: frames, channels: auCh)
         for i in 0..<(frames * auCh) { dst[i] = laid[i] }
@@ -538,26 +509,6 @@ final class CamAudioStore {
                 dcY1R = yR
                 buf[i * ch + 1] = Int16(clamping: Int(yR.rounded()))
             }
-        }
-    }
-
-    /// 软顶 ~-3dBFS：knee→lim，消砖墙削波电流；非 -8dB 重压。
-    private func applyPeakCeiling(_ buf: inout [Int16], frames: Int, channels: Int) {
-        let ch = max(1, channels)
-        let lim = 23170.0
-        let knee = 18000.0
-        for i in 0..<(frames * ch) {
-            let x = Double(buf[i])
-            let ax = abs(x)
-            if ax <= knee { continue }
-            let y: Double
-            if ax >= lim {
-                y = lim
-            } else {
-                let t = (ax - knee) / (lim - knee)
-                y = knee + (lim - knee) * (t * (2.0 - t))
-            }
-            buf[i] = Int16(clamping: Int((x < 0 ? -y : y).rounded()))
         }
     }
 
@@ -1306,27 +1257,28 @@ final class CamAudioStore {
         for i in 0..<use {
             let l = input[i * fCh]
             let r = fCh > 1 ? input[i * fCh + 1] : l
-            // mono 后 L=R=mono/2：宿主取 L 或 L+R 未 /2 都不顶满（满幅 0.707 仍会撞轨）
-            let mono: Int16 = fCh > 1 ? Int16(clamping: (Int(l) + Int(r)) / 2) : l
+            // 对标 VCamTang fillAudioBufferList：跟宿主声道写出，禁止 mono/2 自创压半
             if tCh == 1 {
-                out[i] = mono
+                out[i] = fCh > 1 ? Int16(clamping: (Int(l) + Int(r)) / 2) : l
+            } else if fCh == 1 {
+                out[i * tCh] = l
+                out[i * tCh + 1] = l
+                for c in 2..<tCh { out[i * tCh + c] = l }
             } else {
-                let half = Int16(clamping: Int(mono) / 2)
-                out[i * tCh] = half
-                out[i * tCh + 1] = half
-                for c in 2..<tCh { out[i * tCh + c] = half }
+                out[i * tCh] = l
+                out[i * tCh + 1] = r
+                for c in 2..<tCh { out[i * tCh + c] = r }
             }
         }
         return out
     }
 
-    /// 欠载尾：先 1ms 淡到 0 再静音，避免硬切电流；禁止末样 hold
-    private func fadeToSilencePad(
+    /// 对标 VCamTang failclosed：欠载尾静音填零
+    private func silenceZeroPad(
         _ buf: inout [Int16],
         channels: Int,
         fromFrame: Int,
-        toFrame: Int,
-        rate: Int
+        toFrame: Int
     ) {
         let n = toFrame - fromFrame
         guard n > 0 else { return }
@@ -1334,19 +1286,9 @@ final class CamAudioStore {
         if buf.count < toFrame * ch {
             buf.append(contentsOf: repeatElement(Int16(0), count: toFrame * ch - buf.count))
         }
-        let fadeN = min(n, max(1, rate / 1000)) // ~1ms
-        let seedL: Int16 = fromFrame > 0 ? buf[(fromFrame - 1) * ch] : 0
-        let seedR: Int16 = (ch > 1 && fromFrame > 0) ? buf[(fromFrame - 1) * ch + 1] : seedL
-        for i in 0..<n {
-            let base = (fromFrame + i) * ch
-            if i < fadeN {
-                let a = 1.0 - Double(i + 1) / Double(fadeN)
-                buf[base] = Int16(clamping: Int(Double(seedL) * a))
-                if ch > 1 { buf[base + 1] = Int16(clamping: Int(Double(seedR) * a)) }
-                for c in 2..<ch { buf[base + c] = buf[base] }
-            } else {
-                for c in 0..<ch { buf[base + c] = 0 }
-            }
+        for i in fromFrame..<toFrame {
+            let base = i * ch
+            for c in 0..<ch { buf[base + c] = 0 }
         }
     }
 
@@ -1356,7 +1298,7 @@ final class CamAudioStore {
         fromFrame: Int,
         toFrame: Int
     ) {
-        fadeToSilencePad(&buf, channels: channels, fromFrame: fromFrame, toFrame: toFrame, rate: storeRate)
+        silenceZeroPad(&buf, channels: channels, fromFrame: fromFrame, toFrame: toFrame)
     }
 
     /// 块级 SRC（仅格式对齐，禁止当播头 soft-rate）。

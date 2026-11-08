@@ -196,9 +196,23 @@ final class CamFrameBlitter {
             pool: bgraP, width: width, height: height, format: kCVPixelFormatType_32BGRA
         ) else { return }
 
-        let ciSrc = CIImage(cvPixelBuffer: src)
-        let sw = CGFloat(CVPixelBufferGetWidth(src))
-        let sh = CGFloat(CVPixelBufferGetHeight(src))
+        // 对标 VCamTang paint：rotation + mirrored 后 cover 到宿主尺寸
+        let cfg = MediaConfigStore.shared.config
+        var ciSrc = CIImage(cvPixelBuffer: src)
+        let rot = ((cfg.rotationDegrees % 360) + 360) % 360
+        if rot == 90 {
+            ciSrc = ciSrc.oriented(.right)
+        } else if rot == 180 {
+            ciSrc = ciSrc.oriented(.down)
+        } else if rot == 270 {
+            ciSrc = ciSrc.oriented(.left)
+        }
+        if cfg.mirrored {
+            ciSrc = ciSrc.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+                .translatedBy(x: -ciSrc.extent.width, y: 0))
+        }
+        let sw = ciSrc.extent.width
+        let sh = ciSrc.extent.height
         guard sw > 1, sh > 1 else { return }
 
         let scale = max(CGFloat(width) / sw, CGFloat(height) / sh)

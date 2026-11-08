@@ -1,11 +1,11 @@
 import Foundation
 
 enum ConnectionMode: String, Codable {
-    /// 局域网：只填电脑 IP → RTSP（App=VLC，注入=内嵌 RTSP+VT）
+    /// 局域网：只填电脑 IP → RTSP
     case lan
-    /// 数据线：不需 SIM/热点；手机播 127.0.0.1，电脑 usbmux 桥到 MediaMTX
+    /// 数据线：手机播 127.0.0.1，电脑 usbmux 桥到 MediaMTX（自研隧道，对标 VCamUSBPuller 进画目标）
     case usb
-    /// 本地视频文件路径
+    /// 本地视频文件路径（对标 VCamLocalPlayer）
     case localVideo
     /// 手动完整 URL（http/rtsp/file）
     case manual
@@ -33,13 +33,24 @@ struct MediaConfig: Equatable {
     var windowScale: Float
     var overlayEnabled: Bool
     var muted: Bool
-    /// 最终目标：替换摄像头画面
+    /// 替换摄像头画面（默认关：须手填并手动开启）
     var replaceCameraEnabled: Bool
     /// 麦克风采集：推流声音 / 原麦 / 静音
     var audioCaptureMode: AudioCaptureMode
-    /// 第2期：融合真实摄像头（占位持久化）
+    /// 融合真实摄像头（对标目标面板）
     var blendRealCamera: Bool
     var blendOBSPercent: Int
+    /// 画面方向：旋转角度（0/90/180/270）与镜像（对标 VCam rotation/mirrored）
+    var rotationDegrees: Int
+    var mirrored: Bool
+    /// 定时显示真实镜头
+    var timedRealCamera: Bool
+    /// 间隔秒（面板展示可用小时换算）
+    var timedRealIntervalSec: Int
+    /// 露出时长秒：1/2/3
+    var timedRealShowSec: Int
+    /// 高级区是否展开
+    var advancedExpanded: Bool
 
     /// usbmux 隧道端口（电脑助手连这个）
     static let usbTunnelPort = 19888
@@ -59,7 +70,13 @@ struct MediaConfig: Equatable {
         replaceCameraEnabled: false,
         audioCaptureMode: .stream,
         blendRealCamera: false,
-        blendOBSPercent: 90
+        blendOBSPercent: 90,
+        rotationDegrees: 0,
+        mirrored: false,
+        timedRealCamera: false,
+        timedRealIntervalSec: 2 * 3600,
+        timedRealShowSec: 2,
+        advancedExpanded: true
     )
 }
 
@@ -68,6 +85,8 @@ extension MediaConfig: Codable {
         case streamURL, computerIP, usbComputerIP, connectionMode
         case hlsPort, rtspPort, streamPath, opacity, windowScale, overlayEnabled, muted
         case replaceCameraEnabled, audioCaptureMode, blendRealCamera, blendOBSPercent
+        case rotationDegrees, mirrored, timedRealCamera, timedRealIntervalSec, timedRealShowSec
+        case advancedExpanded
     }
 
     init(from decoder: Decoder) throws {
@@ -83,6 +102,7 @@ extension MediaConfig: Codable {
         windowScale = try c.decodeIfPresent(Float.self, forKey: .windowScale) ?? 0.42
         overlayEnabled = try c.decodeIfPresent(Bool.self, forKey: .overlayEnabled) ?? false
         muted = try c.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+        // 硬约束：替换默认关；旧配置若曾为开也允许，但新默认 false
         replaceCameraEnabled = try c.decodeIfPresent(Bool.self, forKey: .replaceCameraEnabled) ?? false
         if let mode = try c.decodeIfPresent(AudioCaptureMode.self, forKey: .audioCaptureMode) {
             audioCaptureMode = mode
@@ -93,11 +113,17 @@ extension MediaConfig: Codable {
         }
         blendRealCamera = try c.decodeIfPresent(Bool.self, forKey: .blendRealCamera) ?? false
         blendOBSPercent = try c.decodeIfPresent(Int.self, forKey: .blendOBSPercent) ?? 90
+        rotationDegrees = try c.decodeIfPresent(Int.self, forKey: .rotationDegrees) ?? 0
+        mirrored = try c.decodeIfPresent(Bool.self, forKey: .mirrored) ?? false
+        timedRealCamera = try c.decodeIfPresent(Bool.self, forKey: .timedRealCamera) ?? false
+        timedRealIntervalSec = try c.decodeIfPresent(Int.self, forKey: .timedRealIntervalSec) ?? (2 * 3600)
+        timedRealShowSec = try c.decodeIfPresent(Int.self, forKey: .timedRealShowSec) ?? 2
+        advancedExpanded = try c.decodeIfPresent(Bool.self, forKey: .advancedExpanded) ?? true
     }
 }
 
 extension MediaConfig {
-    /// 实际拿去播放的地址（局域网统一 RTSP，冲 3 秒内）
+    /// 实际拿去播放的地址
     func resolvedPlaybackURL() -> String {
         switch connectionMode {
         case .lan:
@@ -105,7 +131,6 @@ extension MediaConfig {
             guard !ip.isEmpty else { return "" }
             return "rtsp://\(ip):\(rtspPort)/\(streamPath)"
         case .usb:
-            // 数据线：走本机 RTSP（USB 助手把 18554 桥到电脑 MediaMTX）
             return "rtsp://127.0.0.1:\(rtspPort)/\(streamPath)"
         case .localVideo, .manual:
             return streamURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -133,7 +158,7 @@ extension MediaConfig {
 final class MediaConfigStore {
     static let shared = MediaConfigStore()
 
-    private let defaultsKey = "baixiang.conf.mvp.v2"
+    private let defaultsKey = "baixiang.conf.mvp.v3"
     private(set) var config: MediaConfig = .default
 
     private init() {}
@@ -145,7 +170,14 @@ final class MediaConfigStore {
             config = decoded
             return
         }
-        // 兼容旧版 key
+        // 兼容 v2
+        if let data = UserDefaults.standard.data(forKey: "baixiang.conf.mvp.v2"),
+           let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
+        {
+            config = decoded
+            save(decoded, postNotification: false)
+            return
+        }
         if let data = UserDefaults.standard.data(forKey: "baixiang.conf.mvp"),
            let old = try? JSONDecoder().decode(OldMediaConfig.self, from: data)
         {
@@ -155,6 +187,7 @@ final class MediaConfigStore {
             migrated.windowScale = old.windowScale
             migrated.overlayEnabled = old.overlayEnabled
             migrated.muted = old.muted
+            migrated.replaceCameraEnabled = false
             if old.streamURL.lowercased().hasPrefix("rtsp://") || old.streamURL.lowercased().hasPrefix("http") {
                 migrated.connectionMode = .manual
             }

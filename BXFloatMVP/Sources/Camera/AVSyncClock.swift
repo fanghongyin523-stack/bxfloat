@@ -108,8 +108,8 @@ final class AVSyncClock {
         lock.unlock()
     }
 
-    /// 软接纳窗：覆盖 target≈1.2s，避免音频长期进 pending→声环偏浅→连续短断
-    private let audioSoftLead: Double = 1.35
+    /// 软接纳窗：与 target_ms≈1000 同簇（对标 VCamTang，禁止自创加深）
+    private let audioSoftLead: Double = 1.00
     /// 可暂存等待视频追上的最大超前（failclosed/backlog 有界）
     private let audioHoldLead: Double = 2.00
 
