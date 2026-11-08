@@ -28,17 +28,18 @@ final class AVSyncClock {
     private var lastAudioWall: CFTimeInterval = 0
     private var frozenForVideo = false
     private var warmupWallStart: CFTimeInterval = 0
+    private var lastFreezeLogAt: CFTimeInterval = 0
 
-    /// 目标呈现滞后（对标 VCamTang target_ms≈1000；音频固定延迟同为 1.0s）
+    /// 目标呈现滞后（对标 VCamTang target_ms；二进制同簇含 0.08/0.28/0.45/2.2）
     private let targetDelay: Double = 1.0
     /// 缓冲过高：drop-old 一次跳到目标延迟（不加速拧采样）
     private let maxDelay: Double = 2.2
-    /// 仅低于此才 hold-last（真欠载）
+    /// 仅低于此才 hold（真欠载）；对标参照 DBL 0.08
     private let criticalLow: Double = 0.08
     private let warmupNeed: Double = 0.35
     private let maxWarmupWall: Double = 0.45
     private let maxDropPerCall: Double = 0.08
-    /// 抖音回调间隙常 >0.35s；过短会把有声 ring 冻成静音
+    /// 视频墙钟停更：进入恢复期冻音频（对标 audio frozen for video recovery）
     private let videoStallSec: Double = 1.20
 
     private(set) var driftResyncCount: Int64 = 0
@@ -80,7 +81,22 @@ final class AVSyncClock {
         lock.lock()
         lastVideoPTS = pts
         lastVideoWall = CACurrentMediaTime()
+        // 新视频沿到达：解除恢复期冻音频
         if frozenForVideo { frozenForVideo = false }
+        lock.unlock()
+    }
+
+    /// 对标 VCamTang RECOVERY「audio frozen」：解码重建 / 大间隔显式进入恢复期。
+    func beginVideoRecoveryFreeze(reason: String) {
+        lock.lock()
+        let now = CACurrentMediaTime()
+        let was = frozenForVideo
+        frozenForVideo = true
+        lastAction = .waitVideo
+        if !was || (now - lastFreezeLogAt) > 1.0 {
+            lastFreezeLogAt = now
+            NSLog("[BXFloat][AVSYNC] audio frozen for video recovery reason=%@", reason)
+        }
         lock.unlock()
     }
 
@@ -171,10 +187,17 @@ final class AVSyncClock {
             wallAnchor = now
         }
 
-        // 仅视频真停：冻时钟 + 冻音频（恢复期），对标 VCamTang「audio frozen for video recovery」
-        if lastVideoPTS >= 0, (now - lastVideoWall) > videoStallSec {
-            frozenForVideo = true
-            lastAction = .freezeAudio
+        // 视频真停 / 已处恢复期：冻时钟 + 冻音频。参照 action 主表是 play/drop-old/wait-video，
+        // 冻音频另打 `[AVSYNC] audio frozen for video recovery`，不把 freeze-audio 当主 action。
+        if frozenForVideo || (lastVideoPTS >= 0 && (now - lastVideoWall) > videoStallSec) {
+            if !frozenForVideo {
+                frozenForVideo = true
+                if (now - lastFreezeLogAt) > 1.0 {
+                    lastFreezeLogAt = now
+                    NSLog("[BXFloat][AVSYNC] audio frozen for video recovery")
+                }
+            }
+            lastAction = .waitVideo
             wallAnchor = now
             refreshMetricsLocked(present: mediaAnchor, live: live)
             return mediaAnchor
@@ -187,8 +210,8 @@ final class AVSyncClock {
         var action: Action = .play
 
         if buffered < criticalLow {
-            // 真欠载：hold-last，等源（不放慢拧内容）
-            lastAction = .holdLast
+            // 真欠载：钉住播头等源（参照无 hold-last 字符串；面板归入 wait-video）
+            lastAction = .waitVideo
             wallAnchor = now
             mediaAnchor = min(mediaAnchor, max(0, live - criticalLow))
             refreshMetricsLocked(present: mediaAnchor, live: live)
@@ -211,7 +234,7 @@ final class AVSyncClock {
         let maxT = max(0, live - criticalLow)
         if t > maxT {
             t = maxT
-            action = .holdLast
+            action = .waitVideo
         }
 
         mediaAnchor = t
@@ -252,15 +275,17 @@ final class AVSyncClock {
     /// 对标 VCamTang target_ms
     func targetMs() -> Double { targetDelay * 1000.0 }
 
-    /// 面板用：对标 [VCAM][AVSYNC] action=
+    /// 面板用：对标参照主表 play / drop-old / wait-video（冻音频另见日志）
     func actionPanelLabel() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        if frozenForVideo || (lastVideoPTS >= 0 && (CACurrentMediaTime() - lastVideoWall) > videoStallSec) {
+            return "wait-video"
+        }
         switch lastAction {
         case .play: return "play"
-        case .holdLast: return "hold-last"
-        case .freezeAudio: return "freeze-audio"
         case .dropOld: return "drop-old"
-        case .waitVideo: return "wait-video"
-        case .silence: return "silence"
+        case .holdLast, .freezeAudio, .waitVideo, .silence: return "wait-video"
         }
     }
 

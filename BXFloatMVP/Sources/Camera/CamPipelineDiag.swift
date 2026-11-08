@@ -172,7 +172,11 @@ final class CamPipelineDiag {
     }
 
     func noteVideoDecodeOK() { bump { vDecodeOK += 1 } }
-    func noteVideoDecodeFail() { bump { vDecodeFail += 1 } }
+    func noteVideoDecodeFail() {
+        bump { vDecodeFail += 1 }
+        // 对标 VCamTang RECOVERY：解码失败进入 audio frozen
+        AVSyncClock.shared.beginVideoRecoveryFreeze(reason: "decode-fail")
+    }
     func noteVideoCacheWrite() { bump { vCacheWrite += 1 } }
     func noteVideoCachePrune(_ n: Int) { guard n > 0 else { return }; bump { vCachePrune += Int64(n) } }
     func noteVideoSlotWait() { bump { vSlotWait += 1 } }

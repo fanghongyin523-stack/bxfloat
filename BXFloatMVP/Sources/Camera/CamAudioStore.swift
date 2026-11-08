@@ -17,11 +17,14 @@ final class CamAudioStore {
     private let lock = NSLock()
     private var chunks: [Chunk] = []
     private var pending: [Chunk] = []
-    /// 环上限；超则 drop-old（对标 capLiveLatency / backlog）
+    /// 环硬上限（秒）；超过再 prune
     private let maxSeconds: Double = 2.50
+    /// pending 秒数上限：超则丢弃（对标 backlog capped dropped，禁止硬塞进 ring）
     private let maxPendingSeconds: Double = 1.20
-    /// 入环后活延迟上限：超过则剪旧，保持 ~目标延迟可读
-    private let capLiveLatencySec: Double = 1.80
+    /// pending 条数上限（对标 VCam pending 计数裁剪）
+    private let maxPendingChunks: Int = 24
+    /// 入环活延迟上限：对标 capLiveLatency，略高于 target_ms(1s)
+    private let capLiveLatencySec: Double = 1.50
     private let defaultRate = 48_000
     /// 解码入环采样率（对标 VCamTang：环内保持素材钟，播出再 SRC）
     private var decodeRate: Int = 0
@@ -85,10 +88,13 @@ final class CamAudioStore {
         }
     }
 
+    /// 对标 VCamTang hasMaterialAudio：可播环内有能量素材才算；pending 不算（failclosed）。
     var hasFreshAudio: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return (!chunks.isEmpty || !pending.isEmpty) && Date().timeIntervalSince(lastUpdate) < 3.0
+        guard !chunks.isEmpty else { return false }
+        guard Date().timeIntervalSince(lastUpdate) < 1.50 else { return false }
+        return peakOfAnyChunkLocked() > 0
     }
 
     func bufferedSeconds() -> Double {
@@ -422,16 +428,11 @@ final class CamAudioStore {
         var laid = layoutChannels(rateConverted, fromCh: ringCh, toCh: auCh, frames: frames)
         let haveFrames = min(frames, rateConverted.count / max(1, ringCh))
         if haveFrames < frames {
-            let seedL = haveFrames > 0 ? laid[(haveFrames - 1) * auCh] : lastL
-            let seedR = haveFrames > 0
-                ? (auCh > 1 ? laid[(haveFrames - 1) * auCh + 1] : seedL)
-                : lastR
-            // 欠载：末样 hold；不标 seamJump，避免每欠载交叉淡把声拧碎
-            holdPadInterleaved(
-                &laid, channels: auCh,
-                fromFrame: haveFrames, toFrame: frames,
-                seedL: seedL, seedR: seedR
-            )
+            // failclosed：欠载尾垫静音，禁止 hold 末样冒充素材
+            let ch = max(1, auCh)
+            for i in haveFrames..<frames {
+                for c in 0..<ch { laid[i * ch + c] = 0 }
+            }
         } else if laid.count > frames * auCh {
             laid = Array(laid.prefix(frames * auCh))
         }
@@ -958,7 +959,7 @@ final class CamAudioStore {
         AVSyncClock.shared.noteAudioEndPTS(endPTS)
     }
 
-    /// 对标 VCamTang `[AUDIO] backlog capped pending= dropped=`：积压过大剪旧
+    /// 对标 VCamTang `[AUDIO] backlog capped pending=%ld dropped=%lld`
     private func capLiveLatencyLocked(endPTS: Double) {
         guard let first = chunks.first else { return }
         let buffered = endPTS - first.pts
@@ -966,9 +967,9 @@ final class CamAudioStore {
         let before = chunks.count
         let keepFrom = endPTS - capLiveLatencySec
         pruneLocked(before: keepFrom)
-        let dropped = before - chunks.count
+        let dropped = Int64(before - chunks.count)
         if dropped > 0 {
-            NSLog("[BXFloat][AUDIO] backlog capped buffered_ms=%.0f dropped=%d", buffered * 1000.0, dropped)
+            NSLog("[BXFloat][AUDIO] backlog capped pending=%d dropped=%lld", chunks.count, dropped)
         }
         if playhead >= 0, playhead < keepFrom {
             playhead = keepFrom
@@ -1002,23 +1003,25 @@ final class CamAudioStore {
         lock.unlock()
     }
 
+    /// 对标 backlog capped：超窗丢弃 pending，禁止溢出硬塞进 ring
     private func trimPendingLocked() {
-        while pendingSecondsLocked() > maxPendingSeconds, !pending.isEmpty {
-            let old = pending.removeFirst()
-            let dur = frameDuration(old)
-            let start = nextAppendPTSLocked()
-            let end = start + dur
-            chunks.append(Chunk(pts: start, samples: old.samples, channels: old.channels))
-            // packetCount 已在 enqueuePending 计过，这里只转入 ring
-            lastPTS = end
-            pruneLocked(before: end - maxSeconds)
-            CamPipelineDiag.shared.noteAudioGate(
-                accepted: true,
-                endPTS: end,
-                reason: "pending-overflow-rebase",
-                leadMs: AVSyncClock.shared.audioLeadSeconds(endPTS: end) * 1000.0
+        var dropped: Int64 = 0
+        while !pending.isEmpty,
+              pending.count > maxPendingChunks || pendingSecondsLocked() > maxPendingSeconds {
+            pending.removeFirst()
+            dropped += 1
+        }
+        if dropped > 0 {
+            NSLog(
+                "[BXFloat][AUDIO] backlog capped pending=%d dropped=%lld",
+                pending.count, dropped
             )
-            AVSyncClock.shared.noteAudioEndPTS(end)
+            CamPipelineDiag.shared.noteAudioGate(
+                accepted: false,
+                endPTS: lastPTS,
+                reason: "pending-drop",
+                leadMs: 0
+            )
         }
     }
 
