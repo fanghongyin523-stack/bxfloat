@@ -104,39 +104,28 @@ enum MicReplaceHooks {
         }
         BXFloatMicAUSetMode(auMode)
 
-        let outputs = trackedOutputs.allObjects
+        // 对齐视频：只改武装/AU 模式；包代理只在 setSampleBufferDelegate swizzle 里做。
         if want {
-            let needWrap = outputs.filter { !($0.sampleBufferDelegate is MicSampleBufferProxy) }
-            // 稳态：模式未变、已武装、输出已 wrap → 不动挂钩（防拍摄卡死）
-            if wasActive, !modeChanged, needWrap.isEmpty {
-                return
-            }
-            if want {
+            if !wasActive || modeChanged {
                 DispatchQueue.main.async {
                     BXFloatMicAUInstall()
                 }
             }
-            for output in needWrap {
-                let q = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
-                q.async { ensureWrapped(output) }
-            }
         } else if wasActive {
-            for output in outputs {
+            for output in trackedOutputs.allObjects {
                 unwrap(output)
             }
-        } else {
-            return
         }
-        retainedProxyCount = retainedProxies.count
-        NSLog(
-            "BXFloatMic apply edge mode=%@ was=%d active=%d tracked=%d retain=%d auMode=%d",
-            effective.rawValue,
-            wasActive ? 1 : 0,
-            want ? 1 : 0,
-            outputs.count,
-            retainedProxyCount,
-            auMode
-        )
+        if want != wasActive || modeChanged {
+            retainedProxyCount = retainedProxies.count
+            NSLog(
+                "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d",
+                effective.rawValue,
+                wasActive ? 1 : 0,
+                want ? 1 : 0,
+                auMode
+            )
+        }
     }
 
     private static func track(_ output: AVCaptureAudioDataOutput) {
@@ -152,21 +141,27 @@ enum MicReplaceHooks {
             if let aout = obj as? AVCaptureAudioDataOutput {
                 track(aout)
             }
+            if delegate is MicSampleBufferProxy {
+                typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
+                unsafeBitCast(original, to: Fn.self)(obj, sel, delegate, queue)
+                return
+            }
             var finalDelegate = delegate
             if isInjectActive(),
                let aout = obj as? AVCaptureAudioDataOutput,
-               let d = delegate,
-               !(d is MicSampleBufferProxy)
+               let d = delegate
             {
                 let proxy = MicSampleBufferProxy(target: d)
                 retainedProxies.setObject(proxy, forKey: aout)
                 retainedProxyCount = retainedProxies.count
                 finalDelegate = proxy
                 wrapCount += 1
+            } else if let aout = obj as? AVCaptureAudioDataOutput {
+                retainedProxies.removeObject(forKey: aout)
+                retainedProxyCount = retainedProxies.count
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
-            let call = unsafeBitCast(original, to: Fn.self)
-            call(obj, sel, finalDelegate, queue)
+            unsafeBitCast(original, to: Fn.self)(obj, sel, finalDelegate, queue)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -180,35 +175,12 @@ enum MicReplaceHooks {
             typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput) -> Void
             let call = unsafeBitCast(original, to: Fn.self)
             call(obj, sel, output)
+            // 只 track，不主动 setDelegate
             if let aout = output as? AVCaptureAudioDataOutput {
                 track(aout)
-                if isInjectActive() {
-                    DispatchQueue.main.async { ensureWrapped(aout) }
-                }
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
-    }
-
-    private static func ensureWrapped(_ output: AVCaptureAudioDataOutput) {
-        track(output)
-        guard isInjectActive() else { return }
-        if let existing = output.sampleBufferDelegate as? MicSampleBufferProxy {
-            retainedProxies.setObject(existing, forKey: output)
-            retainedProxyCount = retainedProxies.count
-            return
-        }
-        guard let delegate = output.sampleBufferDelegate else {
-            NSLog("BXFloatMic ensureWrapped skip: delegate=nil")
-            return
-        }
-        let queue = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
-        let proxy = MicSampleBufferProxy(target: delegate)
-        retainedProxies.setObject(proxy, forKey: output)
-        retainedProxyCount = retainedProxies.count
-        output.setSampleBufferDelegate(proxy, queue: queue)
-        wrapCount += 1
-        NSLog("BXFloatMic ensureWrapped retained=%d", retainedProxyCount)
     }
 
     private static func unwrap(_ output: AVCaptureAudioDataOutput) {

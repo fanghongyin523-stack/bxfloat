@@ -28,10 +28,11 @@ func BXFloatRestoreSampleBufferDelegate(
     _ queue: DispatchQueue?
 )
 
-/// 真替换（防冻帧版）：
-/// - 采集回调里只做像素拷贝，禁止 CI / UIKit
-/// - AVCaptureVideoDataOutput.sampleBufferDelegate 是弱引用 → 必须强持有 proxy，否则立刻释放 → 回调=0、画面冻死
-/// - 关替换：先清 active 再 unwrap
+/// 真替换（对齐 VCam 稳态挂钩）：
+/// - 只在宿主 setSampleBufferDelegate 时包一层 proxy；采集跑起来后绝不重绑
+/// - 保留宿主原回调队列（禁止改挂 paintQueue 再回灌 main → 二次拍摄卡死）
+/// - 回调里只做限时像素拷贝；超时 hold 上一帧
+/// - stop/start 只改武装标志，不 unwrap、不 apply 重绑
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
@@ -41,13 +42,10 @@ enum CameraReplaceHooks {
     private static var replaceActive = false
     /// 上次确认在拍摄面的时间（诊断用）
     private static var lastCameraSeenAt: CFAbsoluteTime = 0
-    /// stopRunning 后保持武装直到 startRunning/回到拍摄面——禁止超时拆钩（再录卡死根因）
+    /// stopRunning 后保持武装；二次 start 前仍保持，禁止超时拆钩
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
     private static var resumeFirstFramePending = false
-
-    /// 仅当抖音原回调是 main/nil 时改挂此队列，避免触摸卡死；非 main 原队列保持不动
-    static let paintQueue = DispatchQueue(label: "bx.cam.paint", qos: .userInteractive)
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -86,8 +84,7 @@ enum CameraReplaceHooks {
 
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
-        // 对齐参考 replaceEnabled：开着就保持武装；用户关才拆。不做拍摄面 TTL 拆钩。
-        // 稳态早退：已武装且输出已 wrap 时绝不 setDelegate（按住拍照键反复 setDelegate = 卡死）。
+        // 对齐参考 replaceEnabled：只改武装位。真正包代理只在 setSampleBufferDelegate swizzle 里做。
         let want = enabled
         lock.lock()
         let wasActive = replaceActive
@@ -107,36 +104,20 @@ enum CameraReplaceHooks {
         CamFrameBlitter.shared.setEnabled(want)
         PreviewCover.stop()
 
-        let outputs = trackedOutputs.allObjects
-        if want {
-            // 只补尚未 wrap 的输出；已是 proxy 的一律不动回调队列
-            let needWrap = outputs.filter { !($0.sampleBufferDelegate is CamSampleBufferProxy) }
-            if wasActive, needWrap.isEmpty {
-                return
-            }
-            for output in needWrap {
-                paintQueue.async { ensureWrapped(output) }
-            }
-        } else if wasActive {
-            for output in outputs {
-                unwrap(output)
-            }
-        } else {
+        if want == wasActive {
             return
         }
-        retainedProxyCount = retainedProxies.count
-        // 仅状态边沿打日志；禁止每次 syncFlush 写盘拖主线程
-        CamPipelineDiag.shared.noteSessionEvent(
-            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0) tracked=\(outputs.count)"
-        )
-    }
-
-    /// main/nil → paintQueue；否则保留抖音原队列，保证转发线程符合其设定
-    private static func preferCallbackQueue(_ original: DispatchQueue?) -> DispatchQueue {
-        if let original, original !== DispatchQueue.main {
-            return original
+        if !want {
+            // 用户关替换才拆；stopRunning/二次拍摄路径绝不走这里
+            for output in trackedOutputs.allObjects {
+                unwrap(output)
+            }
         }
-        return paintQueue
+        // 打开替换：不主动 setDelegate。等宿主自己设回调时由 swizzle 包上（VCam 同款）。
+        retainedProxyCount = retainedProxies.count
+        CamPipelineDiag.shared.noteSessionEvent(
+            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0)"
+        )
     }
 
     static func noteResumeFirstFrameIfNeeded(onMain: Bool, paintMs: Double) {
@@ -172,43 +153,31 @@ enum CameraReplaceHooks {
             if let vout = obj as? AVCaptureVideoDataOutput {
                 track(vout)
             }
+            // 已是我们的 proxy：原样下发，禁止二次包装
+            if delegate is CamSampleBufferProxy {
+                typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
+                unsafeBitCast(original, to: Fn.self)(obj, sel, delegate, queue)
+                return
+            }
             var finalDelegate = delegate
-            var finalQueue = queue
+            // 对齐 VCam：武装时在宿主设回调的当口包一层；队列原样保留，绝不改挂
             if isReplaceActive(),
                let vout = obj as? AVCaptureVideoDataOutput,
-               let delegate,
-               !(delegate is CamSampleBufferProxy)
+               let delegate
             {
                 let proxy = CamSampleBufferProxy(target: delegate, originalQueue: queue)
                 retainedProxies.setObject(proxy, forKey: vout)
                 retainedProxyCount = retainedProxies.count
                 finalDelegate = proxy
-                finalQueue = preferCallbackQueue(queue)
                 vout.alwaysDiscardsLateVideoFrames = true
                 wrapCount += 1
-                let onMain = (queue == nil) || (queue == DispatchQueue.main)
-                let usedPaint = finalQueue === paintQueue
-                CamPipelineDiag.shared.noteSessionEvent(
-                    "wrap origMain=\(onMain ? 1 : 0) usedPaintQ=\(usedPaint ? 1 : 0) \(String(describing: type(of: delegate)))"
-                )
-                NSLog(
-                    "BXFloatCam wrap #%lld retain=%d origMain=%d usedPaintQ=%d %@",
-                    wrapCount,
-                    retainedProxyCount,
-                    onMain ? 1 : 0,
-                    usedPaint ? 1 : 0,
-                    String(describing: type(of: delegate))
-                )
-            }
-            // 外部主动设回非 proxy 时，丢掉旧持有
-            if let vout = obj as? AVCaptureVideoDataOutput,
-               !(finalDelegate is CamSampleBufferProxy)
-            {
+            } else if let vout = obj as? AVCaptureVideoDataOutput {
+                // 宿主清空/换掉非 proxy：释放旧强持有
                 retainedProxies.removeObject(forKey: vout)
                 retainedProxyCount = retainedProxies.count
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject?, DispatchQueue?) -> Void
-            unsafeBitCast(original, to: Fn.self)(obj, sel, finalDelegate, finalQueue)
+            unsafeBitCast(original, to: Fn.self)(obj, sel, finalDelegate, queue)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -224,11 +193,9 @@ enum CameraReplaceHooks {
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel, output)
+            // 只 track，不主动 setDelegate（等宿主 set 时 swizzle 包装）
             if let vout = output as? AVCaptureVideoDataOutput {
                 track(vout)
-                if isReplaceActive() {
-                    paintQueue.async { ensureWrapped(vout) }
-                }
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
@@ -243,9 +210,7 @@ enum CameraReplaceHooks {
             if let s = session as? AVCaptureSession {
                 ShootSurfaceDetector.trackSession(s)
             }
-            ShootSurfaceDetector.invalidateCache()
-            let onMain = Thread.isMainThread
-            // 再录关键：start 前先武装，保证 startRunning 内部 setDelegate 能走进 wrap（禁止等 async apply）
+            // 二次拍摄：只在 start 前武装标志。禁止 start 后再 main.async apply/setDelegate。
             let cfgArmed = MediaConfigStore.shared.config
             if cfgArmed.replaceCameraEnabled {
                 lock.lock()
@@ -257,19 +222,9 @@ enum CameraReplaceHooks {
                 CamFrameBlitter.shared.setEnabled(true)
             }
             MicReplaceHooks.armBeforeStartRunningIfNeeded()
-            CamPipelineDiag.shared.noteSessionEvent("startRunning begin onMain=\(onMain ? 1 : 0) sync=1 armed=\(cfgArmed.replaceCameraEnabled ? 1 : 0)")
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            let t0 = CACurrentMediaTime()
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            let ms = (CACurrentMediaTime() - t0) * 1000.0
-            CamPipelineDiag.shared.noteSessionEvent(
-                String(format: "startRunning done ms=%.0f onMain=%d", ms, onMain ? 1 : 0)
-            )
-            DispatchQueue.main.async {
-                let cfg = MediaConfigStore.shared.config
-                applyReplaceMode(cfg.replaceCameraEnabled)
-                MicReplaceHooks.applyAudioMode(cfg.audioCaptureMode)
-            }
+            // 注意：这里故意不再 applyReplaceMode / ensureWrapped
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -280,53 +235,13 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
-            let onMain = Thread.isMainThread
-            CamPipelineDiag.shared.noteSessionEvent("stopRunning begin onMain=\(onMain ? 1 : 0) sync=1")
+            // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            let t0 = CACurrentMediaTime()
-            // 同步 stop：禁止 async，否则继续录制时 start 可能跑在 stop 完成前
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            let ms = (CACurrentMediaTime() - t0) * 1000.0
-            ShootSurfaceDetector.invalidateCache()
-            CamPipelineDiag.shared.noteSessionEvent(
-                String(format: "stopRunning done ms=%.0f pauseSticky=1", ms)
-            )
-            NSLog("BXFloatCam session stopRunning sync (pauseSticky until startRunning/apply)")
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
-    }
-
-    private static func ensureWrapped(_ output: AVCaptureVideoDataOutput) {
-        track(output)
-        guard isReplaceActive() else { return }
-        output.alwaysDiscardsLateVideoFrames = true
-        if let existing = output.sampleBufferDelegate as? CamSampleBufferProxy {
-            retainedProxies.setObject(existing, forKey: output)
-            retainedProxyCount = retainedProxies.count
-            // 已 wrap：禁止再 setDelegate/改队列（拍摄中重绑 = 卡死快门）
-            return
-        }
-        // delegate 已是 nil：可能是上次弱引用把 proxy 放掉了，无法恢复原 target
-        guard let delegate = output.sampleBufferDelegate else {
-            NSLog("BXFloatCam ensureWrapped skip: delegate=nil (need re-enter camera page)")
-            return
-        }
-        let origQ = output.sampleBufferCallbackQueue
-        let proxy = CamSampleBufferProxy(target: delegate, originalQueue: origQ)
-        retainedProxies.setObject(proxy, forKey: output) // 先强持有再 set
-        retainedProxyCount = retainedProxies.count
-        let q = preferCallbackQueue(origQ)
-        // 走 swizzle
-        output.setSampleBufferDelegate(proxy, queue: q)
-        wrapCount += 1
-        NSLog(
-            "BXFloatCam ensureWrapped retained=%d origMain=%d usedPaintQ=%d",
-            retainedProxyCount,
-            (origQ == nil || origQ === DispatchQueue.main) ? 1 : 0,
-            q === paintQueue ? 1 : 0
-        )
     }
 
     private static func unwrap(_ output: AVCaptureVideoDataOutput) {
@@ -334,9 +249,8 @@ enum CameraReplaceHooks {
             (output.sampleBufferDelegate as? CamSampleBufferProxy)
             ?? retainedProxies.object(forKey: output)
         if let proxy {
-            let queue = proxy.originalQueue ?? DispatchQueue.global(qos: .userInteractive)
+            let queue = proxy.originalQueue
             BXFloatRestoreSampleBufferDelegate(output, proxy.originalTarget, queue)
-            NSLog("BXFloatCam unwrapped")
         }
         retainedProxies.removeObject(forKey: output)
         retainedProxyCount = retainedProxies.count
@@ -346,22 +260,11 @@ enum CameraReplaceHooks {
 final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let originalTarget: AnyObject
     let originalQueue: DispatchQueue?
-    /// 原回调在 main 时：paint 在 paintQueue，向 main 合并投递（丢中间帧），避免 sync 死锁与 30fps 灌主线程
-    private let deliverLock = NSLock()
-    private var pendingSample: CMSampleBuffer?
-    private var pendingOutput: AVCaptureOutput?
-    private var pendingConnection: AVCaptureConnection?
-    private var deliverScheduled = false
-    private var coalescedDropCount: Int64 = 0
 
     init(target: AnyObject, originalQueue: DispatchQueue?) {
         self.originalTarget = target
         self.originalQueue = originalQueue
         super.init()
-    }
-
-    private var originalWasMain: Bool {
-        originalQueue == nil || originalQueue === DispatchQueue.main
     }
 
     override func responds(to aSelector: Selector!) -> Bool {
@@ -383,7 +286,8 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
-        // 替换开启时必须盖掉真机像素；超时则 hold 上一完整帧，禁止闪真机。
+        // 对齐 VCam processSampleBufferSynchronously：就在宿主回调队列上画，画完同步转发。
+        // 禁止改队列后再 async 回 main（二次拍摄卡顿根因）。
         if CameraReplaceHooks.isReplaceActive() {
             if CamBufferPainter.paintInPlace(sampleBuffer) {
                 CameraReplaceHooks.notePaintOK()
@@ -394,7 +298,7 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         let ms = (CACurrentMediaTime() - t0) * 1000.0
         CamPipelineDiag.shared.notePaintCost(ms: ms, onMain: onMain)
         CameraReplaceHooks.noteResumeFirstFrameIfNeeded(onMain: onMain, paintMs: ms)
-        forwardDidOutput(output, sampleBuffer: sampleBuffer, connection: connection)
+        BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
     }
 
     @objc(captureOutput:didDropSampleBuffer:fromConnection:)
@@ -404,56 +308,6 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         BXFloatForwardDidDrop(originalTarget, output, sampleBuffer, connection)
-    }
-
-    private func forwardDidOutput(
-        _ output: AVCaptureOutput,
-        sampleBuffer: CMSampleBuffer,
-        connection: AVCaptureConnection
-    ) {
-        // 非 main 原队列：回调已在其队列，同步转发。
-        if !originalWasMain {
-            BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
-            return
-        }
-        // 已在主线程（少见）：直接转，勿再 async
-        if Thread.isMainThread {
-            BXFloatForwardDidOutput(originalTarget, output, sampleBuffer, connection)
-            return
-        }
-        // paintQueue → main：合并投递（Swift ARC 持有 sampleBuffer）。禁止 main.sync。
-        deliverLock.lock()
-        if pendingSample != nil {
-            coalescedDropCount += 1
-        }
-        pendingSample = sampleBuffer
-        pendingOutput = output
-        pendingConnection = connection
-        let needSchedule = !deliverScheduled
-        deliverScheduled = true
-        let drops = coalescedDropCount
-        deliverLock.unlock()
-        if drops > 0, drops % 120 == 0 {
-            CamPipelineDiag.shared.noteSessionEvent("fwdCoalesce drops=\(drops)")
-        }
-        guard needSchedule else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.flushPendingToOriginal()
-        }
-    }
-
-    private func flushPendingToOriginal() {
-        deliverLock.lock()
-        let sb = pendingSample
-        let out = pendingOutput
-        let conn = pendingConnection
-        pendingSample = nil
-        pendingOutput = nil
-        pendingConnection = nil
-        deliverScheduled = false
-        deliverLock.unlock()
-        guard let sb, let out, let conn else { return }
-        BXFloatForwardDidOutput(originalTarget, out, sb, conn)
     }
 }
 
@@ -483,8 +337,8 @@ enum CamBufferPainter {
         NSLog("BXFloatCam sourceEpoch bump clearHold")
     }
 
-    /// 单帧软预算：超时 hold 上一完整帧，避免主线程/回调队列积压卡触摸。
-    private static let budgetSec: CFTimeInterval = 0.006
+    /// 单帧软预算：超时 hold 上一完整帧（主线程更紧），避免二次拍摄卡触摸。
+    private static let budgetSec: CFTimeInterval = 0.004
 
     @discardableResult
     static func paintInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
