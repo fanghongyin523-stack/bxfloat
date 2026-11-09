@@ -84,7 +84,9 @@ enum CameraReplaceHooks {
 
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
-        // 对齐参考 replaceEnabled：只改武装位。真正包代理只在 setSampleBufferDelegate swizzle 里做。
+        // 对齐参考：武装位 + 开关边沿包/拆一次。
+        // 禁止：定时器/每次 startRunning 后反复 setDelegate（二次拍摄卡死）。
+        // 必须：关→开时包上「已经在跑」的输出，否则只涨收帧却换不了画面。
         let want = enabled
         lock.lock()
         let wasActive = replaceActive
@@ -105,19 +107,46 @@ enum CameraReplaceHooks {
         PreviewCover.stop()
 
         if want == wasActive {
+            // 已武装：只补漏（宿主后加的 output 尚未包）
+            if want { wrapMissingOutputsOnce() }
             return
         }
-        if !want {
-            // 用户关替换才拆；stopRunning/二次拍摄路径绝不走这里
+        if want {
+            wrapMissingOutputsOnce()
+        } else {
             for output in trackedOutputs.allObjects {
                 unwrap(output)
             }
         }
-        // 打开替换：不主动 setDelegate。等宿主自己设回调时由 swizzle 包上（VCam 同款）。
         retainedProxyCount = retainedProxies.count
         CamPipelineDiag.shared.noteSessionEvent(
-            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0)"
+            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0) retain=\(retainedProxyCount)"
         )
+    }
+
+    /// 只包「还不是 proxy」的输出；已包的绝不重绑队列。
+    private static func wrapMissingOutputsOnce() {
+        for output in trackedOutputs.allObjects {
+            wrapOneIfNeeded(output)
+        }
+        retainedProxyCount = retainedProxies.count
+    }
+
+    private static func wrapOneIfNeeded(_ output: AVCaptureVideoDataOutput) {
+        track(output)
+        guard isReplaceActive() else { return }
+        if let existing = output.sampleBufferDelegate as? CamSampleBufferProxy {
+            retainedProxies.setObject(existing, forKey: output)
+            return
+        }
+        guard let delegate = output.sampleBufferDelegate else { return }
+        let queue = output.sampleBufferCallbackQueue
+        let proxy = CamSampleBufferProxy(target: delegate, originalQueue: queue)
+        retainedProxies.setObject(proxy, forKey: output)
+        output.alwaysDiscardsLateVideoFrames = true
+        // 走 swizzle；队列保持宿主原样
+        output.setSampleBufferDelegate(proxy, queue: queue)
+        wrapCount += 1
     }
 
     static func noteResumeFirstFrameIfNeeded(onMain: Bool, paintMs: Double) {
@@ -193,9 +222,12 @@ enum CameraReplaceHooks {
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel, output)
-            // 只 track，不主动 setDelegate（等宿主 set 时 swizzle 包装）
             if let vout = output as? AVCaptureVideoDataOutput {
                 track(vout)
+                // 替换已开且宿主稍后才 addOutput：补包一次（已是 proxy 则 no-op）
+                if isReplaceActive() {
+                    wrapOneIfNeeded(vout)
+                }
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
@@ -224,7 +256,11 @@ enum CameraReplaceHooks {
             MicReplaceHooks.armBeforeStartRunningIfNeeded()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            // 注意：这里故意不再 applyReplaceMode / ensureWrapped
+            // start 过程中宿主常已 setDelegate（swizzle 已包）。若仍有漏网，只补未包的，绝不重绑已包。
+            if cfgArmed.replaceCameraEnabled {
+                wrapMissingOutputsOnce()
+            }
+            MicReplaceHooks.wrapMissingOutputsOnce()
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }

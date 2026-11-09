@@ -37,6 +37,31 @@ enum MicReplaceHooks {
         lastCameraSeenAt = CFAbsoluteTimeGetCurrent()
         lock.unlock()
         BXFloatMicAUSetMode(effective == .mute ? 2 : 1)
+        BXFloatMicAUInstall()
+    }
+
+    /// 只包尚未 proxy 的音频输出；已包不重绑（供 startRunning / 开推流声边沿）
+    static func wrapMissingOutputsOnce() {
+        guard isInjectActive() else { return }
+        for output in trackedOutputs.allObjects {
+            wrapOneIfNeeded(output)
+        }
+        retainedProxyCount = retainedProxies.count
+    }
+
+    private static func wrapOneIfNeeded(_ output: AVCaptureAudioDataOutput) {
+        track(output)
+        guard isInjectActive() else { return }
+        if let existing = output.sampleBufferDelegate as? MicSampleBufferProxy {
+            retainedProxies.setObject(existing, forKey: output)
+            return
+        }
+        guard let delegate = output.sampleBufferDelegate else { return }
+        let queue = output.sampleBufferCallbackQueue
+        let proxy = MicSampleBufferProxy(target: delegate)
+        retainedProxies.setObject(proxy, forKey: output)
+        output.setSampleBufferDelegate(proxy, queue: queue)
+        wrapCount += 1
     }
 
     private(set) static var wrapCount: Int64 = 0
@@ -104,13 +129,10 @@ enum MicReplaceHooks {
         }
         BXFloatMicAUSetMode(auMode)
 
-        // 对齐视频：只改武装/AU 模式；包代理只在 setSampleBufferDelegate swizzle 里做。
         if want {
-            if !wasActive || modeChanged {
-                DispatchQueue.main.async {
-                    BXFloatMicAUInstall()
-                }
-            }
+            // 开推流声/静音：立刻装 AU + 包上已有输出（否则收帧有、AU 不涨）
+            BXFloatMicAUInstall()
+            wrapMissingOutputsOnce()
         } else if wasActive {
             for output in trackedOutputs.allObjects {
                 unwrap(output)
@@ -119,11 +141,12 @@ enum MicReplaceHooks {
         if want != wasActive || modeChanged {
             retainedProxyCount = retainedProxies.count
             NSLog(
-                "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d",
+                "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d retain=%d",
                 effective.rawValue,
                 wasActive ? 1 : 0,
                 want ? 1 : 0,
-                auMode
+                auMode,
+                retainedProxyCount
             )
         }
     }
@@ -175,9 +198,11 @@ enum MicReplaceHooks {
             typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput) -> Void
             let call = unsafeBitCast(original, to: Fn.self)
             call(obj, sel, output)
-            // 只 track，不主动 setDelegate
             if let aout = output as? AVCaptureAudioDataOutput {
                 track(aout)
+                if isInjectActive() {
+                    wrapOneIfNeeded(aout)
+                }
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
