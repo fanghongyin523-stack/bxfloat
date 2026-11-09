@@ -214,7 +214,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             host.isHidden = false
         }
 
-        if config.connectionMode == .usb {
+        // 选 USB 模式本身不起隧道；只有开替换才起（对齐「只填 IP/选模式不拉流」）
+        if config.connectionMode == .usb, config.replaceCameraEnabled {
             USBStreamBridge.shared.start()
         } else {
             USBStreamBridge.shared.stop()
@@ -235,9 +236,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
         let needPull = config.replaceCameraEnabled && !url.isEmpty
-        let key = needPull
-            ? "\(config.connectionMode.rawValue)|\(url)"
-            : "off"
+        // 模式变化即使 replace 关也要换 key，强制 stop+清残帧，禁止粘旧源
+        let key = "\(config.connectionMode.rawValue)|\(needPull ? url : "off")"
         if pullKey == key {
             return
         }

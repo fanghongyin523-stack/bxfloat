@@ -39,10 +39,9 @@ enum CameraReplaceHooks {
     /// key=output（弱），value=proxy（强）——修回调为 0 的根因
     private static let retainedProxies = NSMapTable<AVCaptureVideoDataOutput, CamSampleBufferProxy>.weakToStrongObjects()
     private static var replaceActive = false
-    /// 上次确认在拍摄面的时间；离开拍摄面后短暂保活，避免抖音切页误拆
+    /// 上次确认在拍摄面的时间（诊断用）
     private static var lastCameraSeenAt: CFAbsoluteTime = 0
-    private static let stickyAwaySec: CFAbsoluteTime = 8.0
-    /// stopRunning 后保持武装直到 startRunning/回到拍摄面——禁止用短 TTL 超时拆钩（再录卡死根因）
+    /// stopRunning 后保持武装直到 startRunning/回到拍摄面——禁止超时拆钩（再录卡死根因）
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
     private static var resumeFirstFramePending = false
@@ -92,7 +91,6 @@ enum CameraReplaceHooks {
 
         // 先改标志：关的时候即使还没 unwrap，回调也立刻透传
         lock.lock()
-        let wasActive = replaceActive
         if onCamera {
             lastCameraSeenAt = now
             if pauseSticky {
@@ -100,20 +98,15 @@ enum CameraReplaceHooks {
                 resumeFirstFramePending = true
             }
         }
-        // 用户关替换才拆。pauseSticky 无超时：对齐「结束拍摄→再拍」会话瞬断，禁止 2s 到期拆钩导致卡死。
+        // 对齐参考 replaceEnabled：用户开着替换就保持武装；只在用户关替换时拆。
+        // 禁止离开拍摄面/8s TTL 自动 unwrap（再录卡死根因）。
         let want: Bool
         if !enabled {
             want = false
             pauseSticky = false
             resumeFirstFramePending = false
-        } else if onCamera {
-            want = true
-        } else if pauseSticky {
-            want = true
-        } else if wasActive, lastCameraSeenAt > 0, (now - lastCameraSeenAt) < stickyAwaySec {
-            want = true
         } else {
-            want = false
+            want = true
         }
         let sticky = enabled && !onCamera && want
         let pause = pauseSticky
@@ -275,6 +268,7 @@ enum CameraReplaceHooks {
                 lock.unlock()
                 CamFrameBlitter.shared.setEnabled(true)
             }
+            MicReplaceHooks.armBeforeStartRunningIfNeeded()
             CamPipelineDiag.shared.noteSessionEvent("startRunning begin onMain=\(onMain ? 1 : 0) sync=1 armed=\(cfgArmed.replaceCameraEnabled ? 1 : 0)")
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             let t0 = CACurrentMediaTime()

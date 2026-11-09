@@ -12,7 +12,6 @@ enum MicReplaceHooks {
     private static var injectActive = false
     private static var currentMode: AudioCaptureMode = .microphone
     private static var lastCameraSeenAt: CFAbsoluteTime = 0
-    private static let stickyAwaySec: CFAbsoluteTime = 8.0
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
 
@@ -23,6 +22,21 @@ enum MicReplaceHooks {
             pauseStickyAt = CFAbsoluteTimeGetCurrent()
         }
         lock.unlock()
+    }
+
+    /// startRunning 前同步武装，保证会话重建时 setDelegate 能走进 wrap（对齐视频钩）
+    static func armBeforeStartRunningIfNeeded() {
+        let mode = MediaConfigStore.shared.config.audioCaptureMode
+        let forceLive = CamReplacePolicy.shouldForceLiveMic()
+        let effective: AudioCaptureMode = forceLive ? .microphone : mode
+        guard effective == .stream || effective == .mute else { return }
+        lock.lock()
+        currentMode = effective
+        injectActive = true
+        pauseSticky = false
+        lastCameraSeenAt = CFAbsoluteTimeGetCurrent()
+        lock.unlock()
+        BXFloatMicAUSetMode(effective == .mute ? 2 : 1)
     }
 
     private(set) static var wrapCount: Int64 = 0
@@ -69,25 +83,18 @@ enum MicReplaceHooks {
         let now = CFAbsoluteTimeGetCurrent()
 
         lock.lock()
-        let wasActive = injectActive
         currentMode = effective
         if onCamera {
             lastCameraSeenAt = now
             pauseSticky = false
         }
-        // pauseSticky 无超时：对齐视频钩，结束拍摄→再拍不拆麦注入
+        // 对齐参考：推流声/静音开着就保持武装；禁止离开拍摄面超时拆钩。
         let want: Bool
         if !modeWantsInject {
             want = false
             pauseSticky = false
-        } else if onCamera {
-            want = true
-        } else if pauseSticky {
-            want = true
-        } else if wasActive, lastCameraSeenAt > 0, (now - lastCameraSeenAt) < stickyAwaySec {
-            want = true
         } else {
-            want = false
+            want = true
         }
         injectActive = want
         lock.unlock()
