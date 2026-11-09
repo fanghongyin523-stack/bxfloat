@@ -37,21 +37,32 @@ final class CamFrameBlitter {
         lock.lock()
         enabled = on
         if !on {
-            prepared = nil
-            lastSyncKey = -1
-            prepW = 0
-            prepH = 0
-            prepFmt = 0
-            bgraPool = nil
-            dstPool = nil
-            poolW = 0
-            poolH = 0
-            poolDstFmt = 0
+            clearPreparedLocked()
         }
         let needTick = on && !ticking
         if needTick { ticking = true }
         lock.unlock()
         if needTick { queue.async { self.tick() } }
+    }
+
+    /// 换源时丢掉预渲染，禁止本地/局域网/USB 残帧互串
+    func invalidatePrepared() {
+        lock.lock()
+        clearPreparedLocked()
+        lock.unlock()
+    }
+
+    private func clearPreparedLocked() {
+        prepared = nil
+        lastSyncKey = -1
+        prepW = 0
+        prepH = 0
+        prepFmt = 0
+        bgraPool = nil
+        dstPool = nil
+        poolW = 0
+        poolH = 0
+        poolDstFmt = 0
     }
 
     func noteTarget(width: Int, height: Int, format: OSType) {

@@ -68,7 +68,7 @@ struct MediaConfig: Equatable {
         overlayEnabled: false,
         muted: false,
         replaceCameraEnabled: false,
-        audioCaptureMode: .stream,
+        audioCaptureMode: .microphone,
         blendRealCamera: false,
         blendOBSPercent: 90,
         rotationDegrees: 0,
@@ -109,7 +109,8 @@ extension MediaConfig: Codable {
         } else if muted {
             audioCaptureMode = .mute
         } else {
-            audioCaptureMode = .stream
+            // 默认手机麦克风；推流声须手动开开关
+            audioCaptureMode = .microphone
         }
         blendRealCamera = try c.decodeIfPresent(Bool.self, forKey: .blendRealCamera) ?? false
         blendOBSPercent = try c.decodeIfPresent(Int.self, forKey: .blendOBSPercent) ?? 90
@@ -158,7 +159,7 @@ extension MediaConfig {
 final class MediaConfigStore {
     static let shared = MediaConfigStore()
 
-    private let defaultsKey = "baixiang.conf.mvp.v3"
+    private let defaultsKey = "baixiang.conf.mvp.v4"
     private(set) var config: MediaConfig = .default
 
     private init() {}
@@ -170,10 +171,23 @@ final class MediaConfigStore {
             config = decoded
             return
         }
+        // v3 → v4：强制默认关替换 + 原麦（禁止旧配置「开关看着关实际还在拉」）
+        if let data = UserDefaults.standard.data(forKey: "baixiang.conf.mvp.v3"),
+           var decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
+        {
+            decoded.replaceCameraEnabled = false
+            decoded.audioCaptureMode = .microphone
+            decoded.muted = false
+            config = decoded
+            save(decoded, postNotification: false)
+            return
+        }
         // 兼容 v2
         if let data = UserDefaults.standard.data(forKey: "baixiang.conf.mvp.v2"),
-           let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
+           var decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
         {
+            decoded.replaceCameraEnabled = false
+            decoded.audioCaptureMode = .microphone
             config = decoded
             save(decoded, postNotification: false)
             return

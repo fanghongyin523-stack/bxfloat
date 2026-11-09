@@ -30,8 +30,12 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     private let replaceRow = UIStackView()
     private let replaceLabel = UILabel()
     private let replaceSwitch = UISwitch()
-    private let audioLabel = UILabel()
-    private let audioControl = UISegmentedControl(items: ["推流声音", "手机麦克风", "静音"])
+    private let streamAudioRow = UIStackView()
+    private let streamAudioLabel = UILabel()
+    private let streamAudioSwitch = UISwitch()
+    private let muteRow = UIStackView()
+    private let muteLabel = UILabel()
+    private let muteSwitch = UISwitch()
 
     private let advancedToggle = UIButton(type: .system)
     private let advancedBox = UIStackView()
@@ -102,10 +106,10 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         }
         ipField.text = cfg.computerIP
         replaceSwitch.isOn = cfg.replaceCameraEnabled
-        switch cfg.audioCaptureMode {
-        case .stream: audioControl.selectedSegmentIndex = 0
-        case .microphone: audioControl.selectedSegmentIndex = 1
-        case .mute: audioControl.selectedSegmentIndex = 2
+        streamAudioSwitch.isOn = (cfg.audioCaptureMode == .stream)
+        muteSwitch.isOn = (cfg.audioCaptureMode == .mute)
+        if cfg.audioCaptureMode == .mute {
+            streamAudioSwitch.isOn = false
         }
         advancedExpanded = false
         blendRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn = cfg.blendRealCamera
@@ -219,11 +223,28 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         replaceRow.addArrangedSubview(UIView())
         replaceRow.addArrangedSubview(replaceSwitch)
 
-        audioLabel.text = "直播麦声音"
-        audioLabel.font = .systemFont(ofSize: 15, weight: .medium)
-        audioLabel.textColor = textPrimary
-        styleSegment(audioControl)
-        audioControl.addTarget(self, action: #selector(audioChanged), for: .valueChanged)
+        // 推流声音：和「替换摄像头」一样的独立开关；默认关=手机麦克风
+        streamAudioLabel.text = "推流声音"
+        streamAudioLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        streamAudioLabel.textColor = textPrimary
+        streamAudioSwitch.onTintColor = accent
+        streamAudioSwitch.addTarget(self, action: #selector(streamAudioChanged), for: .valueChanged)
+        streamAudioRow.axis = .horizontal
+        streamAudioRow.alignment = .center
+        streamAudioRow.addArrangedSubview(streamAudioLabel)
+        streamAudioRow.addArrangedSubview(UIView())
+        streamAudioRow.addArrangedSubview(streamAudioSwitch)
+
+        muteLabel.text = "静音"
+        muteLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        muteLabel.textColor = textPrimary
+        muteSwitch.onTintColor = accent
+        muteSwitch.addTarget(self, action: #selector(muteChanged), for: .valueChanged)
+        muteRow.axis = .horizontal
+        muteRow.alignment = .center
+        muteRow.addArrangedSubview(muteLabel)
+        muteRow.addArrangedSubview(UIView())
+        muteRow.addArrangedSubview(muteSwitch)
 
         advancedToggle.contentHorizontalAlignment = .left
         advancedToggle.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
@@ -309,7 +330,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         let stack = UIStackView(arrangedSubviews: [
             titleLabel, modeControl, modeHint,
             makeIPRow(), pickLocalButton,
-            replaceRow, audioLabel, audioControl,
+            replaceRow, streamAudioRow, muteRow,
             advancedToggle, advancedBox,
             statusLabel, logButton,
         ])
@@ -447,11 +468,11 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         ipField.superview?.isHidden = modeControl.selectedSegmentIndex == 2
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：插线信任+电脑 USB助手勿关；打开「替换」后才拉流。"
+            modeHint.text = "数据线：助手勿关；默认原麦。开「替换摄像头」才换画面，开「推流声音」才用推流声。"
         case 2:
-            modeHint.text = "本地视频：先选文件，再手动打开「替换摄像头」才播放。"
+            modeHint.text = "本地视频：先选文件；默认原镜头/原麦，开对应开关才替换。"
         default:
-            modeHint.text = "局域网：填电脑 IP 后，手动打开「替换摄像头」才拉流（无默认围观）。"
+            modeHint.text = "局域网：填 IP。默认原镜头+手机麦；开「替换摄像头」/「推流声音」才拉流。"
         }
     }
 
@@ -502,10 +523,12 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         default: mode = .lan
         }
         let audioMode: AudioCaptureMode
-        switch audioControl.selectedSegmentIndex {
-        case 1: audioMode = .microphone
-        case 2: audioMode = .mute
-        default: audioMode = .stream
+        if muteSwitch.isOn {
+            audioMode = .mute
+        } else if streamAudioSwitch.isOn {
+            audioMode = .stream
+        } else {
+            audioMode = .microphone
         }
         let blendOn = blendRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn == true
         let timedOn = timedRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn == true
@@ -526,9 +549,25 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         updateAdvancedChrome()
     }
 
-    @objc private func modeChanged() { updateModeHint(); commit() }
+    @objc private func modeChanged() {
+        updateModeHint()
+        // 换模式强制停源，避免「开关看着关了其实还在播旧本地帧」
+        stopPullHintAndCommit()
+    }
     @objc private func replaceChanged() { commit() }
-    @objc private func audioChanged() { commit() }
+    @objc private func streamAudioChanged() {
+        if streamAudioSwitch.isOn { muteSwitch.isOn = false }
+        commit()
+    }
+    @objc private func muteChanged() {
+        if muteSwitch.isOn { streamAudioSwitch.isOn = false }
+        commit()
+    }
+
+    private func stopPullHintAndCommit() {
+        // 先写配置；FloatingOverlay syncPuller 见 mode 变化会 stop+清 epoch
+        commit()
+    }
     @objc private func blendChanged() { commit() }
     @objc private func blendSliderChanged() { updateAdvancedChrome() }
     @objc private func blendSliderCommitted() { updateAdvancedChrome(); commit() }

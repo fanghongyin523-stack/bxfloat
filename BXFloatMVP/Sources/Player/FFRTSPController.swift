@@ -43,6 +43,7 @@ enum FFRTSPController {
             BXFloatFFStop()
         }
         RTSPVTPuller.shared.stop()
+        CamFrameStore.shared.reset()
         CamAudioStore.shared.reset()
         AVSyncClock.shared.reset()
     }

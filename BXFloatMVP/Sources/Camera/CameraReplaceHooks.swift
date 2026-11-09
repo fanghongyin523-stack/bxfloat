@@ -493,6 +493,21 @@ enum CamBufferPainter {
     private static var lastGoodW = 0
     private static var lastGoodH = 0
     private static var lastGoodFmt: OSType = 0
+    private static var sourceEpoch: UInt64 = 0
+    private static var lastGoodEpoch: UInt64 = 0
+
+    /// 换源（局域网↔本地↔USB）时清残帧，避免切过去还停在旧画面
+    static func bumpSourceEpochAndClearHold() {
+        lock.lock()
+        sourceEpoch &+= 1
+        lastGood = nil
+        lastGoodW = 0
+        lastGoodH = 0
+        lastGoodFmt = 0
+        lastGoodEpoch = 0
+        lock.unlock()
+        CamFrameBlitter.shared.invalidatePrepared()
+    }
 
     /// 单帧软预算：超时 hold 上一完整帧，避免主线程/回调队列积压卡触摸。
     private static let budgetSec: CFTimeInterval = 0.006
@@ -532,7 +547,7 @@ enum CamBufferPainter {
             return true
         }
 
-        // 2) 预算紧张或主线程：直接 hold 上一完整帧，禁止再扫 ring / 二次全幅拷贝
+        // 2) 预算紧张或主线程：仅 hold「本源 epoch」帧；无新素材则透传真机（禁止粘旧源）
         let tight = Thread.isMainThread || (CACurrentMediaTime() - t0) > budgetSec * 0.4
         if tight {
             if let good = copyLastGood(width: dw, height: dh, format: fmt),
@@ -541,7 +556,7 @@ enum CamBufferPainter {
                 finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
                 return true
             }
-            return fillBlack(dst)
+            return true // 透传真摄像头，等新流首帧
         }
 
         // 3) 预渲染未就绪：同 mediaTime 取帧；锁拿不到则 hold，避免回调堵在 ring 锁上
@@ -565,7 +580,8 @@ enum CamBufferPainter {
             return true
         }
 
-        return fillBlack(dst)
+        // 换源后环空：透传真机，不要黑屏/旧本地帧
+        return true
     }
 
     /// 融合真实摄像头：dst=OBS，real=真机，frac=OBS 占比
@@ -630,6 +646,7 @@ enum CamBufferPainter {
         lastGoodW = width
         lastGoodH = height
         lastGoodFmt = format
+        lastGoodEpoch = sourceEpoch
         lock.unlock()
     }
 
@@ -637,6 +654,7 @@ enum CamBufferPainter {
         lock.lock()
         defer { lock.unlock() }
         guard let lastGood,
+              lastGoodEpoch == sourceEpoch,
               lastGoodW == width,
               lastGoodH == height,
               lastGoodFmt == format
