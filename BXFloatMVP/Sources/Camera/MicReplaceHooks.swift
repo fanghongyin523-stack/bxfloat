@@ -130,9 +130,11 @@ enum MicReplaceHooks {
         BXFloatMicAUSetMode(auMode)
 
         if want {
-            // 开推流声/静音：立刻装 AU + 包上已有输出（否则收帧有、AU 不涨）
+            // 开推流声/静音边沿：装 AU + 只在模式边沿包一次（禁止 startRunning 路径重绑）
             BXFloatMicAUInstall()
-            wrapMissingOutputsOnce()
+            if !wasActive || modeChanged {
+                wrapMissingOutputsOnce()
+            }
         } else if wasActive {
             for output in trackedOutputs.allObjects {
                 unwrap(output)
@@ -200,9 +202,7 @@ enum MicReplaceHooks {
             call(obj, sel, output)
             if let aout = output as? AVCaptureAudioDataOutput {
                 track(aout)
-                if isInjectActive() {
-                    wrapOneIfNeeded(aout)
-                }
+                // 不在 addOutput 里 setDelegate；等宿主 setSampleBufferDelegate / 开推流声边沿再包
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))

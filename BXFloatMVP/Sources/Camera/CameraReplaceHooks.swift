@@ -84,9 +84,10 @@ enum CameraReplaceHooks {
 
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
-        // 对齐参考：武装位 + 开关边沿包/拆一次。
-        // 禁止：定时器/每次 startRunning 后反复 setDelegate（二次拍摄卡死）。
-        // 必须：关→开时包上「已经在跑」的输出，否则只涨收帧却换不了画面。
+        // 对齐参考：
+        // - 用户「开替换」边沿：包一次已有输出（否则只涨收帧不换画）
+        // - 点「开始录制」走 startRunning：只武装，绝不 setDelegate（否则整屏卡死）
+        // - 已武装稳态：什么都不动
         let want = enabled
         lock.lock()
         let wasActive = replaceActive
@@ -107,8 +108,6 @@ enum CameraReplaceHooks {
         PreviewCover.stop()
 
         if want == wasActive {
-            // 已武装：只补漏（宿主后加的 output 尚未包）
-            if want { wrapMissingOutputsOnce() }
             return
         }
         if want {
@@ -222,12 +221,9 @@ enum CameraReplaceHooks {
             }
             typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel, output)
+            // 只 track。包代理交给后续 setSampleBufferDelegate swizzle（禁止在 addOutput 里 setDelegate）
             if let vout = output as? AVCaptureVideoDataOutput {
                 track(vout)
-                // 替换已开且宿主稍后才 addOutput：补包一次（已是 proxy 则 no-op）
-                if isReplaceActive() {
-                    wrapOneIfNeeded(vout)
-                }
             }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
@@ -242,7 +238,8 @@ enum CameraReplaceHooks {
             if let s = session as? AVCaptureSession {
                 ShootSurfaceDetector.trackSession(s)
             }
-            // 二次拍摄：只在 start 前武装标志。禁止 start 后再 main.async apply/setDelegate。
+            // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
+            // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
             let cfgArmed = MediaConfigStore.shared.config
             if cfgArmed.replaceCameraEnabled {
                 lock.lock()
@@ -256,11 +253,6 @@ enum CameraReplaceHooks {
             MicReplaceHooks.armBeforeStartRunningIfNeeded()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            // start 过程中宿主常已 setDelegate（swizzle 已包）。若仍有漏网，只补未包的，绝不重绑已包。
-            if cfgArmed.replaceCameraEnabled {
-                wrapMissingOutputsOnce()
-            }
-            MicReplaceHooks.wrapMissingOutputsOnce()
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -391,9 +383,11 @@ enum CamBufferPainter {
 
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
-        let blendFrac = CamReplacePolicy.obsBlendFraction()
+        // 主线程回调（录制键常在 main）：禁止 clone 真机帧，超时直接 hold，避免整屏卡死
+        let onMain = Thread.isMainThread
+        let blendFrac = onMain ? 1.0 : CamReplacePolicy.obsBlendFraction()
         var realSnapshot: CVPixelBuffer?
-        if blendFrac < 0.999 {
+        if !onMain, blendFrac < 0.999 {
             realSnapshot = cloneBuffer(dst)
         }
 
