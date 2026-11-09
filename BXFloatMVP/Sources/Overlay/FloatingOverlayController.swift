@@ -214,8 +214,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             host.isHidden = false
         }
 
-        // 选 USB 模式本身不起隧道；只有开替换才起（对齐「只填 IP/选模式不拉流」）
-        if config.connectionMode == .usb, config.replaceCameraEnabled {
+        // 选数据线：只起本机隧道监听（让 PC 助手先连上）；不等于拉流。
+        // 真正 FFmpeg 拉流仍只在「替换摄像头」打开后走 syncPuller。
+        if config.connectionMode == .usb {
             USBStreamBridge.shared.start()
         } else {
             USBStreamBridge.shared.stop()
@@ -249,7 +250,17 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         switch config.connectionMode {
         case .localVideo:
             LocalVideoPlayer.shared.start(urlString: url)
-        case .lan, .usb, .manual:
+        case .usb:
+            // 等本机 :18554 监听就绪再拉，避免「点替换没反应」（连上被拒）
+            let pullURL = url
+            let expectedKey = key
+            USBStreamBridge.shared.whenLocalReady {
+                guard self.pullKey == expectedKey else { return }
+                let cfg = MediaConfigStore.shared.config
+                guard cfg.connectionMode == .usb, cfg.replaceCameraEnabled else { return }
+                FFRTSPController.start(urlString: pullURL)
+            }
+        case .lan, .manual:
             if url.hasPrefix("rtsp://") || url.lowercased().hasPrefix("http") {
                 FFRTSPController.start(urlString: url)
             } else {

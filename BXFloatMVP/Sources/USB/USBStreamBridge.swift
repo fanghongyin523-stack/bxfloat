@@ -18,9 +18,17 @@ final class USBStreamBridge {
 
     private init() {}
 
-    /// 异步启动；禁止在主线程忙等（旧 startAndWait 会 sleep 卡死 UI）。
+    /// 异步启动监听（选数据线模式即可起，不等于拉流）。禁止主线程忙等。
     func start() {
         queue.async { self.startLocked() }
+    }
+
+    /// 等本机 RTSP 监听就绪后再回调（给 FFmpeg 连 127.0.0.1:18554 用）。
+    func whenLocalReady(timeoutSec: TimeInterval = 3.0, _ body: @escaping () -> Void) {
+        queue.async {
+            self.startLocked()
+            self.pollLocalReady(deadline: Date().addingTimeInterval(timeoutSec), body: body)
+        }
     }
 
     func stop() {
@@ -48,6 +56,20 @@ final class USBStreamBridge {
         NSLog("BXFloat USB bridge starting rtsp=:%@/%@ hls=:%@/%@",
               "\(Self.rtspPlayPort)", "\(Self.rtspTunnelPort)",
               "\(Self.hlsPlayPort)", "\(Self.hlsTunnelPort)")
+    }
+
+    private func pollLocalReady(deadline: Date, body: @escaping () -> Void) {
+        let rtspReady = channels.first(where: { $0.name == "rtsp" })?.localReady == true
+        if rtspReady || !isRunning || Date() >= deadline {
+            if !rtspReady {
+                NSLog("BXFloat USB local RTSP not ready yet; starting pull anyway")
+            }
+            DispatchQueue.main.async(execute: body)
+            return
+        }
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.pollLocalReady(deadline: deadline, body: body)
+        }
     }
 }
 

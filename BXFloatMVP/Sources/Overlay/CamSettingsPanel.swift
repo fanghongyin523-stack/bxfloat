@@ -465,14 +465,16 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
 
     private func updateModeHint() {
         pickLocalButton.isHidden = modeControl.selectedSegmentIndex != 2
-        ipField.superview?.isHidden = modeControl.selectedSegmentIndex == 2
+        // 数据线/本地都不填推流地址：USB 自动 127.0.0.1，本地走选文件
+        let showIP = modeControl.selectedSegmentIndex == 0
+        ipField.superview?.isHidden = !showIP
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：助手勿关。开「替换摄像头」才拉流换画面；「推流声音」只切麦，不单独拉流。"
+            modeHint.text = "数据线：无需填地址（自动本机）。USB助手保持开启；开「替换摄像头」才拉流。"
         case 2:
             modeHint.text = "本地视频：先选文件。开「替换摄像头」才播放；「推流声音」只控制用推流声还是原麦。"
         default:
-            modeHint.text = "局域网：填 IP。开「替换摄像头」才拉流；「推流声音」只出声、不触发拉流。"
+            modeHint.text = "局域网：填电脑 IP。开「替换摄像头」才拉流；「推流声音」只出声、不触发拉流。"
         }
     }
 
