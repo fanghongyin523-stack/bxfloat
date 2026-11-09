@@ -91,20 +91,22 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     @objc private func configChanged() { apply(MediaConfigStore.shared.config) }
     @objc private func appActive() {
         reattachIfNeeded(reason: "active")
+        // 仅在可能丢焦点后轻量钉回；拍摄中不要频繁 makeKey
         restoreHostKeyWindow()
     }
     @objc private func sceneActive() { reattachIfNeeded(reason: "scene") }
     @objc private func windowVisible(_ note: Notification) {
         guard let w = note.object as? UIWindow, w !== floatWindow else { return }
+        // 窗口闪现很频繁：只保活悬浮窗，禁止每次 makeKey（按住快门会卡）
         DispatchQueue.main.async { [weak self] in
             self?.reattachIfNeeded(reason: "win")
-            self?.restoreHostKeyWindow()
         }
     }
 
     private func startReattachTimer() {
         reattachTimer?.invalidate()
-        reattachTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // 3s 足够保活悬浮球；别用 1s 高频扫（主线程压力）
+        reattachTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.reattachIfNeeded(reason: "timer")
         }
         if let t = reattachTimer {
@@ -140,6 +142,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         let bubbleMissing = bubbleView == nil
         let bubbleOrphan = bubbleView.map { $0.superview !== fw } ?? false
 
+        // 定时器只做窗/球保活，禁止每秒 applyReplace/setDelegate。
+        // 参照不会在拍摄中反复动挂钩；按住拍照键时再 setDelegate = 卡死/闪退主因。
         if reason == "timer",
            !missingWindow,
            !sceneMismatch,
@@ -147,7 +151,6 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
            !bubbleOrphan,
            !fw.isHidden
         {
-            syncReplaceForCurrentSurface()
             return
         }
 

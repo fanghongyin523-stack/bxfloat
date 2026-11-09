@@ -86,30 +86,21 @@ enum CameraReplaceHooks {
 
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
-        let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
-        let now = CFAbsoluteTimeGetCurrent()
-
-        // 先改标志：关的时候即使还没 unwrap，回调也立刻透传
+        // 对齐参考 replaceEnabled：开着就保持武装；用户关才拆。不做拍摄面 TTL 拆钩。
+        // 稳态早退：已武装且输出已 wrap 时绝不 setDelegate（按住拍照键反复 setDelegate = 卡死）。
+        let want = enabled
         lock.lock()
-        if onCamera {
-            lastCameraSeenAt = now
+        let wasActive = replaceActive
+        if want {
             if pauseSticky {
                 pauseSticky = false
                 resumeFirstFramePending = true
             }
-        }
-        // 对齐参考 replaceEnabled：用户开着替换就保持武装；只在用户关替换时拆。
-        // 禁止离开拍摄面/8s TTL 自动 unwrap（再录卡死根因）。
-        let want: Bool
-        if !enabled {
-            want = false
+            lastCameraSeenAt = CFAbsoluteTimeGetCurrent()
+        } else {
             pauseSticky = false
             resumeFirstFramePending = false
-        } else {
-            want = true
         }
-        let sticky = enabled && !onCamera && want
-        let pause = pauseSticky
         replaceActive = want
         lock.unlock()
 
@@ -117,29 +108,26 @@ enum CameraReplaceHooks {
         PreviewCover.stop()
 
         let outputs = trackedOutputs.allObjects
-        for output in outputs {
-            if want {
-                // 在 paintQueue 上 wrap，避免占主线程；最终回调队列见 preferCallbackQueue
+        if want {
+            // 只补尚未 wrap 的输出；已是 proxy 的一律不动回调队列
+            let needWrap = outputs.filter { !($0.sampleBufferDelegate is CamSampleBufferProxy) }
+            if wasActive, needWrap.isEmpty {
+                return
+            }
+            for output in needWrap {
                 paintQueue.async { ensureWrapped(output) }
-            } else {
+            }
+        } else if wasActive {
+            for output in outputs {
                 unwrap(output)
             }
+        } else {
+            return
         }
         retainedProxyCount = retainedProxies.count
+        // 仅状态边沿打日志；禁止每次 syncFlush 写盘拖主线程
         CamPipelineDiag.shared.noteSessionEvent(
-            "applyReplace cfg=\(enabled ? 1 : 0) cam=\(onCamera ? 1 : 0) sticky=\(sticky ? 1 : 0) pause=\(pause ? 1 : 0) active=\(want ? 1 : 0)"
-        )
-        NSLog(
-            "BXFloatCam applyReplaceMode cfg=%d cam=%d sticky=%d pause=%d active=%d tracked=%d retainProxy=%d paintOK=%lld fail=%lld",
-            enabled ? 1 : 0,
-            onCamera ? 1 : 0,
-            sticky ? 1 : 0,
-            pause ? 1 : 0,
-            want ? 1 : 0,
-            outputs.count,
-            retainedProxyCount,
-            paintCount,
-            paintFailCount
+            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0) tracked=\(outputs.count)"
         )
     }
 
@@ -314,19 +302,10 @@ enum CameraReplaceHooks {
         track(output)
         guard isReplaceActive() else { return }
         output.alwaysDiscardsLateVideoFrames = true
-        let desiredQ: DispatchQueue = {
-            if let existing = output.sampleBufferDelegate as? CamSampleBufferProxy {
-                return preferCallbackQueue(existing.originalQueue)
-            }
-            return preferCallbackQueue(output.sampleBufferCallbackQueue)
-        }()
         if let existing = output.sampleBufferDelegate as? CamSampleBufferProxy {
             retainedProxies.setObject(existing, forKey: output)
             retainedProxyCount = retainedProxies.count
-            // 原是 main 却被改回 main：拉回 paintQueue；非 main 则保持其原队列
-            if output.sampleBufferCallbackQueue !== desiredQ {
-                BXFloatRestoreSampleBufferDelegate(output, existing, desiredQ)
-            }
+            // 已 wrap：禁止再 setDelegate/改队列（拍摄中重绑 = 卡死快门）
             return
         }
         // delegate 已是 nil：可能是上次弱引用把 proxy 放掉了，无法恢复原 target

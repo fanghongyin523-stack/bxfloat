@@ -87,11 +87,11 @@ final class CamPipelineDiag {
         startMainWatchdogIfNeeded()
     }
 
-    /// 会话事件自动落盘（不依赖面板按钮；卡住时仍可能有后台 tick 写入）
+    /// 会话事件落盘（默认异步；禁止在拍摄回调/定时器路径 sync 写盘卡主线程）
     func noteSessionEvent(_ message: String) {
         let line = "BXFloatSession \(message)"
         NSLog("%@", line)
-        appendLogLines([line], syncFlush: true)
+        appendLogLines([line], syncFlush: false)
     }
 
     private func startMainWatchdogIfNeeded() {
@@ -123,7 +123,8 @@ final class CamPipelineDiag {
                         ])
                     }
                 }
-                Thread.sleep(forTimeInterval: 0.5)
+                // 2s 一探：够诊断，避免每 0.5s 灌主线程（拍摄交互期）
+                Thread.sleep(forTimeInterval: 2.0)
                 self.lock.lock()
                 let sentAt = self.mainProbeSentAt
                 let ackAt = self.mainProbeAckAt

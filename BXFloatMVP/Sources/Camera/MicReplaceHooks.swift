@@ -76,30 +76,24 @@ enum MicReplaceHooks {
     /// 定时露真期间强制现场麦（对标目标面板：内录音频同步切现场）。
     static func applyAudioMode(_ mode: AudioCaptureMode) {
         installIfNeeded()
-        let onCamera = ShootSurfaceDetector.isCameraSurfaceVisible()
         let forceLive = CamReplacePolicy.shouldForceLiveMic()
         let effective: AudioCaptureMode = forceLive ? .microphone : mode
         let modeWantsInject = (effective == .stream || effective == .mute)
-        let now = CFAbsoluteTimeGetCurrent()
+        let want = modeWantsInject
 
         lock.lock()
+        let wasActive = injectActive
+        let modeChanged = (currentMode != effective)
         currentMode = effective
-        if onCamera {
-            lastCameraSeenAt = now
+        if want {
             pauseSticky = false
-        }
-        // 对齐参考：推流声/静音开着就保持武装；禁止离开拍摄面超时拆钩。
-        let want: Bool
-        if !modeWantsInject {
-            want = false
-            pauseSticky = false
+            lastCameraSeenAt = CFAbsoluteTimeGetCurrent()
         } else {
-            want = true
+            pauseSticky = false
         }
         injectActive = want
         lock.unlock()
 
-        // AudioUnit 路径：仅在需要推流/静音时才 fishhook（且延迟到主线程空闲）
         let auMode: Int32
         if !want {
             auMode = 0
@@ -109,35 +103,39 @@ enum MicReplaceHooks {
             auMode = 1
         }
         BXFloatMicAUSetMode(auMode)
-        if want {
-            DispatchQueue.main.async {
-                BXFloatMicAUInstall()
-            }
-        }
 
         let outputs = trackedOutputs.allObjects
-        for output in outputs {
+        if want {
+            let needWrap = outputs.filter { !($0.sampleBufferDelegate is MicSampleBufferProxy) }
+            // 稳态：模式未变、已武装、输出已 wrap → 不动挂钩（防拍摄卡死）
+            if wasActive, !modeChanged, needWrap.isEmpty {
+                return
+            }
             if want {
-                let q = output.sampleBufferCallbackQueue ?? DispatchQueue.main
+                DispatchQueue.main.async {
+                    BXFloatMicAUInstall()
+                }
+            }
+            for output in needWrap {
+                let q = output.sampleBufferCallbackQueue ?? DispatchQueue.global(qos: .userInteractive)
                 q.async { ensureWrapped(output) }
-            } else {
+            }
+        } else if wasActive {
+            for output in outputs {
                 unwrap(output)
             }
+        } else {
+            return
         }
         retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatMic apply mode=%@ cam=%d sticky=%d active=%d tracked=%d retain=%d auMode=%d auPaint=%lld aqPaint=%lld auCreate=%lld auStart=%lld",
-            mode.rawValue,
-            onCamera ? 1 : 0,
-            (modeWantsInject && !onCamera && want) ? 1 : 0,
+            "BXFloatMic apply edge mode=%@ was=%d active=%d tracked=%d retain=%d auMode=%d",
+            effective.rawValue,
+            wasActive ? 1 : 0,
             want ? 1 : 0,
             outputs.count,
             retainedProxyCount,
-            auMode,
-            BXFloatMicAUPaintCount(),
-            BXFloatMicAQPaintCount(),
-            BXFloatMicAUCreateCount(),
-            BXFloatMicAUStartCount()
+            auMode
         )
     }
 
