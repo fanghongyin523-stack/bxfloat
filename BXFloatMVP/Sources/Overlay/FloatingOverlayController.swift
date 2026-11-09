@@ -231,14 +231,12 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     /// 模式/URL/开关变化时先停干净再起，避免局域网↔数据线↔本地切换粘连旧环。
-    /// 默认原麦、替换关；只有手动开「替换摄像头」或「推流声音」才拉流。
+    /// 硬约束：只有「替换摄像头」才拉流；「推流声音」只切麦注入，绝不单独触发拉流。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
-        let wantVideo = config.replaceCameraEnabled
-        let wantStreamAudio = config.audioCaptureMode == .stream
-        let needPull = (wantVideo || wantStreamAudio) && !url.isEmpty
+        let needPull = config.replaceCameraEnabled && !url.isEmpty
         let key = needPull
-            ? "\(config.connectionMode.rawValue)|\(url)|v\(wantVideo ? 1 : 0)|a\(wantStreamAudio ? 1 : 0)"
+            ? "\(config.connectionMode.rawValue)|\(url)"
             : "off"
         if pullKey == key {
             return

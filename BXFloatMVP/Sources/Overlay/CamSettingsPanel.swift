@@ -468,11 +468,11 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         ipField.superview?.isHidden = modeControl.selectedSegmentIndex == 2
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：助手勿关；默认原麦。开「替换摄像头」才换画面，开「推流声音」才用推流声。"
+            modeHint.text = "数据线：助手勿关。开「替换摄像头」才拉流换画面；「推流声音」只切麦，不单独拉流。"
         case 2:
-            modeHint.text = "本地视频：先选文件；默认原镜头/原麦，开对应开关才替换。"
+            modeHint.text = "本地视频：先选文件。开「替换摄像头」才播放；「推流声音」只控制用推流声还是原麦。"
         default:
-            modeHint.text = "局域网：填 IP。默认原镜头+手机麦；开「替换摄像头」/「推流声音」才拉流。"
+            modeHint.text = "局域网：填 IP。开「替换摄像头」才拉流；「推流声音」只出声、不触发拉流。"
         }
     }
 
