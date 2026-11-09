@@ -266,7 +266,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         CamFrameStore.shared.reset()
         CamAudioStore.shared.reset()
         AVSyncClock.shared.reset()
-        CameraReplaceHooks.bumpSourceEpochAndClearHold()
+        CamBufferPainter.bumpSourceEpochAndClearHold()
         pullKey = nil
     }
 

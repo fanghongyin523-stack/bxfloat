@@ -507,6 +507,7 @@ enum CamBufferPainter {
         lastGoodEpoch = 0
         lock.unlock()
         CamFrameBlitter.shared.invalidatePrepared()
+        NSLog("BXFloatCam sourceEpoch bump clearHold")
     }
 
     /// 单帧软预算：超时 hold 上一完整帧，避免主线程/回调队列积压卡触摸。
