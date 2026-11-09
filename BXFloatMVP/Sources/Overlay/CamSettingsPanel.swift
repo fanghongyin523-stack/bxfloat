@@ -113,7 +113,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         }
         advancedExpanded = false
         blendRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn = cfg.blendRealCamera
-        blendSlider.value = Float(cfg.blendOBSPercent)
+        blendSlider.value = Float(cfg.blendStreamPercent)
         timedRow.arrangedSubviews.compactMap { $0 as? UISwitch }.first?.isOn = cfg.timedRealCamera
         intervalField.text = "\(max(10, cfg.timedRealIntervalSec))"
         showSecField.text = "\(max(1, min(60, cfg.timedRealShowSec)))"
@@ -306,7 +306,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         intervalField.heightAnchor.constraint(equalToConstant: 40).isActive = true
         showSecField.heightAnchor.constraint(equalToConstant: 40).isActive = true
 
-        [orient, blendRow, makeCaption("OBS 画面占比"), blendSlider, blendHint,
+        [orient, blendRow, makeCaption("推流画面占比"), blendSlider, blendHint,
          timedRow, makeCaption("快捷间隔"), timedPreset, timedRowFields, editTimed, timedHint]
             .forEach { advancedBox.addArrangedSubview($0) }
 
@@ -470,7 +470,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         ipField.superview?.isHidden = !showIP
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：无需填地址。先开电脑「USB助手」再开「替换摄像头」。\(USBStreamBridge.shared.statusLine())"
+            modeHint.text = "数据线：无需填地址。电脑开「USB助手/直连」桥到本机媒体口，再开「替换摄像头」。\(USBStreamBridge.shared.statusLine())"
         case 2:
             modeHint.text = "本地视频：先选文件。开「替换摄像头」才播放；「推流声音」只控制用推流声还是原麦。"
         default:
@@ -488,7 +488,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             timedOn ? "定时开" : "定时关",
         ].joined(separator: " · ")
         advancedToggle.setTitle(summary, for: .normal)
-        blendHint.text = "OBS 画面 \(Int(blendSlider.value))% · 卡顿可关融合或降分辨率。"
+        blendHint.text = "推流画面 \(Int(blendSlider.value))% · 卡顿可关融合或降分辨率。"
     }
 
     private func refreshStatus() {
@@ -546,7 +546,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             cfg.muted = (audioMode == .mute)
             cfg.overlayEnabled = true
             cfg.blendRealCamera = blendOn
-            cfg.blendOBSPercent = Int(blendSlider.value)
+            cfg.blendStreamPercent = Int(blendSlider.value)
             cfg.timedRealCamera = timedOn
             cfg.timedRealIntervalSec = parsedIntervalSec()
             cfg.timedRealShowSec = parsedShowSec()

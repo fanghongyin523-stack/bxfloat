@@ -28,17 +28,22 @@ final class USBStreamBridge {
         queue.async { self.startLocked() }
     }
 
-    /// 等本机 RTSP 监听就绪 +（尽量）PC 隧道已挂上，再回调开 FFmpeg。
-    /// 旧逻辑只等 localReady 就拉流：FFmpeg 2s 超时经常等不到助手，表现为「数据线画面过不来」。
-    func whenPullReady(timeoutSec: TimeInterval = 15.0, _ body: @escaping (_ tunnelArmed: Bool) -> Void) {
+    /// 等本机 RTSP 监听就绪后尽快回调开 FFmpeg。
+    /// 理想：隧道已 pending 就瞬时对接；若助手晚到，本机听好后短暂宽限（默认 0.25s）也开拉，靠 FFmpeg 0.2s 重连追上。
+    func whenPullReady(timeoutSec: TimeInterval = 4.0, _ body: @escaping (_ tunnelArmed: Bool) -> Void) {
         queue.async {
             self.startLocked()
-            self.pollPullReady(deadline: Date().addingTimeInterval(timeoutSec), body: body)
+            self.pollPullReady(
+                startedAt: Date(),
+                deadline: Date().addingTimeInterval(timeoutSec),
+                optimisticAfter: 0.25,
+                body: body
+            )
         }
     }
 
     /// 兼容旧名
-    func whenLocalReady(timeoutSec: TimeInterval = 15.0, _ body: @escaping () -> Void) {
+    func whenLocalReady(timeoutSec: TimeInterval = 4.0, _ body: @escaping () -> Void) {
         whenPullReady(timeoutSec: timeoutSec) { _ in body() }
     }
 
@@ -80,32 +85,53 @@ final class USBStreamBridge {
               "\(Self.hlsPlayPort)", "\(Self.hlsTunnelPort)")
     }
 
-    private func pollPullReady(deadline: Date, body: @escaping (Bool) -> Void) {
+    private func pollPullReady(
+        startedAt: Date,
+        deadline: Date,
+        optimisticAfter: TimeInterval,
+        body: @escaping (Bool) -> Void
+    ) {
         let rtsp = channels.first(where: { $0.name == "rtsp" })
         let localOK = rtsp?.localReady == true
         let pending = rtsp?.pendingTunnelCount ?? 0
         diagLocalReady = localOK
         diagTunnelPending = pending
+        let now = Date()
+        let waited = now.timeIntervalSince(startedAt)
 
-        // 理想：本机已听 + PC 助手已有挂起隧道，再开 FFmpeg，管道可瞬时对接
+        // 理想：本机已听 + PC 助手已有挂起隧道 → 瞬时对接
         if localOK, pending > 0 {
-            NSLog("BXFloat USB pull-ready local=1 pending=%d", pending)
+            NSLog("BXFloat USB pull-ready local=1 pending=%d wait=%.0fms", pending, waited * 1000)
             DispatchQueue.main.async { body(true) }
             return
         }
-        if !isRunning || Date() >= deadline {
+        // 体感：本机听好后最多再等 optimisticAfter；不空等 15s 才开 FFmpeg
+        if localOK, waited >= optimisticAfter {
+            if pending == 0 {
+                diagLastError = "助手未连(开USB助手/直连)"
+                NSLog("BXFloat USB pull optimistic local=1 pending=0 wait=%.0fms", waited * 1000)
+            }
+            DispatchQueue.main.async { body(pending > 0) }
+            return
+        }
+        if !isRunning || now >= deadline {
             if !localOK {
                 diagLastError = "本机:18554未就绪"
                 NSLog("BXFloat USB pull timeout: local not ready")
             } else if pending == 0 {
-                diagLastError = "助手未连(开USB助手)"
+                diagLastError = "助手未连(开USB助手/直连)"
                 NSLog("BXFloat USB pull timeout: no PC tunnel; start USB助手")
             }
             DispatchQueue.main.async { body(localOK && pending > 0) }
             return
         }
-        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.pollPullReady(deadline: deadline, body: body)
+        queue.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+            self?.pollPullReady(
+                startedAt: startedAt,
+                deadline: deadline,
+                optimisticAfter: optimisticAfter,
+                body: body
+            )
         }
     }
 }

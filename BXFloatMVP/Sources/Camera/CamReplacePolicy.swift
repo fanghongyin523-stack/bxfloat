@@ -1,7 +1,7 @@
 import Foundation
 
 /// 替换策略：融合真实摄像头 + 定时露真（对标目标面板功能；自实现，不依赖参照二进制）。
-/// - 融合：推流占比 blendOBSPercent，其余为真摄像头
+/// - 融合：推流占比 blendStreamPercent，其余为真摄像头
 /// - 定时露真：每隔 interval 全屏真镜头 showSec 秒，期间音频切现场麦
 enum CamReplacePolicy {
     private static let lock = NSLock()
@@ -37,12 +37,15 @@ enum CamReplacePolicy {
             && MediaConfigStore.shared.config.replaceCameraEnabled
     }
 
-    /// OBS/推流画面融合占比 0...1；未开融合则 1
-    static func obsBlendFraction() -> CGFloat {
+    /// 推流画面融合占比 0...1；未开融合则 1（PC 源不限 OBS）
+    static func streamBlendFraction() -> CGFloat {
         let cfg = MediaConfigStore.shared.config
         guard cfg.replaceCameraEnabled, cfg.blendRealCamera else { return 1 }
-        return CGFloat(max(0, min(100, cfg.blendOBSPercent))) / 100.0
+        return CGFloat(max(0, min(100, cfg.blendStreamPercent))) / 100.0
     }
+
+    /// 兼容旧名
+    static func obsBlendFraction() -> CGFloat { streamBlendFraction() }
 
     static func resetCycle() {
         lock.lock()

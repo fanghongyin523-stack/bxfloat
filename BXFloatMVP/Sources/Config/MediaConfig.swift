@@ -3,7 +3,7 @@ import Foundation
 enum ConnectionMode: String, Codable {
     /// 局域网：只填电脑 IP → RTSP
     case lan
-    /// 数据线：手机播 127.0.0.1，电脑 usbmux 桥到 MediaMTX（自研隧道，对标 VCamUSBPuller 进画目标）
+    /// 数据线：手机播 127.0.0.1，电脑 usbmux 桥到本机媒体口（MediaMTX 等；PC 源可为 OBS/其他推流软件）
     case usb
     /// 本地视频文件路径（对标 VCamLocalPlayer）
     case localVideo
@@ -24,9 +24,9 @@ struct MediaConfig: Equatable {
     /// 兼容旧配置字段（热点方案遗留，直连方案不再使用）
     var usbComputerIP: String
     var connectionMode: ConnectionMode
-    /// MediaMTX HLS 端口（默认 18888）
+    /// PC 媒体 HLS 端口（默认 18888；当前常见为 MediaMTX）
     var hlsPort: Int
-    /// MediaMTX RTSP 端口（默认 18554）
+    /// PC 媒体 RTSP 端口（默认 18554；助手桥到此口，不绑死某一推流软件）
     var rtspPort: Int
     var streamPath: String
     var opacity: Float
@@ -39,7 +39,8 @@ struct MediaConfig: Equatable {
     var audioCaptureMode: AudioCaptureMode
     /// 融合真实摄像头（对标目标面板）
     var blendRealCamera: Bool
-    var blendOBSPercent: Int
+    /// 推流画面融合占比 0…100（历史 JSON 键仍为 blendOBSPercent；OBS 只是一种 PC 源）
+    var blendStreamPercent: Int
     /// 画面方向：旋转角度（0/90/180/270）与镜像（对标 VCam rotation/mirrored）
     var rotationDegrees: Int
     var mirrored: Bool
@@ -70,7 +71,7 @@ struct MediaConfig: Equatable {
         replaceCameraEnabled: false,
         audioCaptureMode: .microphone,
         blendRealCamera: false,
-        blendOBSPercent: 90,
+        blendStreamPercent: 90,
         rotationDegrees: 0,
         mirrored: false,
         timedRealCamera: false,
@@ -84,7 +85,8 @@ extension MediaConfig: Codable {
     enum CodingKeys: String, CodingKey {
         case streamURL, computerIP, usbComputerIP, connectionMode
         case hlsPort, rtspPort, streamPath, opacity, windowScale, overlayEnabled, muted
-        case replaceCameraEnabled, audioCaptureMode, blendRealCamera, blendOBSPercent
+        case replaceCameraEnabled, audioCaptureMode, blendRealCamera
+        case blendStreamPercent = "blendOBSPercent"
         case rotationDegrees, mirrored, timedRealCamera, timedRealIntervalSec, timedRealShowSec
         case advancedExpanded
     }
@@ -113,7 +115,7 @@ extension MediaConfig: Codable {
             audioCaptureMode = .microphone
         }
         blendRealCamera = try c.decodeIfPresent(Bool.self, forKey: .blendRealCamera) ?? false
-        blendOBSPercent = try c.decodeIfPresent(Int.self, forKey: .blendOBSPercent) ?? 90
+        blendStreamPercent = try c.decodeIfPresent(Int.self, forKey: .blendStreamPercent) ?? 90
         rotationDegrees = try c.decodeIfPresent(Int.self, forKey: .rotationDegrees) ?? 0
         mirrored = try c.decodeIfPresent(Bool.self, forKey: .mirrored) ?? false
         timedRealCamera = try c.decodeIfPresent(Bool.self, forKey: .timedRealCamera) ?? false

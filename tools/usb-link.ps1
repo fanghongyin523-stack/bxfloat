@@ -11,7 +11,7 @@ Write-Host "步骤提醒："
 Write-Host "  1. 手机：设置 → 个人热点 → 打开「允许其他人加入」"
 Write-Host "  2. 用数据线插电脑，手机点「信任」"
 Write-Host "  3. 电脑需已装 iTunes 或「Apple 设备」驱动"
-Write-Host "  4. MediaMTX + OBS 照常推流（与局域网相同）"
+Write-Host "  4. 本机媒体口推流（MediaMTX + OBS/其他软件，与局域网相同）"
 Write-Host ""
 
 $candidates = @()

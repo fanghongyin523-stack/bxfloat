@@ -30,15 +30,15 @@ final class AVSyncClock {
     private var warmupWallStart: CFTimeInterval = 0
     private var lastFreezeLogAt: CFTimeInterval = 0
 
-    /// 目标呈现滞后（对标 VCamTang target_ms；二进制同簇含 0.08/0.28/0.45/2.2）
-    private let targetDelay: Double = 1.0
+    /// 目标呈现滞后：直连体感要「几百毫秒内」，默认 ~250ms（非 1s）。
+    private let targetDelay: Double = 0.25
     /// 缓冲过高：drop-old 一次跳到目标延迟（不加速拧采样）
-    private let maxDelay: Double = 2.2
+    private let maxDelay: Double = 0.80
     /// 仅低于此才 hold（真欠载）；对标参照 DBL 0.08
-    private let criticalLow: Double = 0.08
-    private let warmupNeed: Double = 0.35
-    private let maxWarmupWall: Double = 0.45
-    private let maxDropPerCall: Double = 0.08
+    private let criticalLow: Double = 0.04
+    private let warmupNeed: Double = 0.10
+    private let maxWarmupWall: Double = 0.20
+    private let maxDropPerCall: Double = 0.06
     /// 视频墙钟停更：进入恢复期冻音频（对标 audio frozen for video recovery）
     private let videoStallSec: Double = 1.20
 
@@ -171,7 +171,7 @@ final class AVSyncClock {
             }
             warmedUp = true
             hasAnchor = true
-            let delay = min(targetDelay, max(0.25, live * 0.75))
+            let delay = min(targetDelay, max(0.06, live * 0.55))
             mediaAnchor = max(0, live - delay)
             wallAnchor = now
             lastAction = .play

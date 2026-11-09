@@ -40,7 +40,8 @@ final class CamAudioStore {
 
     private var playhead: Double = -1
     /// 固定目标延迟：对标 VCamTang target_ms≈1000
-    private let fixedLatencySec: Double = 1.00
+    /// 与 AVSyncClock.targetDelay 对齐：直连约 250ms，禁止再按 1s 环尾读
+    private let fixedLatencySec: Double = 0.25
     /// 入环 PTS 与环尾偏差 ≤ 此值则粘到连续样本钟（对标 alignLiveRing 连续样本钟）
     private let stitchPtsSec: Double = 0.080
     /// peek 微缝：跳粘不插静音

@@ -174,9 +174,9 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
             数据线（不需要手机卡 / 不需要个人热点）：
             1. 数据线插电脑，手机点「信任」
             2. 电脑装过 iTunes 或「Apple 设备」驱动
-            3. 电脑 MediaMTX+OBS 照常推流
-            4. 电脑运行「BXFloat-USB助手.bat」并保持窗口开着
-            5. 手机选数据线 → 打开悬浮窗
+            3. 电脑开媒体口（MediaMTX 等）+ 任意推流软件（OBS/其他）推 path=stream
+            4. 电脑运行「USB助手/直连」并保持窗口开着
+            5. 手机选数据线 → 开「替换摄像头」
             """
             field.placeholder = "自动使用 127.0.0.1（无需填写）"
             field.keyboardType = .default
@@ -474,21 +474,20 @@ final class HelpViewController: UIViewController {
         text.font = .systemFont(ofSize: 15)
         text.text = """
         怎么用（局域网 · 低延迟）
-        1. 电脑开 MediaMTX + OBS 推流
+        1. 电脑开媒体口（MediaMTX 等）+ 任意推流软件推流
         2. 「连接」选局域网，填电脑 IP
-        3. 本 App 自动播 RTSP（一般几秒内）
-        4. OBS 关键帧间隔建议 1～2 秒
+        3. 开「替换摄像头」拉 RTSP（目标几百毫秒级体感）
+        4. 推流端关键帧间隔建议 1～2 秒
 
-        怎么用（数据线）
-        1. 插线信任，开 BXFloat-USB-Bridge.bat
-        2. 选数据线 → 打开悬浮窗（仍为 HLS，延迟会高于局域网）
+        怎么用（数据线 · 直连）
+        1. 插线信任，开 USB助手/直连（桥到本机 :18554）
+        2. 选数据线 → 开「替换摄像头」（走本机 RTSP 隧道）
 
-        注入（低延迟）
-        使用 BXFloatInjectPack：dylib + MobileVLCKit.framework
-        注入 dylib 后，把 framework 拷进 App 的 Frameworks 目录。
+        注入
+        使用 BXFloatInject.dylib 注入目标 App。
 
         版本
-        BXFloat MVP · 局域网 RTSP / USB HLS
+        BXFloat · 局域网 RTSP / USB 直连隧道
         """
 
         text.translatesAutoresizingMaskIntoConstraints = false

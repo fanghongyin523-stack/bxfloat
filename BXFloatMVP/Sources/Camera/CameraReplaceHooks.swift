@@ -385,7 +385,7 @@ enum CamBufferPainter {
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
         // 主线程回调（录制键常在 main）：禁止 clone 真机帧，超时直接 hold，避免整屏卡死
         let onMain = Thread.isMainThread
-        let blendFrac = onMain ? 1.0 : CamReplacePolicy.obsBlendFraction()
+        let blendFrac = onMain ? 1.0 : CamReplacePolicy.streamBlendFraction()
         var realSnapshot: CVPixelBuffer?
         if !onMain, blendFrac < 0.999 {
             realSnapshot = cloneBuffer(dst)
@@ -442,7 +442,7 @@ enum CamBufferPainter {
         return true
     }
 
-    /// 融合真实摄像头：dst=OBS，real=真机，frac=OBS 占比
+    /// 融合真实摄像头：dst=推流画面，real=真机，frac=推流占比
     private static func finishBlend(dst: CVPixelBuffer, real: CVPixelBuffer?, frac: CGFloat) {
         guard let real, frac < 0.999 else { return }
         blendPixels(obs: dst, real: real, obsFrac: frac)

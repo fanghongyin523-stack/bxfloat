@@ -5,9 +5,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 
-/// Phone USB overlay listens:
-/// - RTSP play :18554  tunnel :19889  → PC MediaMTX RTSP :18554
-/// - HLS  play :18888  tunnel :19888  → PC MediaMTX HLS  :18888
+/// Phone USB overlay listens (PC media source agnostic: OBS/other → MediaMTX/compatible):
+/// - RTSP play :18554  tunnel :19889  → PC media RTSP :18554
+/// - HLS  play :18888  tunnel :19888  → PC media HLS  :18888
 public static class BxUsbBridge {
     const string UsbmuxHost = "127.0.0.1";
     const int UsbmuxPort = 27015;
