@@ -470,7 +470,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         ipField.superview?.isHidden = !showIP
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：无需填地址（自动本机）。USB助手保持开启；开「替换摄像头」才拉流。"
+            modeHint.text = "数据线：无需填地址。先开电脑「USB助手」再开「替换摄像头」。\(USBStreamBridge.shared.statusLine())"
         case 2:
             modeHint.text = "本地视频：先选文件。开「替换摄像头」才播放；「推流声音」只控制用推流声还是原麦。"
         default:
@@ -500,11 +500,15 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         let cfg = MediaConfigStore.shared.config
         let clock = AVSyncClock.shared
         _ = clock.mediaTime()
-        statusLabel.text = [
+        var lines = [
             "收帧 \(store.frameCount) · 音频包 \(CamAudioStore.shared.packetCount) · AU \(BXFloatMicAUPaintCount())",
             "画面：\(cfg.replaceCameraEnabled ? "开" : "关") · \(clock.avsyncPanelLine())",
             cfg.replaceCameraEnabled ? "运行中 · \(clock.actionPanelLabel())" : "替换未开（须手动打开才注入）",
-        ].joined(separator: "\n")
+        ]
+        if cfg.connectionMode == .usb {
+            lines.append(USBStreamBridge.shared.statusLine())
+        }
+        statusLabel.text = lines.joined(separator: "\n")
     }
 
     private func parsedIntervalSec() -> Int {

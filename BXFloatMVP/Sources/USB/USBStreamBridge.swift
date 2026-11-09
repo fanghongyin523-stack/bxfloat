@@ -16,6 +16,11 @@ final class USBStreamBridge {
     private var channels: [Channel] = []
     private(set) var isRunning = false
 
+    /// 面板诊断：本机 RTSP 监听是否起来 / PC 助手隧道是否已挂上
+    private(set) var diagLocalReady = false
+    private(set) var diagTunnelPending = 0
+    private(set) var diagLastError: String = ""
+
     private init() {}
 
     /// 异步启动监听（选数据线模式即可起，不等于拉流）。禁止主线程忙等。
@@ -23,12 +28,18 @@ final class USBStreamBridge {
         queue.async { self.startLocked() }
     }
 
-    /// 等本机 RTSP 监听就绪后再回调（给 FFmpeg 连 127.0.0.1:18554 用）。
-    func whenLocalReady(timeoutSec: TimeInterval = 3.0, _ body: @escaping () -> Void) {
+    /// 等本机 RTSP 监听就绪 +（尽量）PC 隧道已挂上，再回调开 FFmpeg。
+    /// 旧逻辑只等 localReady 就拉流：FFmpeg 2s 超时经常等不到助手，表现为「数据线画面过不来」。
+    func whenPullReady(timeoutSec: TimeInterval = 15.0, _ body: @escaping (_ tunnelArmed: Bool) -> Void) {
         queue.async {
             self.startLocked()
-            self.pollLocalReady(deadline: Date().addingTimeInterval(timeoutSec), body: body)
+            self.pollPullReady(deadline: Date().addingTimeInterval(timeoutSec), body: body)
         }
+    }
+
+    /// 兼容旧名
+    func whenLocalReady(timeoutSec: TimeInterval = 15.0, _ body: @escaping () -> Void) {
+        whenPullReady(timeoutSec: timeoutSec) { _ in body() }
     }
 
     func stop() {
@@ -36,13 +47,24 @@ final class USBStreamBridge {
             self.isRunning = false
             for ch in self.channels { ch.stop() }
             self.channels.removeAll()
+            self.diagLocalReady = false
+            self.diagTunnelPending = 0
             NSLog("BXFloat USB bridge stopped")
         }
+    }
+
+    func statusLine() -> String {
+        if !isRunning { return "USB隧道未启动" }
+        if diagTunnelPending > 0 { return "USB助手已连 pending=\(diagTunnelPending)" }
+        if diagLocalReady { return "USB本机已听，等助手…" }
+        if !diagLastError.isEmpty { return "USB:\(diagLastError)" }
+        return "USB启动中…"
     }
 
     private func startLocked() {
         guard !isRunning else { return }
         isRunning = true
+        diagLastError = ""
         let specs: [(NWEndpoint.Port, NWEndpoint.Port, String)] = [
             (Self.rtspPlayPort, Self.rtspTunnelPort, "rtsp"),
             (Self.hlsPlayPort, Self.hlsTunnelPort, "hls"),
@@ -58,17 +80,32 @@ final class USBStreamBridge {
               "\(Self.hlsPlayPort)", "\(Self.hlsTunnelPort)")
     }
 
-    private func pollLocalReady(deadline: Date, body: @escaping () -> Void) {
-        let rtspReady = channels.first(where: { $0.name == "rtsp" })?.localReady == true
-        if rtspReady || !isRunning || Date() >= deadline {
-            if !rtspReady {
-                NSLog("BXFloat USB local RTSP not ready yet; starting pull anyway")
+    private func pollPullReady(deadline: Date, body: @escaping (Bool) -> Void) {
+        let rtsp = channels.first(where: { $0.name == "rtsp" })
+        let localOK = rtsp?.localReady == true
+        let pending = rtsp?.pendingTunnelCount ?? 0
+        diagLocalReady = localOK
+        diagTunnelPending = pending
+
+        // 理想：本机已听 + PC 助手已有挂起隧道，再开 FFmpeg，管道可瞬时对接
+        if localOK, pending > 0 {
+            NSLog("BXFloat USB pull-ready local=1 pending=%d", pending)
+            DispatchQueue.main.async { body(true) }
+            return
+        }
+        if !isRunning || Date() >= deadline {
+            if !localOK {
+                diagLastError = "本机:18554未就绪"
+                NSLog("BXFloat USB pull timeout: local not ready")
+            } else if pending == 0 {
+                diagLastError = "助手未连(开USB助手)"
+                NSLog("BXFloat USB pull timeout: no PC tunnel; start USB助手")
             }
-            DispatchQueue.main.async(execute: body)
+            DispatchQueue.main.async { body(localOK && pending > 0) }
             return
         }
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.pollLocalReady(deadline: deadline, body: body)
+            self?.pollPullReady(deadline: deadline, body: body)
         }
     }
 }
@@ -88,6 +125,7 @@ private final class Channel {
     private var activePairs: [(NWConnection, NWConnection)] = []
     private(set) var localReady = false
     private(set) var tunnelReady = false
+    var pendingTunnelCount: Int { pendingTunnels.count }
     var isReady: Bool { localReady && tunnelReady }
 
     init(
@@ -127,7 +165,9 @@ private final class Channel {
 
     private func startTunnelListener() {
         do {
-            let listener = try NWListener(using: .tcp, on: tunnelPort)
+            let params = NWParameters.tcp
+            params.allowLocalEndpointReuse = true
+            let listener = try NWListener(using: params, on: tunnelPort)
             listener.newConnectionHandler = { [weak self] conn in
                 self?.queue.async {
                     guard let self, self.running() else {
@@ -145,9 +185,14 @@ private final class Channel {
                 }
             }
             listener.stateUpdateHandler = { [weak self] state in
-                if case .ready = state {
+                switch state {
+                case .ready:
                     self?.queue.async { self?.tunnelReady = true }
                     NSLog("BXFloat USB[%@] tunnel listener READY", self?.name ?? "")
+                case .failed(let err):
+                    NSLog("BXFloat USB[%@] tunnel listener FAIL %@", self?.name ?? "", "\(err)")
+                default:
+                    break
                 }
             }
             listener.start(queue: queue)
@@ -159,14 +204,21 @@ private final class Channel {
 
     private func startLocalListener() {
         do {
-            let listener = try NWListener(using: .tcp, on: localPort)
+            let params = NWParameters.tcp
+            params.allowLocalEndpointReuse = true
+            let listener = try NWListener(using: params, on: localPort)
             listener.newConnectionHandler = { [weak self] playerConn in
                 self?.queue.async { self?.handlePlayerConnection(playerConn) }
             }
             listener.stateUpdateHandler = { [weak self] state in
-                if case .ready = state {
+                switch state {
+                case .ready:
                     self?.queue.async { self?.localReady = true }
                     NSLog("BXFloat USB[%@] local listener READY", self?.name ?? "")
+                case .failed(let err):
+                    NSLog("BXFloat USB[%@] local listener FAIL %@", self?.name ?? "", "\(err)")
+                default:
+                    break
                 }
             }
             listener.start(queue: queue)
@@ -186,8 +238,8 @@ private final class Channel {
                 playerConn.cancel()
                 return
             }
-            // 50ms×120 ≈ 6s：PC 助手需已开；轮询加快以对齐「插线秒连」
-            self.attachTunnel(to: playerConn, attemptsLeft: 120)
+            // 50ms×300 ≈ 15s：等 PC 助手；与 FFmpeg USB 超时对齐
+            self.attachTunnel(to: playerConn, attemptsLeft: 300)
         }
     }
 
@@ -226,7 +278,7 @@ private final class Channel {
             }
         }
         conn.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + 5) {
+        queue.asyncAfter(deadline: .now() + 8) {
             if conn.state != .ready { finish(false) }
         }
     }

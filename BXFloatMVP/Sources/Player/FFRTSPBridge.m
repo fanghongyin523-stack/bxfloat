@@ -166,13 +166,16 @@ static int BXFloatFFInterrupt(void *opaque) {
     // 秒连：缩小探测；抗抖仍靠 ring，不用 nobuffer
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-    av_dict_set(&opts, "stimeout", "2000000", 0); // us — 2s，失败快重试
-    av_dict_set(&opts, "rw_timeout", "2000000", 0);
+    // USB(127.0.0.1) 经 usbmux 更慢：给 8s；局域网仍 2s 快失败
+    BOOL isLoopback = [urlString containsString:@"127.0.0.1"] || [urlString containsString:@"localhost"];
+    const char *timeoutUs = isLoopback ? "8000000" : "2000000";
+    av_dict_set(&opts, "stimeout", timeoutUs, 0);
+    av_dict_set(&opts, "rw_timeout", timeoutUs, 0);
     av_dict_set(&opts, "max_delay", "500000", 0);
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
     // 原 2.5s analyze 是「很慢」主因；0.5s 探测 + 环缓冲，对齐参照秒开
     av_dict_set(&opts, "probesize", "327680", 0);
-    av_dict_set(&opts, "analyzeduration", "500000", 0);
+    av_dict_set(&opts, "analyzeduration", isLoopback ? "1500000" : "500000", 0);
 
     AVFormatContext *fmtOpen = avformat_alloc_context();
     if (!fmtOpen) {

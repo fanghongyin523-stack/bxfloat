@@ -263,18 +263,21 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             LocalVideoPlayer.shared.start(urlString: url)
             NSLog("BXFloatCam source=localVideo gen=%llu", gen)
         case .usb:
-            // 只跑 USB→本机 RTSP；等监听就绪再拉，避免点替换无反应
+            // 只跑 USB→本机 RTSP；等本机监听 + PC 助手隧道挂上再拉（否则 FFmpeg 2s 超时必败）
             let pullURL = url
             let expectedKey = key
-            USBStreamBridge.shared.whenLocalReady { [weak self] in
+            USBStreamBridge.shared.whenPullReady { [weak self] tunnelArmed in
                 guard let self else { return }
                 guard self.sourceGeneration == gen, self.pullKey == expectedKey else { return }
                 let cfg = MediaConfigStore.shared.config
                 guard cfg.connectionMode == .usb, cfg.replaceCameraEnabled else { return }
-                // 再确认本地已停，禁止双源
                 LocalVideoPlayer.shared.stop()
+                if !tunnelArmed {
+                    NSLog("BXFloatCam source=usb WAIT helper gen=%llu (%@)", gen, USBStreamBridge.shared.statusLine())
+                }
+                // 即使助手晚到也启动：FFmpeg 会重连；助手已挂则首连即可通
                 FFRTSPController.start(urlString: pullURL)
-                NSLog("BXFloatCam source=usb gen=%llu url=%@", gen, pullURL)
+                NSLog("BXFloatCam source=usb gen=%llu armed=%d url=%@", gen, tunnelArmed ? 1 : 0, pullURL)
             }
         case .lan, .manual:
             // 只跑局域网/手动 URL；本地与 USB 隧道已隔离
