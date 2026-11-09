@@ -553,7 +553,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
 
     @objc private func modeChanged() {
         updateModeHint()
-        // 换模式强制停源，避免「开关看着关了其实还在播旧本地帧」
+        // 三模式互斥：一切换就提交，FloatingOverlay 会停掉另外两路并清残帧
         stopPullHintAndCommit()
     }
     @objc private func replaceChanged() { commit() }

@@ -32,6 +32,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private var pickerChromeHidden = false
     private var reattachTimer: Timer?
     private var pullKey: String?
+    /// 换源代次：作废 USB 延迟回调，防止旧模式串到新模式
+    private var sourceGeneration: UInt64 = 0
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -214,13 +216,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             host.isHidden = false
         }
 
-        // 选数据线：只起本机隧道监听（让 PC 助手先连上）；不等于拉流。
-        // 真正 FFmpeg 拉流仍只在「替换摄像头」打开后走 syncPuller。
-        if config.connectionMode == .usb {
-            USBStreamBridge.shared.start()
-        } else {
-            USBStreamBridge.shared.stop()
-        }
+        // 三模式互斥：只用当前模式的基础设施。
+        // USB 仅在数据线模式起隧道监听（≠拉流）；局域网/本地必须停掉 USB，禁止串线。
+        isolateTransport(for: config.connectionMode)
 
         ensureBubble(on: host)
         bubbleView?.setReplaceActive(config.replaceCameraEnabled)
@@ -232,8 +230,19 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         syncPuller(config)
     }
 
+    /// 传输层互斥：局域网 / 数据线 / 本地 同时只活一路。
+    private func isolateTransport(for mode: ConnectionMode) {
+        switch mode {
+        case .usb:
+            USBStreamBridge.shared.start()
+        case .lan, .manual, .localVideo:
+            USBStreamBridge.shared.stop()
+        }
+    }
+
     /// 模式/URL/开关变化时先停干净再起，避免局域网↔数据线↔本地切换粘连旧环。
     /// 硬约束：只有「替换摄像头」才拉流；「推流声音」只切麦注入，绝不单独触发拉流。
+    /// 三模式互斥：任一时刻只允许一种源往环里灌（对标参考 Pipeline 单源）。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
         let needPull = config.replaceCameraEnabled && !url.isEmpty
@@ -242,34 +251,46 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         if pullKey == key {
             return
         }
-        // 换源必须整路停干净 + 清残帧 epoch，禁止本地画面粘到局域网/USB
-        stopPuller()
+        // 换源：先整路停掉另外两路 + 清残帧，再只起当前模式
+        stopAllMediaSources(reason: "switch:\(key)")
         pullKey = key
+        let gen = sourceGeneration
         guard needPull else { return }
 
         switch config.connectionMode {
         case .localVideo:
+            // 只跑本地播放器；FF/USB 已在 stopAll 停掉
             LocalVideoPlayer.shared.start(urlString: url)
+            NSLog("BXFloatCam source=localVideo gen=%llu", gen)
         case .usb:
-            // 等本机 :18554 监听就绪再拉，避免「点替换没反应」（连上被拒）
+            // 只跑 USB→本机 RTSP；等监听就绪再拉，避免点替换无反应
             let pullURL = url
             let expectedKey = key
-            USBStreamBridge.shared.whenLocalReady {
-                guard self.pullKey == expectedKey else { return }
+            USBStreamBridge.shared.whenLocalReady { [weak self] in
+                guard let self else { return }
+                guard self.sourceGeneration == gen, self.pullKey == expectedKey else { return }
                 let cfg = MediaConfigStore.shared.config
                 guard cfg.connectionMode == .usb, cfg.replaceCameraEnabled else { return }
+                // 再确认本地已停，禁止双源
+                LocalVideoPlayer.shared.stop()
                 FFRTSPController.start(urlString: pullURL)
+                NSLog("BXFloatCam source=usb gen=%llu url=%@", gen, pullURL)
             }
         case .lan, .manual:
+            // 只跑局域网/手动 URL；本地与 USB 隧道已隔离
+            LocalVideoPlayer.shared.stop()
             if url.hasPrefix("rtsp://") || url.lowercased().hasPrefix("http") {
                 FFRTSPController.start(urlString: url)
+                NSLog("BXFloatCam source=%@ gen=%llu url=%@", config.connectionMode.rawValue, gen, url)
             } else {
-                stopPuller()
+                stopAllMediaSources(reason: "lan-empty-url")
             }
         }
     }
 
-    private func stopPuller() {
+    /// 停掉所有灌环源（FF + 本地），清残帧；USB 隧道由 isolateTransport 按模式管。
+    private func stopAllMediaSources(reason: String) {
+        sourceGeneration &+= 1
         FFRTSPController.stop()
         LocalVideoPlayer.shared.stop()
         CamFrameStore.shared.reset()
@@ -277,6 +298,11 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         AVSyncClock.shared.reset()
         CamBufferPainter.bumpSourceEpochAndClearHold()
         pullKey = nil
+        NSLog("BXFloatCam stopAllMediaSources reason=%@", reason)
+    }
+
+    private func stopPuller() {
+        stopAllMediaSources(reason: "stopPuller")
     }
 
     private func ensureBubble(on host: UIWindow) {
