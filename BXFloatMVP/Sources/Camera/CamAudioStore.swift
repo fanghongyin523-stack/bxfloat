@@ -368,6 +368,9 @@ final class CamAudioStore {
             return 0
         }
 
+        // 锁外读呈现钟，避免 audio.lock → clock.lock 与视频路径死锁
+        let present = AVSyncClock.shared.mediaTime()
+
         var got = 0
         var seamJump = false
         var startPTS = 0.0
@@ -386,10 +389,17 @@ final class CamAudioStore {
         }
         let lastEnd = last.pts + frameDuration(last)
         let firstPts = first.pts
-        // 连续传声：播头只随已读 PCM 前进，禁止「追 desired」硬跳（听感会一帧帧蹦）。
-        // 仅在未初始化 / 被 drop-old 剪到窗外 / 跑出环尾 时对齐一次。
-        let desired = max(firstPts, lastEnd - fixedLatencySec)
         let hi = max(firstPts, lastEnd - max(duration, 0.004))
+        // 对标 VCamTang alignLiveRingToVideo：播头与画面共用 mediaTime（同一呈现钟）。
+        // 整体仍约 target≈1s 延迟；声画一起晚，禁止各走各的环尾钟导致口型错位。
+        // 连续读：正常只随已读 PCM 前进；|skew|>stitch 才离散对齐（禁止 soft-rate）。
+        let latencyDepth = max(firstPts, lastEnd - fixedLatencySec)
+        let desired: Double
+        if present.isFinite, present > 0.05, present >= firstPts - 0.05 {
+            desired = min(max(present, firstPts), hi)
+        } else {
+            desired = min(max(latencyDepth, firstPts), hi)
+        }
         if playhead < 0 || !playhead.isFinite {
             playhead = desired
             seamJump = true
@@ -403,14 +413,10 @@ final class CamAudioStore {
         if playhead > hi {
             playhead = hi
         }
-        // 对标 VCamTang alignLiveRingToVideo：播头对齐到目标延迟深度，连续拉环（禁止自创二次回借）
-        let liveAhead = lastEnd - playhead
-        if playhead >= firstPts, liveAhead + 0.001 < fixedLatencySec {
-            let aligned = max(firstPts, lastEnd - fixedLatencySec)
-            if abs(aligned - playhead) > 0.0005 {
-                playhead = aligned
-                seamJump = true
-            }
+        let skew = playhead - desired
+        if abs(skew) > stitchPtsSec {
+            playhead = desired
+            seamJump = true
         }
         startPTS = playhead
         var endPTS = startPTS
@@ -708,7 +714,7 @@ final class CamAudioStore {
         guard outFrames > 0 else { return false }
 
         let dstRate = asbd.mSampleRate > 0 ? Int(asbd.mSampleRate) : storeRate
-        // 与 AU PullS16 同一路：固定延迟连续拷贝，禁止 mediaTime soft-rate 追环
+        // 与 AU PullS16 同一路：mediaTime 对齐画面 + 连续拷贝（禁止 soft-rate）
         ensureScratch(store: outFrames * max(1, storeChannels) + 64, out: outFrames * auCh)
         let pk = scratchOut.withUnsafeMutableBufferPointer { buf -> Int32 in
             guard let base = buf.baseAddress else { return 0 }
