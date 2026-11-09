@@ -39,14 +39,12 @@ enum CameraReplaceHooks {
     /// key=output（弱），value=proxy（强）——修回调为 0 的根因
     private static let retainedProxies = NSMapTable<AVCaptureVideoDataOutput, CamSampleBufferProxy>.weakToStrongObjects()
     private static var replaceActive = false
-    /// 上次确认在拍摄面的时间；用于录制过渡 sticky，并在离开相机后超时释放
+    /// 上次确认在拍摄面的时间；离开拍摄面后短暂保活，避免抖音切页误拆
     private static var lastCameraSeenAt: CFAbsoluteTime = 0
-    private static let stickyAwaySec: CFAbsoluteTime = 4.0
-    /// stopRunning 后保持注入直到 startRunning/回到拍摄面；与离开相机 4s TTL 分开，不靠拉长 TTL
-    /// 对标 VCamTang：会话 pause→start 仅短粘（hold last / 恢复），禁止自创 180s 粘替换
+    private static let stickyAwaySec: CFAbsoluteTime = 8.0
+    /// stopRunning 后保持武装直到 startRunning/回到拍摄面——禁止用短 TTL 超时拆钩（再录卡死根因）
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
-    private static let pauseStickyMaxSec: CFAbsoluteTime = 2.0
     private static var resumeFirstFramePending = false
 
     /// 仅当抖音原回调是 main/nil 时改挂此队列，避免触摸卡死；非 main 原队列保持不动
@@ -102,7 +100,7 @@ enum CameraReplaceHooks {
                 resumeFirstFramePending = true
             }
         }
-        // 用户关替换才拆。pauseSticky=会话暂停/切换；离开相机仍用 4s TTL（不拉长）。
+        // 用户关替换才拆。pauseSticky 无超时：对齐「结束拍摄→再拍」会话瞬断，禁止 2s 到期拆钩导致卡死。
         let want: Bool
         if !enabled {
             want = false
@@ -110,13 +108,12 @@ enum CameraReplaceHooks {
             resumeFirstFramePending = false
         } else if onCamera {
             want = true
-        } else if pauseSticky, (now - pauseStickyAt) < pauseStickyMaxSec {
+        } else if pauseSticky {
             want = true
         } else if wasActive, lastCameraSeenAt > 0, (now - lastCameraSeenAt) < stickyAwaySec {
             want = true
         } else {
             want = false
-            pauseSticky = false
         }
         let sticky = enabled && !onCamera && want
         let pause = pauseSticky
@@ -267,8 +264,18 @@ enum CameraReplaceHooks {
             }
             ShootSurfaceDetector.invalidateCache()
             let onMain = Thread.isMainThread
-            // 必须同步调用原实现：异步会破坏抖音暂停/继续的 stop→start 时序（isRunning 竞态）。
-            CamPipelineDiag.shared.noteSessionEvent("startRunning begin onMain=\(onMain ? 1 : 0) sync=1")
+            // 再录关键：start 前先武装，保证 startRunning 内部 setDelegate 能走进 wrap（禁止等 async apply）
+            let cfgArmed = MediaConfigStore.shared.config
+            if cfgArmed.replaceCameraEnabled {
+                lock.lock()
+                replaceActive = true
+                pauseSticky = false
+                resumeFirstFramePending = true
+                lastCameraSeenAt = CFAbsoluteTimeGetCurrent()
+                lock.unlock()
+                CamFrameBlitter.shared.setEnabled(true)
+            }
+            CamPipelineDiag.shared.noteSessionEvent("startRunning begin onMain=\(onMain ? 1 : 0) sync=1 armed=\(cfgArmed.replaceCameraEnabled ? 1 : 0)")
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             let t0 = CACurrentMediaTime()
             unsafeBitCast(original, to: Fn.self)(session, sel)
@@ -276,7 +283,6 @@ enum CameraReplaceHooks {
             CamPipelineDiag.shared.noteSessionEvent(
                 String(format: "startRunning done ms=%.0f onMain=%d", ms, onMain ? 1 : 0)
             )
-            // apply 仍异步，避免在启停路径上做 wrap/锁
             DispatchQueue.main.async {
                 let cfg = MediaConfigStore.shared.config
                 applyReplaceMode(cfg.replaceCameraEnabled)

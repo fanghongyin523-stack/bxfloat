@@ -231,15 +231,17 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     /// 模式/URL/开关变化时先停干净再起，避免局域网↔数据线↔本地切换粘连旧环。
+    /// 禁止默认围观：未开「替换摄像头」不拉流；你手动打开替换后才拉。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
-        let needPull = (config.replaceCameraEnabled || config.audioCaptureMode == .stream) && !url.isEmpty
+        let needPull = config.replaceCameraEnabled && !url.isEmpty
         let key = needPull
             ? "\(config.connectionMode.rawValue)|\(url)"
             : "off"
         if pullKey == key {
             return
         }
+        // 切换先整路停干净（音画环一并清），再起新源 —— 对齐「换源秒切不粘旧画面」
         stopPuller()
         pullKey = key
         guard needPull else { return }
@@ -260,6 +262,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         FFRTSPController.stop()
         LocalVideoPlayer.shared.stop()
         CamFrameStore.shared.reset()
+        CamAudioStore.shared.reset()
+        AVSyncClock.shared.reset()
         pullKey = nil
     }
 

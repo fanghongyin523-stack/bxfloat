@@ -164,7 +164,8 @@ private final class Channel {
                 playerConn.cancel()
                 return
             }
-            self.attachTunnel(to: playerConn, attemptsLeft: 75)
+            // 50ms×120 ≈ 6s：PC 助手需已开；轮询加快以对齐「插线秒连」
+            self.attachTunnel(to: playerConn, attemptsLeft: 120)
         }
     }
 
@@ -179,7 +180,7 @@ private final class Channel {
             playerConn.cancel()
             return
         }
-        queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.attachTunnel(to: playerConn, attemptsLeft: attemptsLeft - 1)
         }
     }

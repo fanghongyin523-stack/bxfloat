@@ -447,11 +447,11 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         ipField.superview?.isHidden = modeControl.selectedSegmentIndex == 2
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：插线信任，电脑开 MediaMTX+OBS+USB助手（窗口勿关）。"
+            modeHint.text = "数据线：插线信任+电脑 USB助手勿关；打开「替换」后才拉流。"
         case 2:
-            modeHint.text = "本地视频：点选视频→相册/文件；选片时面板会自动躲开。"
+            modeHint.text = "本地视频：先选文件，再手动打开「替换摄像头」才播放。"
         default:
-            modeHint.text = "局域网：手机和电脑同一 Wi‑Fi，只填电脑 IP。"
+            modeHint.text = "局域网：填电脑 IP 后，手动打开「替换摄像头」才拉流（无默认围观）。"
         }
     }
 

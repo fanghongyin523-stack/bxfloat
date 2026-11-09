@@ -67,7 +67,7 @@ public static class BxUsbBridge {
                 OneBridge(deviceId, wid, ch);
             } catch {
             }
-            Thread.Sleep(120);
+            Thread.Sleep(30);
         }
     }
 

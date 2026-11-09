@@ -163,17 +163,16 @@ static int BXFloatFFInterrupt(void *opaque) {
 
     avformat_network_init();
 
-    // 抗抖靠 ring(1.5～2s)，不再用 nobuffer 硬扛（一抖就空窗导致音画双卡）
+    // 秒连：缩小探测；抗抖仍靠 ring，不用 nobuffer
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-    av_dict_set(&opts, "stimeout", "5000000", 0); // us — RTSP socket
-    av_dict_set(&opts, "rw_timeout", "5000000", 0); // us — 通用读写超时
-    av_dict_set(&opts, "max_delay", "1500000", 0);
+    av_dict_set(&opts, "stimeout", "2000000", 0); // us — 2s，失败快重试
+    av_dict_set(&opts, "rw_timeout", "2000000", 0);
+    av_dict_set(&opts, "max_delay", "500000", 0);
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
-    // 不用 low_delay：直播 H264 更容易在短 GOP 后把解码器逼进异常路径
-    // 直播 AAC 常晚于视频出现：探测太短会变成「有画无声」
-    av_dict_set(&opts, "probesize", "1048576", 0);
-    av_dict_set(&opts, "analyzeduration", "2500000", 0);
+    // 原 2.5s analyze 是「很慢」主因；0.5s 探测 + 环缓冲，对齐参照秒开
+    av_dict_set(&opts, "probesize", "327680", 0);
+    av_dict_set(&opts, "analyzeduration", "500000", 0);
 
     AVFormatContext *fmtOpen = avformat_alloc_context();
     if (!fmtOpen) {
@@ -644,7 +643,8 @@ cleanup:
 }
 
 - (void)scheduleReconnect:(NSString *)urlString {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), self.queue, ^{
+    // 0.2s 重连：USB 隧道晚到半拍时也能很快跟上（原 1s 体感「非常慢」）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), self.queue, ^{
         if (self.running) return;
         if (urlString.length == 0) return;
         NSLog(@"BXFloatCam ffmpeg reconnect %@", urlString);
