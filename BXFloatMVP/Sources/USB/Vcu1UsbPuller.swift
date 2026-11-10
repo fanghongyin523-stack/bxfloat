@@ -27,6 +27,7 @@ final class Vcu1UsbPuller {
     private(set) var diagDecodeOK: Int64 = 0
     private(set) var diagDecodeFail: Int64 = 0
     private(set) var diagMissingConfig: Int64 = 0
+    private(set) var diagAudioOK: Int64 = 0
     private(set) var diagLastError: String = ""
 
     // VT path — imitate RTSPVTPuller
@@ -52,14 +53,18 @@ final class Vcu1UsbPuller {
 
     func statusLine() -> String {
         if !running { return "VCU1未启动" }
-        if !diagLastError.isEmpty, !diagSenderConnected {
-            return "VCU1:\(diagLastError)"
-        }
         if diagSenderConnected {
-            return "VCU1已连 pk=\(diagPackets) t3=\(diagType3) ok=\(diagDecodeOK) missCfg=\(diagMissingConfig)"
+            return "VCU1已连 pk=\(diagPackets) t3=\(diagType3) ok=\(diagDecodeOK) aud=\(diagAudioOK) missCfg=\(diagMissingConfig)"
         }
+        // 发送端断开后继续听；不要把 NWError 粘成主状态（Demo 发完就会断 TCP）
         if diagListening {
+            if diagPackets > 0 {
+                return "VCU1等待发送端 :\(listenPort) 曾收 pk=\(diagPackets) ok=\(diagDecodeOK) aud=\(diagAudioOK)"
+            }
             return "VCU1等待发送端 :\(listenPort)"
+        }
+        if !diagLastError.isEmpty {
+            return "VCU1:\(diagLastError)"
         }
         return "VCU1启动中…"
     }
@@ -81,9 +86,11 @@ final class Vcu1UsbPuller {
         diagDecodeOK = 0
         diagDecodeFail = 0
         diagMissingConfig = 0
+        diagAudioOK = 0
         diagLastError = ""
         recvBuffer.removeAll(keepingCapacity: true)
         resetDecoderLocked()
+        Vcu1AacReset()
 
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             diagLastError = "坏端口"
@@ -134,6 +141,7 @@ final class Vcu1UsbPuller {
         connection = nil
         recvBuffer.removeAll(keepingCapacity: false)
         resetDecoderLocked()
+        Vcu1AacReset()
         NSLog("BXFloatCam VCU1 puller stopped")
     }
 
@@ -157,9 +165,10 @@ final class Vcu1UsbPuller {
                     NSLog("BXFloatCam VCU1 sender connected port=%u", self.listenPort)
                     self.readLoop()
                 case .failed(let err):
-                    self.diagLastError = err.localizedDescription
+                    // 对端关闭常见 NWError 0；保持 listen，仅记日志
+                    self.diagLastError = ""
                     self.diagSenderConnected = false
-                    NSLog("BXFloatCam VCU1 sender failed %@", err.localizedDescription)
+                    NSLog("BXFloatCam VCU1 sender failed %@ (back to waiting)", err.localizedDescription)
                     conn.cancel()
                     if self.connection === conn { self.connection = nil }
                 case .cancelled:
@@ -194,7 +203,8 @@ final class Vcu1UsbPuller {
                 }
                 if isComplete {
                     self.diagSenderConnected = false
-                    NSLog("BXFloatCam VCU1 sender EOF")
+                    self.diagLastError = "" // 正常结束，回到「等待发送端」
+                    NSLog("BXFloatCam VCU1 sender EOF (back to waiting)")
                     if self.connection === conn { self.connection = nil }
                     return
                 }
@@ -283,9 +293,20 @@ final class Vcu1UsbPuller {
 
     private func handleType3(_ p: Vcu1Codec.Packet) {
         let ptsSec = p.ptsUs > 0 ? Double(p.ptsUs) / 1_000_000.0 : -1.0
-        // Prefer annex-B (Demo sends 00 00 00 01…); also accept length-prefixed NAL blobs.
+        // type 表未齐：config/video/audio 默认都映成 3 → 靠 payload 自识别（对标业务：编码后 H.264/AAC）
         if looksLikeAnnexB(p.payload) {
             feedAnnexB(p.payload, ptsSec: ptsSec)
+            return
+        }
+        if looksLikeADTS(p.payload) {
+            feedADTS(p.payload, ptsSec: ptsSec)
+            return
+        }
+        if looksLikeAACASC(p.payload) {
+            p.payload.withUnsafeBytes { raw in
+                guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+                _ = Vcu1AacSetConfig(base, Int32(p.payload.count))
+            }
             return
         }
         if looksLikeLengthPrefixedNAL(p.payload) {
@@ -303,6 +324,28 @@ final class Vcu1UsbPuller {
         diagMissingConfig += 1
         if diagMissingConfig <= 5 || diagMissingConfig % 60 == 0 {
             NSLog("BXFloatCam VCU1 type=3 unrecognized payload len=%d (缺 video config / 格式未证实)", p.payload.count)
+        }
+    }
+
+    private func looksLikeADTS(_ data: Data) -> Bool {
+        guard data.count >= 7 else { return false }
+        return data[0] == 0xFF && (data[1] & 0xF0) == 0xF0
+    }
+
+    /// MPEG-4 AudioSpecificConfig 很短（常见 2B）；避免把短视频垃圾当 ASC。
+    private func looksLikeAACASC(_ data: Data) -> Bool {
+        guard data.count >= 2, data.count <= 8 else { return false }
+        let objType = (data[0] >> 3) & 0x1F
+        // AAC LC / HE / HE-v2 object types
+        return objType == 2 || objType == 5 || objType == 29
+    }
+
+    private func feedADTS(_ data: Data, ptsSec: Double) {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            if Vcu1AacFeedADTS(base, Int32(data.count), ptsSec) {
+                diagAudioOK += 1
+            }
         }
     }
 
@@ -549,3 +592,14 @@ final class Vcu1UsbPuller {
         lastPPS = nil
     }
 }
+
+// MARK: - FFmpeg AAC C API (Vcu1AacBridge.m · 同 FFRTSPController @_silgen_name 风格)
+
+@_silgen_name("Vcu1AacReset")
+func Vcu1AacReset()
+
+@_silgen_name("Vcu1AacSetConfig")
+func Vcu1AacSetConfig(_ asc: UnsafePointer<UInt8>, _ len: Int32) -> Bool
+
+@_silgen_name("Vcu1AacFeedADTS")
+func Vcu1AacFeedADTS(_ data: UnsafePointer<UInt8>, _ len: Int32, _ pts: Double) -> Bool

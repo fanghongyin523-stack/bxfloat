@@ -20,6 +20,7 @@
 		A1000000000000000000000D /* USBStreamBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* USBStreamBridge.swift */; };
 		A10000000000000000000050 /* Vcu1Codec.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000050 /* Vcu1Codec.swift */; };
 		A10000000000000000000051 /* Vcu1UsbPuller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000051 /* Vcu1UsbPuller.swift */; };
+		A10000000000000000000052 /* Vcu1AacBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000053 /* Vcu1AacBridge.m */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* Assets.xcassets */; };
 		B10000000000000000000001 /* MediaConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* MediaConfig.swift */; };
 		B10000000000000000000002 /* StreamPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* StreamPlayer.swift */; };
@@ -32,6 +33,7 @@
 		B1000000000000000000000B /* USBStreamBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* USBStreamBridge.swift */; };
 		B10000000000000000000050 /* Vcu1Codec.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000050 /* Vcu1Codec.swift */; };
 		B10000000000000000000051 /* Vcu1UsbPuller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000051 /* Vcu1UsbPuller.swift */; };
+		B10000000000000000000052 /* Vcu1AacBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000053 /* Vcu1AacBridge.m */; };
 		B10000000000000000000007 /* BXInjectConstructor.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* BXInjectConstructor.m */; };
 		B10000000000000000000008 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* UIKit.framework */; };
 		B10000000000000000000009 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Foundation.framework */; };
@@ -104,6 +106,8 @@
 		A20000000000000000000018 /* USBStreamBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBStreamBridge.swift; sourceTree = "<group>"; };
 		A20000000000000000000050 /* Vcu1Codec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Vcu1Codec.swift; sourceTree = "<group>"; };
 		A20000000000000000000051 /* Vcu1UsbPuller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Vcu1UsbPuller.swift; sourceTree = "<group>"; };
+		A20000000000000000000052 /* Vcu1AacBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Vcu1AacBridge.h; sourceTree = "<group>"; };
+		A20000000000000000000053 /* Vcu1AacBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Vcu1AacBridge.m; sourceTree = "<group>"; };
 		A20000000000000000000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000000000000000000000A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BXFloatMVP.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BXFloatMVP.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -239,6 +243,8 @@
 				A20000000000000000000018 /* USBStreamBridge.swift */,
 				A20000000000000000000050 /* Vcu1Codec.swift */,
 				A20000000000000000000051 /* Vcu1UsbPuller.swift */,
+				A20000000000000000000052 /* Vcu1AacBridge.h */,
+				A20000000000000000000053 /* Vcu1AacBridge.m */,
 			);
 			path = USB;
 			sourceTree = "<group>";
@@ -492,6 +498,7 @@
 				A1000000000000000000000D /* USBStreamBridge.swift in Sources */,
 				A10000000000000000000050 /* Vcu1Codec.swift in Sources */,
 				A10000000000000000000051 /* Vcu1UsbPuller.swift in Sources */,
+				A10000000000000000000052 /* Vcu1AacBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -532,6 +539,7 @@
 				B1000000000000000000000B /* USBStreamBridge.swift in Sources */,
 				B10000000000000000000050 /* Vcu1Codec.swift in Sources */,
 				B10000000000000000000051 /* Vcu1UsbPuller.swift in Sources */,
+				B10000000000000000000052 /* Vcu1AacBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
