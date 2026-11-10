@@ -1,6 +1,8 @@
 #import "Vcu1AacBridge.h"
 #import "FFRTSPBridge.h"
 
+extern int32_t BXFloatAudioTargetRate(void);
+
 #if BXFLOAT_HAS_FFMPEG
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
