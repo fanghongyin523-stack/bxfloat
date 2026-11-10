@@ -78,11 +78,24 @@ enum CameraReplaceHooks {
         return CFAbsoluteTimeGetCurrent() < quietUntil
     }
 
+    /// 安静结束后短暂关融合，降低点直播首秒主线程叠画压力（稳定后自动恢复）
+    private static var blendMuteUntil: CFAbsoluteTime = 0
+
     static func markSessionQuiet(seconds: CFAbsoluteTime) {
         lock.lock()
-        let until = CFAbsoluteTimeGetCurrent() + max(0.05, seconds)
+        let now = CFAbsoluteTimeGetCurrent()
+        let until = now + max(0.05, seconds)
         if until > quietUntil { quietUntil = until }
+        // 安静后再禁融合 ~0.8s，对齐参照 hold_last 优先、不跟直播进房抢 CPU
+        let mute = until + 0.80
+        if mute > blendMuteUntil { blendMuteUntil = mute }
         lock.unlock()
+    }
+
+    static func shouldMuteBlend() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return CFAbsoluteTimeGetCurrent() < blendMuteUntil
     }
 
     static func installIfNeeded() {
@@ -257,7 +270,7 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 切分段拍会进这里：安静窗内禁止 paint，让宿主改 session 不被 memcpy 拖死
-            markSessionQuiet(seconds: 1.20)
+            markSessionQuiet(seconds: 2.50)
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
         }
@@ -273,7 +286,7 @@ enum CameraReplaceHooks {
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
             // commit 后再安静一小段，等首批回调过完
-            markSessionQuiet(seconds: 0.45)
+            markSessionQuiet(seconds: 1.20)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -289,7 +302,7 @@ enum CameraReplaceHooks {
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
             // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
-            markSessionQuiet(seconds: 0.55)
+            markSessionQuiet(seconds: 2.00)
             let cfgArmed = MediaConfigStore.shared.config
             if cfgArmed.replaceCameraEnabled {
                 lock.lock()
@@ -314,7 +327,7 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
-            markSessionQuiet(seconds: 0.80)
+            markSessionQuiet(seconds: 1.80)
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
@@ -454,7 +467,7 @@ enum CamBufferPainter {
         let onMain = Thread.isMainThread
         // 真融合：dst 当前就是真机画面；推流帧叠上去 dst = stream*frac + real*(1-frac)
         // 禁止先 clone 再画（主线程会卡死）。未开融合则 frac=1 等价整帧替换。
-        let blendFrac = CamReplacePolicy.streamBlendFraction()
+        let blendFrac = CameraReplaceHooks.shouldMuteBlend() ? 1.0 : CamReplacePolicy.streamBlendFraction()
         let wantBlend = blendFrac < 0.999
 
         if !loggedFormat {

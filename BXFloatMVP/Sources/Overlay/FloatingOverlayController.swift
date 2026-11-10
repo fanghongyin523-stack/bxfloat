@@ -91,7 +91,10 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     @objc private func configChanged() { apply(MediaConfigStore.shared.config) }
     @objc private func appActive() {
         reattachIfNeeded(reason: "active")
-        // 仅在可能丢焦点后轻量钉回；拍摄中不要频繁 makeKey
+        // 点直播/替换开着时禁止 makeKey：抢抖音直播窗焦点 → 整页假死，退出重进才好
+        if CameraReplaceHooks.isSessionQuiet() || CameraReplaceHooks.isReplaceActive() {
+            return
+        }
         restoreHostKeyWindow()
     }
     @objc private func sceneActive() { reattachIfNeeded(reason: "scene") }
@@ -124,6 +127,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private func reattachIfNeeded(reason: String) {
         guard MediaConfigStore.shared.config.overlayEnabled else { return }
         if pickerChromeHidden { return }
+        // 点直播 / 切模式安静期：连 windowLevel 都不要碰
+        if CameraReplaceHooks.isSessionQuiet() { return }
 
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -395,6 +400,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     private func restoreHostKeyWindow() {
+        if CameraReplaceHooks.isSessionQuiet() || CameraReplaceHooks.isReplaceActive() {
+            return
+        }
         let float = floatWindow
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         var windows: [UIWindow] = []
