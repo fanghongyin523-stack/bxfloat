@@ -119,6 +119,11 @@ enum MicReplaceHooks {
         injectActive = want
         lock.unlock()
 
+        // 稳态：什么都不动（切分段拍时 overlay 可能误触 apply，禁止反复 AUSetMode）
+        if want == wasActive, !modeChanged {
+            return
+        }
+
         let auMode: Int32
         if !want {
             auMode = 0
@@ -130,27 +135,23 @@ enum MicReplaceHooks {
         BXFloatMicAUSetMode(auMode)
 
         if want {
-            // 开推流声/静音边沿：装 AU + 只在模式边沿包一次（禁止 startRunning 路径重绑）
+            // 开推流声/静音边沿：装 AU + 只包一次
             BXFloatMicAUInstall()
-            if !wasActive || modeChanged {
-                wrapMissingOutputsOnce()
-            }
+            wrapMissingOutputsOnce()
         } else if wasActive {
             for output in trackedOutputs.allObjects {
                 unwrap(output)
             }
         }
-        if want != wasActive || modeChanged {
-            retainedProxyCount = retainedProxies.count
-            NSLog(
-                "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d retain=%d",
-                effective.rawValue,
-                wasActive ? 1 : 0,
-                want ? 1 : 0,
-                auMode,
-                retainedProxyCount
-            )
-        }
+        retainedProxyCount = retainedProxies.count
+        NSLog(
+            "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d retain=%d",
+            effective.rawValue,
+            wasActive ? 1 : 0,
+            want ? 1 : 0,
+            auMode,
+            retainedProxyCount
+        )
     }
 
     private static func track(_ output: AVCaptureAudioDataOutput) {
@@ -247,7 +248,8 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         MicReplaceHooks.noteCallback()
-        if MicReplaceHooks.isInjectActive() {
+        // 与视频同一安静窗：切分段拍配置期内不改音频 buffer，只转发
+        if MicReplaceHooks.isInjectActive(), !CameraReplaceHooks.isSessionQuiet() {
             let mode = MicReplaceHooks.activeMode()
             if MicBufferPainter.paintInPlace(sampleBuffer, mode: mode) {
                 MicReplaceHooks.notePaintOK()

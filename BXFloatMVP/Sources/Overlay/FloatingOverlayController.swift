@@ -167,10 +167,14 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             fw.isHidden = false
         }
         fw.alpha = 1
-        syncReplaceForCurrentSurface()
-        if reason != "win", reason != "active", reason != "scene" {
-            syncPuller(MediaConfigStore.shared.config)
+        // 对齐参照：拍摄中（切分段拍会狂闪 UIWindow）只保活悬浮窗，
+        // 禁止再 syncReplace / applyAudio / setDelegate —— 那是整屏卡死主因。
+        // 挂钩只在用户改面板 / attach / apply(config) 时动。
+        if reason == "win" || reason == "active" || reason == "scene" || reason == "timer" {
+            return
         }
+        syncReplaceForCurrentSurface()
+        syncPuller(MediaConfigStore.shared.config)
     }
 
     private func ensureFloatWindow(preferring scene: UIWindowScene?) {

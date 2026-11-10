@@ -46,6 +46,8 @@ enum CameraReplaceHooks {
     private static var pauseSticky = false
     private static var pauseStickyAt: CFAbsoluteTime = 0
     private static var resumeFirstFramePending = false
+    /// 宿主 beginConfiguration / stop / start 窗口内：只转发不 paint，避免跟 session 锁打架卡死
+    private static var quietUntil: CFAbsoluteTime = 0
 
     private(set) static var wrapCount: Int64 = 0
     private(set) static var callbackCount: Int64 = 0
@@ -69,6 +71,20 @@ enum CameraReplaceHooks {
         return replaceActive
     }
 
+    /// 切模式 / beginConfiguration 安静窗：只转发，不 paint
+    static func isSessionQuiet() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return CFAbsoluteTimeGetCurrent() < quietUntil
+    }
+
+    static func markSessionQuiet(seconds: CFAbsoluteTime) {
+        lock.lock()
+        let until = CFAbsoluteTimeGetCurrent() + max(0.05, seconds)
+        if until > quietUntil { quietUntil = until }
+        lock.unlock()
+    }
+
     static func installIfNeeded() {
         lock.lock()
         defer { lock.unlock() }
@@ -76,10 +92,12 @@ enum CameraReplaceHooks {
         installed = true
         swizzleVideoDataOutput()
         swizzleSessionAddOutput()
+        swizzleSessionBeginConfiguration()
+        swizzleSessionCommitConfiguration()
         swizzleSessionStartRunning()
         swizzleSessionStopRunning()
         _ = CamPipelineDiag.shared // 启动主线程卡顿看门狗 + 自动落盘
-        NSLog("BXFloatCam hooks installed (true-replace memcpy-only)")
+        NSLog("BXFloatCam hooks installed (true-replace memcpy-only + quiet-window)")
     }
 
     static func applyReplaceMode(_ enabled: Bool) {
@@ -91,6 +109,11 @@ enum CameraReplaceHooks {
         let want = enabled
         lock.lock()
         let wasActive = replaceActive
+        if want == wasActive {
+            if want { lastCameraSeenAt = CFAbsoluteTimeGetCurrent() }
+            lock.unlock()
+            return
+        }
         if want {
             if pauseSticky {
                 pauseSticky = false
@@ -107,9 +130,6 @@ enum CameraReplaceHooks {
         CamFrameBlitter.shared.setEnabled(want)
         PreviewCover.stop()
 
-        if want == wasActive {
-            return
-        }
         if want {
             wrapMissingOutputsOnce()
         } else {
@@ -230,6 +250,34 @@ enum CameraReplaceHooks {
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
 
+    private static func swizzleSessionBeginConfiguration() {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString("beginConfiguration")
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject) -> Void = { session in
+            // 切分段拍会进这里：安静窗内禁止 paint，让宿主改 session 不被 memcpy 拖死
+            markSessionQuiet(seconds: 1.20)
+            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+            unsafeBitCast(original, to: Fn.self)(session, sel)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private static func swizzleSessionCommitConfiguration() {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString("commitConfiguration")
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject) -> Void = { session in
+            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+            unsafeBitCast(original, to: Fn.self)(session, sel)
+            // commit 后再安静一小段，等首批回调过完
+            markSessionQuiet(seconds: 0.45)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
     private static func swizzleSessionStartRunning() {
         let cls: AnyClass = AVCaptureSession.self
         let sel = NSSelectorFromString("startRunning")
@@ -241,6 +289,7 @@ enum CameraReplaceHooks {
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
             // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
+            markSessionQuiet(seconds: 0.55)
             let cfgArmed = MediaConfigStore.shared.config
             if cfgArmed.replaceCameraEnabled {
                 lock.lock()
@@ -265,6 +314,7 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
+            markSessionQuiet(seconds: 0.80)
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
@@ -315,9 +365,9 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
-        // 对齐 VCam processSampleBufferSynchronously：就在宿主回调队列上画，画完同步转发。
+        // 对齐 VCam：宿主回调队列上同步处理；配置窗/切模式安静期内只转发不 paint。
         // 禁止改队列后再 async 回 main（二次拍摄卡顿根因）。
-        if CameraReplaceHooks.isReplaceActive() {
+        if CameraReplaceHooks.isReplaceActive(), !CameraReplaceHooks.isSessionQuiet() {
             if CamBufferPainter.paintInPlace(sampleBuffer) {
                 CameraReplaceHooks.notePaintOK()
             } else {
