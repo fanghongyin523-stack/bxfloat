@@ -488,7 +488,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             timedOn ? "定时开" : "定时关",
         ].joined(separator: " · ")
         advancedToggle.setTitle(summary, for: .normal)
-        blendHint.text = "推流画面 \(Int(blendSlider.value))% · 卡顿可关融合或降分辨率。"
+        blendHint.text = "真融合：推流 \(Int(blendSlider.value))% + 真机 \(100 - Int(blendSlider.value))%（主线程隔行加速）。"
     }
 
     private func refreshStatus() {

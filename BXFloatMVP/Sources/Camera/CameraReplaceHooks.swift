@@ -365,14 +365,15 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
-        // 对齐 VCam：宿主回调队列上同步处理；配置窗/切模式安静期内只转发不 paint。
-        // 禁止改队列后再 async 回 main（二次拍摄卡顿根因）。
-        if CameraReplaceHooks.isReplaceActive(), !CameraReplaceHooks.isSessionQuiet() {
-            if CamBufferPainter.paintInPlace(sampleBuffer) {
-                CameraReplaceHooks.notePaintOK()
+        // 对齐 VCam：宿主回调队列同步处理。安静窗 hold 上一帧（非透传真机）。
+        if CameraReplaceHooks.isReplaceActive() {
+            let ok: Bool
+            if CameraReplaceHooks.isSessionQuiet() {
+                ok = CamBufferPainter.holdLastInPlace(sampleBuffer)
             } else {
-                CameraReplaceHooks.notePaintFail()
+                ok = CamBufferPainter.paintInPlace(sampleBuffer)
             }
+            if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
         }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
         CamPipelineDiag.shared.notePaintCost(ms: ms, onMain: onMain)
@@ -418,6 +419,22 @@ enum CamBufferPainter {
 
     /// 单帧软预算：超时 hold 上一完整帧（主线程更紧），避免二次拍摄卡触摸。
     private static let budgetSec: CFTimeInterval = 0.004
+    private static var loggedBlend = false
+
+    /// 安静窗 / 欠帧：只 hold 上一成功帧（对齐参照 hold_last），有则覆盖 dst。
+    @discardableResult
+    static func holdLastInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
+        let dw = CVPixelBufferGetWidth(dst)
+        let dh = CVPixelBufferGetHeight(dst)
+        let fmt = CVPixelBufferGetPixelFormatType(dst)
+        if let good = copyLastGood(width: dw, height: dh, format: fmt),
+           copyPixels(from: good, to: dst)
+        {
+            return true
+        }
+        return true // 无 hold 则透传，避免黑屏
+    }
 
     @discardableResult
     static func paintInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
@@ -427,99 +444,162 @@ enum CamBufferPainter {
         let dh = CVPixelBufferGetHeight(dst)
         guard dw > 0, dh > 0 else { return false }
 
-        // 定时露真 / 未开替换：透传真摄像头（对标目标面板「定时显示真实镜头」）
+        // 定时露真 / 未开替换：透传真摄像头
         if CamReplacePolicy.shouldPassThroughRealCamera() {
             return true
         }
 
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
-        // 主线程回调（录制键/切分段拍常在 main）：禁止 clone、禁止碰 ring；
-        // 只允许一次短 memcpy；超时直接透传，避免整屏卡死。
         let onMain = Thread.isMainThread
-        let blendFrac = onMain ? 1.0 : CamReplacePolicy.streamBlendFraction()
-        var realSnapshot: CVPixelBuffer?
-        if !onMain, blendFrac < 0.999 {
-            realSnapshot = cloneBuffer(dst)
-        }
+        // 真融合：dst 当前就是真机画面；推流帧叠上去 dst = stream*frac + real*(1-frac)
+        // 禁止先 clone 再画（主线程会卡死）。未开融合则 frac=1 等价整帧替换。
+        let blendFrac = CamReplacePolicy.streamBlendFraction()
+        let wantBlend = blendFrac < 0.999
 
         if !loggedFormat {
             loggedFormat = true
-            NSLog("BXFloatCam paint dstFormat=%u %dx%d (memcpy-only)", fmt, dw, dh)
+            NSLog("BXFloatCam paint dstFormat=%u %dx%d blend=%d frac=%.2f", fmt, dw, dh, wantBlend ? 1 : 0, Double(blendFrac))
         }
 
-        // 主线程：预算更紧；绝不走 ring / clone；超时透传保触摸
-        if onMain {
-            if let prepared = CamFrameBlitter.shared.copyPrepared(
-                width: dw, height: dh, format: fmt
-            ), (CACurrentMediaTime() - t0) < budgetSec * 0.5,
-               copyPixels(from: prepared, to: dst)
-            {
-                rememberGood(prepared, width: dw, height: dh, format: fmt)
+        // 取推流帧：prepared → ring → lastGood
+        let stream: CVPixelBuffer? = {
+            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt) {
+                return prepared
+            }
+            if !onMain, (CACurrentMediaTime() - t0) < budgetSec {
+                let t = AVSyncClock.shared.mediaTime()
+                if let src = CamFrameStore.shared.copyForMediaTimeIfLock(t),
+                   CVPixelBufferGetWidth(src) == dw,
+                   CVPixelBufferGetHeight(src) == dh,
+                   CVPixelBufferGetPixelFormatType(src) == fmt
+                {
+                    return src
+                }
+            }
+            return copyLastGood(width: dw, height: dh, format: fmt)
+        }()
+
+        guard let stream else {
+            return true // 无素材：透传真机
+        }
+
+        if wantBlend {
+            // 真融合：在真机 dst 上按占比叠推流（主/副线程同一路径，无 clone）
+            let step = onMain ? 2 : 1 // 主线程隔行加速，观感仍是融合
+            if blendStreamOntoReal(stream: stream, realDst: dst, streamFrac: blendFrac, rowStep: step) {
+                if !loggedBlend {
+                    loggedBlend = true
+                    NSLog("BXFloatCam true-blend on fmt=%u frac=%.2f main=%d step=%d", fmt, Double(blendFrac), onMain ? 1 : 0, step)
+                }
+                // dst 是宿主采集缓冲，不能直接强引用；拷一份供 hold_last
+                if let kept = retainCopy(dst) {
+                    rememberGood(kept, width: dw, height: dh, format: fmt)
+                }
                 return true
             }
-            if (CACurrentMediaTime() - t0) < budgetSec,
-               let good = copyLastGood(width: dw, height: dh, format: fmt),
-               copyPixels(from: good, to: dst)
-            {
-                return true
-            }
+            // 融合失败（格式不支持）退回整帧替换
+        }
+
+        if copyPixels(from: stream, to: dst) {
+            rememberGood(stream, width: dw, height: dh, format: fmt)
             return true
         }
-
-        // 1) 后台预渲染帧（最快、不碰 ring；copyPrepared 内短锁）
-        if let prepared = CamFrameBlitter.shared.copyPrepared(
-            width: dw, height: dh, format: fmt
-        ), copyPixels(from: prepared, to: dst) {
-            rememberGood(prepared, width: dw, height: dh, format: fmt)
-            finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
-            return true
-        }
-
-        // 2) 预算紧张：仅 hold「本源 epoch」帧；无新素材则透传真机（禁止粘旧源）
-        let tight = (CACurrentMediaTime() - t0) > budgetSec * 0.4
-        if tight {
-            if let good = copyLastGood(width: dw, height: dh, format: fmt),
-               copyPixels(from: good, to: dst)
-            {
-                finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
-                return true
-            }
-            return true // 透传真摄像头，等新流首帧
-        }
-
-        // 3) 预渲染未就绪：同 mediaTime 取帧；锁拿不到则 hold，避免回调堵在 ring 锁上
-        let t = AVSyncClock.shared.mediaTime()
-        if (CACurrentMediaTime() - t0) < budgetSec,
-           let src = CamFrameStore.shared.copyForMediaTimeIfLock(t),
-           CVPixelBufferGetWidth(src) == dw,
-           CVPixelBufferGetHeight(src) == dh,
-           CVPixelBufferGetPixelFormatType(src) == fmt,
-           copyPixels(from: src, to: dst)
-        {
-            rememberGood(src, width: dw, height: dh, format: fmt)
-            finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
-            return true
-        }
-
-        if let good = copyLastGood(width: dw, height: dh, format: fmt),
-           copyPixels(from: good, to: dst)
-        {
-            finishBlend(dst: dst, real: realSnapshot, frac: blendFrac)
-            return true
-        }
-
-        // 换源后环空：透传真机，不要黑屏/旧本地帧
-        return true
+        return holdLastInPlace(sampleBuffer)
     }
 
-    /// 融合真实摄像头：dst=推流画面，real=真机，frac=推流占比
-    private static func finishBlend(dst: CVPixelBuffer, real: CVPixelBuffer?, frac: CGFloat) {
-        guard let real, frac < 0.999 else { return }
-        blendPixels(obs: dst, real: real, obsFrac: frac)
+    /// 真融合：realDst 当前为真机；写入 stream*frac + real*(1-frac)。支持 BGRA / 420YpCbCr。
+    @discardableResult
+    private static func blendStreamOntoReal(
+        stream: CVPixelBuffer,
+        realDst: CVPixelBuffer,
+        streamFrac: CGFloat,
+        rowStep: Int
+    ) -> Bool {
+        let fmt = CVPixelBufferGetPixelFormatType(realDst)
+        guard CVPixelBufferGetPixelFormatType(stream) == fmt,
+              CVPixelBufferGetWidth(stream) == CVPixelBufferGetWidth(realDst),
+              CVPixelBufferGetHeight(stream) == CVPixelBufferGetHeight(realDst)
+        else { return false }
+
+        let a = max(0, min(1, streamFrac))
+        let ai = Int((a * 256.0).rounded())
+        let bi = 256 - ai
+        let step = max(1, rowStep)
+
+        CVPixelBufferLockBaseAddress(stream, .readOnly)
+        CVPixelBufferLockBaseAddress(realDst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(realDst, [])
+            CVPixelBufferUnlockBaseAddress(stream, .readOnly)
+        }
+
+        let planes = CVPixelBufferGetPlaneCount(realDst)
+        if planes == 0 {
+            // BGRA / 单平面
+            guard fmt == kCVPixelFormatType_32BGRA else { return false }
+            guard let sBase = CVPixelBufferGetBaseAddress(stream)?.assumingMemoryBound(to: UInt8.self),
+                  let dBase = CVPixelBufferGetBaseAddress(realDst)?.assumingMemoryBound(to: UInt8.self)
+            else { return false }
+            let w = CVPixelBufferGetWidth(realDst)
+            let h = CVPixelBufferGetHeight(realDst)
+            let sRow = CVPixelBufferGetBytesPerRow(stream)
+            let dRow = CVPixelBufferGetBytesPerRow(realDst)
+            var y = 0
+            while y < h {
+                let sLine = sBase.advanced(by: y * sRow)
+                let dLine = dBase.advanced(by: y * dRow)
+                var x = 0
+                while x < w {
+                    let i = x * 4
+                    for c in 0..<3 {
+                        let ov = Int(sLine[i + c])
+                        let rv = Int(dLine[i + c])
+                        dLine[i + c] = UInt8((ov * ai + rv * bi) >> 8)
+                    }
+                    x += 1
+                }
+                y += step
+            }
+            return true
+        }
+
+        // NV12 / 420f / 420v：各平面按权重融合（Y+UV）
+        if fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            || fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            || fmt == kCVPixelFormatType_420YpCbCr8Planar
+            || fmt == kCVPixelFormatType_420YpCbCr8PlanarFullRange
+            || planes >= 2
+        {
+            for p in 0..<planes {
+                guard let sBase = CVPixelBufferGetBaseAddressOfPlane(stream, p)?.assumingMemoryBound(to: UInt8.self),
+                      let dBase = CVPixelBufferGetBaseAddressOfPlane(realDst, p)?.assumingMemoryBound(to: UInt8.self)
+                else { return false }
+                let rows = CVPixelBufferGetHeightOfPlane(realDst, p)
+                let sRow = CVPixelBufferGetBytesPerRowOfPlane(stream, p)
+                let dRow = CVPixelBufferGetBytesPerRowOfPlane(realDst, p)
+                let bytes = min(sRow, dRow)
+                var y = 0
+                let pStep = (p == 0) ? step : max(1, step / 2)
+                while y < rows {
+                    let sLine = sBase.advanced(by: y * sRow)
+                    let dLine = dBase.advanced(by: y * dRow)
+                    var i = 0
+                    while i < bytes {
+                        let ov = Int(sLine[i])
+                        let rv = Int(dLine[i])
+                        dLine[i] = UInt8((ov * ai + rv * bi) >> 8)
+                        i += 1
+                    }
+                    y += pStep
+                }
+            }
+            return true
+        }
+        return false
     }
 
-    private static func cloneBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+    private static func retainCopy(_ src: CVPixelBuffer) -> CVPixelBuffer? {
         let w = CVPixelBufferGetWidth(src)
         let h = CVPixelBufferGetHeight(src)
         let fmt = CVPixelBufferGetPixelFormatType(src)
@@ -531,44 +611,9 @@ enum CamBufferPainter {
         guard CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, attrs as CFDictionary, &out) == kCVReturnSuccess,
               let out
         else { return nil }
-        _ = copyPixels(from: src, to: out)
+        guard copyPixels(from: src, to: out) else { return nil }
         return out
     }
-
-    private static func blendPixels(obs: CVPixelBuffer, real: CVPixelBuffer, obsFrac: CGFloat) {
-        guard CVPixelBufferGetPixelFormatType(obs) == kCVPixelFormatType_32BGRA,
-              CVPixelBufferGetPixelFormatType(real) == kCVPixelFormatType_32BGRA
-        else { return }
-        let w = CVPixelBufferGetWidth(obs)
-        let h = CVPixelBufferGetHeight(obs)
-        guard w == CVPixelBufferGetWidth(real), h == CVPixelBufferGetHeight(real) else { return }
-        CVPixelBufferLockBaseAddress(obs, [])
-        CVPixelBufferLockBaseAddress(real, .readOnly)
-        defer {
-            CVPixelBufferUnlockBaseAddress(real, .readOnly)
-            CVPixelBufferUnlockBaseAddress(obs, [])
-        }
-        guard let oBase = CVPixelBufferGetBaseAddress(obs)?.assumingMemoryBound(to: UInt8.self),
-              let rBase = CVPixelBufferGetBaseAddress(real)?.assumingMemoryBound(to: UInt8.self)
-        else { return }
-        let oRow = CVPixelBufferGetBytesPerRow(obs)
-        let rRow = CVPixelBufferGetBytesPerRow(real)
-        let a = max(0, min(1, obsFrac))
-        let b = 1 - a
-        for y in 0..<h {
-            let oLine = oBase.advanced(by: y * oRow)
-            let rLine = rBase.advanced(by: y * rRow)
-            for x in 0..<w {
-                let i = x * 4
-                for c in 0..<3 {
-                    let ov = CGFloat(oLine[i + c])
-                    let rv = CGFloat(rLine[i + c])
-                    oLine[i + c] = UInt8(max(0, min(255, ov * a + rv * b)))
-                }
-            }
-        }
-    }
-
     private static func rememberGood(_ buf: CVPixelBuffer, width: Int, height: Int, format: OSType) {
         lock.lock()
         lastGood = buf

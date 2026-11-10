@@ -1,14 +1,11 @@
 @echo off
 chcp 65001 >nul
-title BxMediaSource Demo (loop)
+title BxMediaSource Demo（循环+自动重连）
 cd /d "%~dp0"
 echo.
-echo Keep BXFloat-USB Direct Relay running first.
-echo Demo loops real H.264+AAC to 127.0.0.1:18765 until you close this window / Ctrl+C.
-echo Optional: run-demo.bat --seconds 60
+echo 推荐直接用「一键推Demo.bat」（会自动开助手）。
+echo 本窗口：循环推 H.264+AAC 到 127.0.0.1:18765；断线自动重连。
 echo.
 "%~dp0bin\BxMediaSourceDemo.exe" %*
 echo.
-echo ---- demo send OK / loop ended = success ----
-echo ---- demo failed = relay not listening on 18765 ----
 pause

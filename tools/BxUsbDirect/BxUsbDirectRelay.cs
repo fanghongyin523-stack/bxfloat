@@ -19,6 +19,10 @@ public static class BxUsbDirectRelay {
     static NetworkStream phoneStream;
     static bool loopbackPhone;
     static int loopbackPhonePort = 28765;
+    static long pushOk;
+    static long pushDrop;
+    static DateTime lastUsbLog = DateTime.MinValue;
+    static string lastUsbErr = "";
 
     public static int Main(string[] args) {
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -35,8 +39,8 @@ public static class BxUsbDirectRelay {
         Console.WriteLine("BXFloat USB Direct Relay");
         Console.WriteLine("  device_port=" + devicePort + (loopbackPhone ? " (LOOPBACK " + loopbackPhonePort + ")" : ""));
         Console.WriteLine("  BXMS ingest=" + ingestAddr + ":" + ingestPort);
-        Console.WriteLine("  LAN channel: BxUsbBridge / BXFloat-USB助手 (RTSP)");
-        Console.WriteLine("  USB channel: this process (VCU1)");
+        Console.WriteLine("  顺序: 1)本窗口常开  2)手机注dylib+替换开  3)再开「一键推Demo」");
+        Console.WriteLine("  手机未就绪时只丢帧，不断开电脑端 Demo 连接");
 
         Thread phoneKeeper = new Thread(PhoneKeepAlive);
         phoneKeeper.IsBackground = true;
@@ -45,7 +49,7 @@ public static class BxUsbDirectRelay {
         TcpListener listener = new TcpListener(ingestAddr, ingestPort);
         listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         listener.Start();
-        Console.WriteLine("[ingest] listen OK");
+        Console.WriteLine("[ingest] listen OK " + ingestAddr + ":" + ingestPort);
         while (true) {
             TcpClient c = listener.AcceptTcpClient();
             c.NoDelay = true;
@@ -100,10 +104,7 @@ public static class BxUsbDirectRelay {
 
     static void DropPhone() {
         lock (phoneGate) {
-            try { if (phoneStream != null) phoneStream.Close(); } catch { }
-            try { if (phone != null) phone.Close(); } catch { }
-            phoneStream = null;
-            phone = null;
+            SoftDropPhoneUnlocked();
         }
     }
 
@@ -144,10 +145,9 @@ public static class BxUsbDirectRelay {
                     Payload = msg.Payload
                 };
                 byte[] wire = Vcu1Codec.Encode(pkt);
-                PushToPhone(wire);
-                Console.WriteLine("[usb] send type=" + pkt.Type + " flags=" + pkt.Flags +
-                    " seq=" + pkt.Sequence + " pts=" + pkt.PtsUs + " len=" + pkt.Payload.Length +
-                    " hdr=" + Vcu1Codec.HexHeader(wire));
+                // 手机断线/未听端口：只丢帧，绝不把异常抛回 ingest（否则 Demo 被掐死）
+                PushToPhoneSoft(wire);
+                MaybeLogUsb(pkt);
             }
         } catch (Exception ex) {
             Console.WriteLine("[ingest] - " + peer + " " + ex.Message);
@@ -156,12 +156,55 @@ public static class BxUsbDirectRelay {
         }
     }
 
-    static void PushToPhone(byte[] wire) {
+    static void MaybeLogUsb(Vcu1Codec.Packet pkt) {
+        DateTime now = DateTime.UtcNow;
+        if ((now - lastUsbLog).TotalSeconds < 2.0) return;
+        lastUsbLog = now;
+        Console.WriteLine("[usb] ok=" + pushOk + " drop=" + pushDrop +
+            " lastType=" + pkt.Type + " seq=" + pkt.Sequence + " len=" + pkt.Payload.Length +
+            (lastUsbErr.Length > 0 ? (" err=" + lastUsbErr) : ""));
+    }
+
+    static void PushToPhoneSoft(byte[] wire) {
         lock (phoneGate) {
+            if (TryWritePhoneUnlocked(wire)) {
+                pushOk++;
+                lastUsbErr = "";
+                return;
+            }
+            // 清掉坏连接，再试一次；仍失败则丢帧，保持 Demo TCP 活着
+            SoftDropPhoneUnlocked();
+            if (TryWritePhoneUnlocked(wire)) {
+                pushOk++;
+                lastUsbErr = "";
+                return;
+            }
+            pushDrop++;
+        }
+    }
+
+    static bool TryWritePhoneUnlocked(byte[] wire) {
+        try {
             EnsurePhoneUnlocked();
             phoneStream.Write(wire, 0, wire.Length);
             phoneStream.Flush();
+            return true;
+        } catch (Exception ex) {
+            lastUsbErr = ex.Message;
+            SoftDropPhoneUnlocked();
+            return false;
         }
+    }
+
+    static void SoftDropPhoneUnlocked() {
+        try { if (phoneStream != null) phoneStream.Close(); } catch { }
+        try { if (phone != null) phone.Close(); } catch { }
+        phoneStream = null;
+        phone = null;
+    }
+
+    static void PushToPhone(byte[] wire) {
+        PushToPhoneSoft(wire);
     }
 
     static void EnsurePhoneUnlocked() {

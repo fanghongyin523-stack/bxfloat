@@ -2,11 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Sockets;
 using System.Threading;
 
 /// Demo "other software" → BXMS ingest (127.0.0.1:18765).
 /// Payload: real annex-B H.264 (SPS/PPS/IDR) + ADTS AAC (+ ASC). Framing/port unchanged.
-/// Default: keep connection open and loop A/V until Ctrl+C (or --seconds N).
+/// Default: loop A/V forever; auto-reconnect if Relay/phone blips.
 public static class ProgramDemo {
     public static int Main(string[] args) {
         string host = "127.0.0.1";
@@ -36,13 +37,13 @@ public static class ProgramDemo {
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
         string h264Path = Path.Combine(baseDir, "demo-sample.annexb.h264");
         string aacPath = Path.Combine(baseDir, "demo-sample.adts.aac");
-        Console.WriteLine("BxMediaSource demo → " + host + ":" + port);
-        Console.WriteLine("  h264=" + h264Path);
-        Console.WriteLine("  aac =" + aacPath);
-        Console.WriteLine("  loop=" + (seconds <= 0 ? "forever (Ctrl+C)" : (seconds + "s")));
+        Console.WriteLine("BxMediaSource Demo（循环 + 断线自动重连）");
+        Console.WriteLine("  目标 " + host + ":" + port);
+        Console.WriteLine("  先开「USB直连助手」，手机替换开，再让本窗口一直跑");
+        Console.WriteLine("  结束：Ctrl+C");
         try {
-            if (!File.Exists(h264Path)) throw new FileNotFoundException("missing H.264 sample", h264Path);
-            if (!File.Exists(aacPath)) throw new FileNotFoundException("missing AAC sample", aacPath);
+            if (!File.Exists(h264Path)) throw new FileNotFoundException("缺少 H.264 样片", h264Path);
+            if (!File.Exists(aacPath)) throw new FileNotFoundException("缺少 AAC 样片", aacPath);
 
             byte[] h264 = File.ReadAllBytes(h264Path);
             byte[] aacFile = File.ReadAllBytes(aacPath);
@@ -54,7 +55,6 @@ public static class ProgramDemo {
 
             List<byte[]> aacFrames = SplitAdtsFrames(aacFile);
             if (aacFrames.Count == 0) throw new InvalidOperationException("no ADTS AAC frames");
-            // AAC-LC 44.1kHz stereo ASC (matches ffmpeg sample); also recoverable from ADTS.
             byte[] asc = new byte[] { 0x12, 0x10 };
 
             const ulong videoStepUs = 100000; // 10fps
@@ -64,61 +64,82 @@ public static class ProgramDemo {
                 _stop = true;
             };
 
-            using (var c = new BxMediaSourceClient(host, port)) {
-                c.SendVideoConfig(spsPps, 0);
-                Thread.Sleep(20);
-                c.SendAudioConfig(asc, 0);
-                Thread.Sleep(10);
+            var sw = Stopwatch.StartNew();
+            int reconnects = 0;
+            while (!_stop) {
+                if (seconds > 0 && sw.Elapsed.TotalSeconds >= seconds) break;
+                try {
+                    using (var c = new BxMediaSourceClient(host, port)) {
+                        Console.WriteLine("[demo] 已连上 Relay，开始推流" +
+                            (reconnects > 0 ? (" (重连#" + reconnects + ")") : ""));
+                        c.SendVideoConfig(spsPps, 0);
+                        Thread.Sleep(20);
+                        c.SendAudioConfig(asc, 0);
+                        Thread.Sleep(10);
 
-                ulong vPts = 0;
-                ulong aPts = 0;
-                int vi = 0;
-                int ai = 0;
-                int cycles = 0;
-                long sentV = 0;
-                long sentA = 0;
-                var sw = Stopwatch.StartNew();
-                var lastLog = sw.Elapsed;
+                        ulong vPts = 0;
+                        ulong aPts = 0;
+                        int vi = 0;
+                        int ai = 0;
+                        int cycles = 0;
+                        long sentV = 0;
+                        long sentA = 0;
+                        var lastLog = sw.Elapsed;
 
-                while (!_stop) {
-                    if (seconds > 0 && sw.Elapsed.TotalSeconds >= seconds) break;
+                        while (!_stop) {
+                            if (seconds > 0 && sw.Elapsed.TotalSeconds >= seconds) break;
 
-                    // Interleave by PTS so phone keeps both tracks warm (录制/预览都需要持续包).
-                    if (aPts <= vPts) {
-                        c.SendAudio(aacFrames[ai], aPts);
-                        aPts += audioStepUs;
-                        ai++;
-                        if (ai >= aacFrames.Count) ai = 0;
-                        sentA++;
-                        Thread.Sleep(5);
-                    } else {
-                        // Each video cycle starts with SPS/PPS so late join / decoder reset still works.
-                        if (vi == 0) {
-                            c.SendVideoConfig(spsPps, vPts);
-                            Thread.Sleep(5);
+                            if (aPts <= vPts) {
+                                c.SendAudio(aacFrames[ai], aPts);
+                                aPts += audioStepUs;
+                                ai++;
+                                if (ai >= aacFrames.Count) ai = 0;
+                                sentA++;
+                                Thread.Sleep(5);
+                            } else {
+                                if (vi == 0) {
+                                    c.SendVideoConfig(spsPps, vPts);
+                                    Thread.Sleep(5);
+                                }
+                                c.SendVideo(videoAus[vi], vPts);
+                                vPts += videoStepUs;
+                                vi++;
+                                if (vi >= videoAus.Count) {
+                                    vi = 0;
+                                    cycles++;
+                                }
+                                sentV++;
+                                Thread.Sleep(15);
+                            }
+
+                            if (sw.Elapsed - lastLog > TimeSpan.FromSeconds(2)) {
+                                lastLog = sw.Elapsed;
+                                Console.WriteLine(
+                                    "[demo] 推流中 t=" + sw.Elapsed.TotalSeconds.ToString("0.0") +
+                                    "s 视频=" + sentV + " 音频=" + sentA + " 循环=" + cycles);
+                            }
                         }
-                        c.SendVideo(videoAus[vi], vPts);
-                        vPts += videoStepUs;
-                        vi++;
-                        if (vi >= videoAus.Count) {
-                            vi = 0;
-                            cycles++;
-                        }
-                        sentV++;
-                        Thread.Sleep(15);
                     }
-
-                    if (sw.Elapsed - lastLog > TimeSpan.FromSeconds(2)) {
-                        lastLog = sw.Elapsed;
-                        Console.WriteLine(
-                            "demo running t=" + sw.Elapsed.TotalSeconds.ToString("0.0") +
-                            "s v=" + sentV + " a=" + sentA + " cycles=" + cycles);
-                    }
+                } catch (SocketException ex) {
+                    if (_stop) break;
+                    reconnects++;
+                    Console.WriteLine("[demo] 连不上/被断开：" + ex.Message);
+                    Console.WriteLine("       → 确认「USB直连助手」窗口还在，1 秒后重试…");
+                    Thread.Sleep(1000);
+                } catch (IOException ex) {
+                    if (_stop) break;
+                    reconnects++;
+                    Console.WriteLine("[demo] 连接中断：" + ex.Message);
+                    Console.WriteLine("       → 1 秒后自动重连（手机重开后也会自己恢复）");
+                    Thread.Sleep(1000);
+                } catch (Exception ex) {
+                    if (_stop) break;
+                    reconnects++;
+                    Console.WriteLine("[demo] " + ex.Message + " → 1 秒后重试");
+                    Thread.Sleep(1000);
                 }
             }
-            Console.WriteLine(
-                "demo send OK videoAU=" + videoAus.Count + " aacFrames=" + aacFrames.Count +
-                " spsPps=" + spsPps.Length + " (loop ended)");
+            Console.WriteLine("[demo] 结束");
             return 0;
         } catch (Exception ex) {
             Console.WriteLine("demo failed: " + ex.Message);
@@ -128,9 +149,8 @@ public static class ProgramDemo {
 
     static volatile bool _stop = false;
 
-    /// Group annex-B into access units: non-VCL + following VCL (type 1/5).
     static List<byte[]> SplitAnnexBAccessUnits(byte[] data) {
-        var nals = new List<Tuple<int, int, int>>(); // start, len, nalType
+        var nals = new List<Tuple<int, int, int>>();
         int i = 0;
         while (i + 3 < data.Length) {
             int sc = 0;
