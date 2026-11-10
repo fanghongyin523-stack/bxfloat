@@ -28,6 +28,8 @@ struct MediaConfig: Equatable {
     var hlsPort: Int
     /// PC 媒体 RTSP 端口（默认 18554；助手桥到此口，不绑死某一推流软件）
     var rtspPort: Int
+    /// USB 直连 VCU1 device_port（默认 28765，对齐 ports.ini douyin）
+    var vcu1Port: Int
     var streamPath: String
     var opacity: Float
     var windowScale: Float
@@ -63,6 +65,7 @@ struct MediaConfig: Equatable {
         connectionMode: .lan,
         hlsPort: 18888,
         rtspPort: 18554,
+        vcu1Port: 28765,
         streamPath: "stream",
         opacity: 1.0,
         windowScale: 0.42,
@@ -84,7 +87,7 @@ struct MediaConfig: Equatable {
 extension MediaConfig: Codable {
     enum CodingKeys: String, CodingKey {
         case streamURL, computerIP, usbComputerIP, connectionMode
-        case hlsPort, rtspPort, streamPath, opacity, windowScale, overlayEnabled, muted
+        case hlsPort, rtspPort, vcu1Port, streamPath, opacity, windowScale, overlayEnabled, muted
         case replaceCameraEnabled, audioCaptureMode, blendRealCamera
         case blendStreamPercent = "blendOBSPercent"
         case rotationDegrees, mirrored, timedRealCamera, timedRealIntervalSec, timedRealShowSec
@@ -99,6 +102,7 @@ extension MediaConfig: Codable {
         connectionMode = try c.decodeIfPresent(ConnectionMode.self, forKey: .connectionMode) ?? .lan
         hlsPort = try c.decodeIfPresent(Int.self, forKey: .hlsPort) ?? 18888
         rtspPort = try c.decodeIfPresent(Int.self, forKey: .rtspPort) ?? 18554
+        vcu1Port = try c.decodeIfPresent(Int.self, forKey: .vcu1Port) ?? 28765
         streamPath = try c.decodeIfPresent(String.self, forKey: .streamPath) ?? "stream"
         opacity = try c.decodeIfPresent(Float.self, forKey: .opacity) ?? 1
         windowScale = try c.decodeIfPresent(Float.self, forKey: .windowScale) ?? 0.42

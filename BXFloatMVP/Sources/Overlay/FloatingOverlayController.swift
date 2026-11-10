@@ -234,12 +234,14 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     /// 传输层互斥：局域网 / 数据线 / 本地 同时只活一路。
+    /// USB：保留 RTSP 隧道基础设施作回退；VCU1 收端由 syncPuller 在替换开时启停。
     private func isolateTransport(for mode: ConnectionMode) {
         switch mode {
         case .usb:
             USBStreamBridge.shared.start()
         case .lan, .manual, .localVideo:
             USBStreamBridge.shared.stop()
+            Vcu1UsbPuller.shared.stop()
         }
     }
 
@@ -248,9 +250,21 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     /// 三模式互斥：任一时刻只允许一种源往环里灌（对标参考 Pipeline 单源）。
     private func syncPuller(_ config: MediaConfig) {
         let url = config.resolvedPlaybackURL()
-        let needPull = config.replaceCameraEnabled && !url.isEmpty
-        // 模式变化即使 replace 关也要换 key，强制 stop+清残帧，禁止粘旧源
-        let key = "\(config.connectionMode.rawValue)|\(needPull ? url : "off")"
+        // USB 直连：VCU1 listen 不依赖 RTSP URL；其它模式仍要有可播地址
+        let needPull: Bool
+        switch config.connectionMode {
+        case .usb:
+            needPull = config.replaceCameraEnabled
+        default:
+            needPull = config.replaceCameraEnabled && !url.isEmpty
+        }
+        let key: String
+        switch config.connectionMode {
+        case .usb:
+            key = "usb|vcu1:\(config.vcu1Port)|\(needPull ? "on" : "off")"
+        default:
+            key = "\(config.connectionMode.rawValue)|\(needPull ? url : "off")"
+        }
         if pullKey == key {
             return
         }
@@ -266,21 +280,14 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             LocalVideoPlayer.shared.start(urlString: url)
             NSLog("BXFloatCam source=localVideo gen=%llu", gen)
         case .usb:
-            // 只跑 USB→本机 RTSP；本机听好后尽快拉（隧道已挂则瞬接，否则乐观开拉 + 短重连）
-            let pullURL = url
-            let expectedKey = key
-            USBStreamBridge.shared.whenPullReady { [weak self] tunnelArmed in
-                guard let self else { return }
-                guard self.sourceGeneration == gen, self.pullKey == expectedKey else { return }
-                let cfg = MediaConfigStore.shared.config
-                guard cfg.connectionMode == .usb, cfg.replaceCameraEnabled else { return }
-                LocalVideoPlayer.shared.stop()
-                if !tunnelArmed {
-                    NSLog("BXFloatCam source=usb optimistic gen=%llu (%@)", gen, USBStreamBridge.shared.statusLine())
-                }
-                FFRTSPController.start(urlString: pullURL)
-                NSLog("BXFloatCam source=usb gen=%llu armed=%d url=%@", gen, tunnelArmed ? 1 : 0, pullURL)
-            }
+            // VCU1 直连主线：listen 好即可等 PC Connect；不强制再拉 18554 RTSP（避免两套抢流）
+            LocalVideoPlayer.shared.stop()
+            FFRTSPController.stop()
+            Vcu1UsbPuller.shared.start(port: config.vcu1Port)
+            NSLog(
+                "BXFloatCam source=usb-vcu1 gen=%llu port=%d (%@)",
+                gen, config.vcu1Port, Vcu1UsbPuller.shared.statusLine()
+            )
         case .lan, .manual:
             // 只跑局域网/手动 URL；本地与 USB 隧道已隔离
             LocalVideoPlayer.shared.stop()
@@ -293,11 +300,12 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         }
     }
 
-    /// 停掉所有灌环源（FF + 本地），清残帧；USB 隧道由 isolateTransport 按模式管。
+    /// 停掉所有灌环源（FF + 本地 + VCU1），清残帧；USB RTSP 隧道由 isolateTransport 按模式管。
     private func stopAllMediaSources(reason: String) {
         sourceGeneration &+= 1
         FFRTSPController.stop()
         LocalVideoPlayer.shared.stop()
+        Vcu1UsbPuller.shared.stop()
         CamFrameStore.shared.reset()
         CamAudioStore.shared.reset()
         AVSyncClock.shared.reset()

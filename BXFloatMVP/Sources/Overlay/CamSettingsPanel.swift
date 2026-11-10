@@ -470,7 +470,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         ipField.superview?.isHidden = !showIP
         switch modeControl.selectedSegmentIndex {
         case 1:
-            modeHint.text = "数据线：无需填地址。电脑开「USB助手/直连」桥到本机媒体口，再开「替换摄像头」。\(USBStreamBridge.shared.statusLine())"
+            modeHint.text = "数据线：无需填地址。电脑开「USB直连助手」推 VCU1，再开「替换摄像头」。\(Vcu1UsbPuller.shared.statusLine()) · \(USBStreamBridge.shared.statusLine())"
         case 2:
             modeHint.text = "本地视频：先选文件。开「替换摄像头」才播放；「推流声音」只控制用推流声还是原麦。"
         default:
@@ -506,6 +506,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             cfg.replaceCameraEnabled ? "运行中 · \(clock.actionPanelLabel())" : "替换未开（须手动打开才注入）",
         ]
         if cfg.connectionMode == .usb {
+            lines.append(Vcu1UsbPuller.shared.statusLine())
             lines.append(USBStreamBridge.shared.statusLine())
         }
         statusLabel.text = lines.joined(separator: "\n")
