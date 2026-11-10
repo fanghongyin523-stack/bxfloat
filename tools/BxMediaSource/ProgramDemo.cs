@@ -1,20 +1,45 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
 /// Demo "other software" → BXMS ingest (127.0.0.1:18765).
 /// Payload: real annex-B H.264 (SPS/PPS/IDR) + ADTS AAC (+ ASC). Framing/port unchanged.
+/// Default: keep connection open and loop A/V until Ctrl+C (or --seconds N).
 public static class ProgramDemo {
     public static int Main(string[] args) {
-        string host = args.Length > 0 ? args[0] : "127.0.0.1";
-        int port = args.Length > 1 ? int.Parse(args[1]) : 18765;
+        string host = "127.0.0.1";
+        int port = 18765;
+        // 0 = forever (Ctrl+C). Positive = stop after N seconds.
+        int seconds = 0;
+        for (int a = 0; a < args.Length; a++) {
+            string s = args[a];
+            if (s == "--seconds" && a + 1 < args.Length) {
+                seconds = int.Parse(args[++a]);
+                continue;
+            }
+            if (s.StartsWith("--seconds=")) {
+                seconds = int.Parse(s.Substring("--seconds=".Length));
+                continue;
+            }
+            if (!s.StartsWith("-") && host == "127.0.0.1" && a == 0) {
+                host = s;
+                continue;
+            }
+            if (!s.StartsWith("-") && a <= 1) {
+                int p;
+                if (int.TryParse(s, out p)) port = p;
+            }
+        }
+
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
         string h264Path = Path.Combine(baseDir, "demo-sample.annexb.h264");
         string aacPath = Path.Combine(baseDir, "demo-sample.adts.aac");
         Console.WriteLine("BxMediaSource demo → " + host + ":" + port);
         Console.WriteLine("  h264=" + h264Path);
         Console.WriteLine("  aac =" + aacPath);
+        Console.WriteLine("  loop=" + (seconds <= 0 ? "forever (Ctrl+C)" : (seconds + "s")));
         try {
             if (!File.Exists(h264Path)) throw new FileNotFoundException("missing H.264 sample", h264Path);
             if (!File.Exists(aacPath)) throw new FileNotFoundException("missing AAC sample", aacPath);
@@ -32,29 +57,76 @@ public static class ProgramDemo {
             // AAC-LC 44.1kHz stereo ASC (matches ffmpeg sample); also recoverable from ADTS.
             byte[] asc = new byte[] { 0x12, 0x10 };
 
+            const ulong videoStepUs = 100000; // 10fps
+            const ulong audioStepUs = 23220;  // 1024 @ 44.1k
+            Console.CancelKeyPress += (sender, e) => {
+                e.Cancel = true;
+                _stop = true;
+            };
+
             using (var c = new BxMediaSourceClient(host, port)) {
                 c.SendVideoConfig(spsPps, 0);
                 Thread.Sleep(20);
-                for (int i = 0; i < videoAus.Count; i++) {
-                    c.SendVideo(videoAus[i], (ulong)(i * 100000)); // 10fps → 100ms
-                    Thread.Sleep(20);
-                }
                 c.SendAudioConfig(asc, 0);
                 Thread.Sleep(10);
-                for (int i = 0; i < aacFrames.Count; i++) {
-                    // 1024 samples @ 44.1k ≈ 23220 µs
-                    c.SendAudio(aacFrames[i], (ulong)(i * 23220));
-                    Thread.Sleep(5);
+
+                ulong vPts = 0;
+                ulong aPts = 0;
+                int vi = 0;
+                int ai = 0;
+                int cycles = 0;
+                long sentV = 0;
+                long sentA = 0;
+                var sw = Stopwatch.StartNew();
+                var lastLog = sw.Elapsed;
+
+                while (!_stop) {
+                    if (seconds > 0 && sw.Elapsed.TotalSeconds >= seconds) break;
+
+                    // Interleave by PTS so phone keeps both tracks warm (录制/预览都需要持续包).
+                    if (aPts <= vPts) {
+                        c.SendAudio(aacFrames[ai], aPts);
+                        aPts += audioStepUs;
+                        ai++;
+                        if (ai >= aacFrames.Count) ai = 0;
+                        sentA++;
+                        Thread.Sleep(5);
+                    } else {
+                        // Each video cycle starts with SPS/PPS so late join / decoder reset still works.
+                        if (vi == 0) {
+                            c.SendVideoConfig(spsPps, vPts);
+                            Thread.Sleep(5);
+                        }
+                        c.SendVideo(videoAus[vi], vPts);
+                        vPts += videoStepUs;
+                        vi++;
+                        if (vi >= videoAus.Count) {
+                            vi = 0;
+                            cycles++;
+                        }
+                        sentV++;
+                        Thread.Sleep(15);
+                    }
+
+                    if (sw.Elapsed - lastLog > TimeSpan.FromSeconds(2)) {
+                        lastLog = sw.Elapsed;
+                        Console.WriteLine(
+                            "demo running t=" + sw.Elapsed.TotalSeconds.ToString("0.0") +
+                            "s v=" + sentV + " a=" + sentA + " cycles=" + cycles);
+                    }
                 }
             }
-            Console.WriteLine("demo send OK videoAU=" + videoAus.Count + " aacFrames=" + aacFrames.Count +
-                " spsPps=" + spsPps.Length);
+            Console.WriteLine(
+                "demo send OK videoAU=" + videoAus.Count + " aacFrames=" + aacFrames.Count +
+                " spsPps=" + spsPps.Length + " (loop ended)");
             return 0;
         } catch (Exception ex) {
             Console.WriteLine("demo failed: " + ex.Message);
             return 1;
         }
     }
+
+    static volatile bool _stop = false;
 
     /// Group annex-B into access units: non-VCL + following VCL (type 1/5).
     static List<byte[]> SplitAnnexBAccessUnits(byte[] data) {
@@ -117,7 +189,6 @@ public static class ProgramDemo {
             if (nalType == 7 || nalType == 8) {
                 for (int k = i; k < j; k++) buf.Add(data[k]);
             }
-            if (nalType == 7 || nalType == 8) { /* keep scanning first set */ }
             if (buf.Count > 0 && nalType != 7 && nalType != 8 && nalType != 6 && nalType != 9)
                 break;
             i = j;

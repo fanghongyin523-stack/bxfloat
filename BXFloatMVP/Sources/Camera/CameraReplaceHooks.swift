@@ -142,7 +142,8 @@ enum CameraReplaceHooks {
         let queue = output.sampleBufferCallbackQueue
         let proxy = CamSampleBufferProxy(target: delegate, originalQueue: queue)
         retainedProxies.setObject(proxy, forKey: output)
-        output.alwaysDiscardsLateVideoFrames = true
+        // 禁止写 alwaysDiscardsLateVideoFrames：分段拍/切模式时常在 session 配置窗内，
+        // 改 output 属性会跟宿主锁打架 → 整屏卡死。晚帧靠 paint 预算丢弃即可。
         // 走 swizzle；队列保持宿主原样
         output.setSampleBufferDelegate(proxy, queue: queue)
         wrapCount += 1
@@ -197,7 +198,7 @@ enum CameraReplaceHooks {
                 retainedProxies.setObject(proxy, forKey: vout)
                 retainedProxyCount = retainedProxies.count
                 finalDelegate = proxy
-                vout.alwaysDiscardsLateVideoFrames = true
+                // 不在此处改 alwaysDiscardsLateVideoFrames（见 wrapOneIfNeeded 注释）
                 wrapCount += 1
             } else if let vout = obj as? AVCaptureVideoDataOutput {
                 // 宿主清空/换掉非 proxy：释放旧强持有
@@ -383,7 +384,8 @@ enum CamBufferPainter {
 
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
-        // 主线程回调（录制键常在 main）：禁止 clone 真机帧，超时直接 hold，避免整屏卡死
+        // 主线程回调（录制键/切分段拍常在 main）：禁止 clone、禁止碰 ring；
+        // 只允许一次短 memcpy；超时直接透传，避免整屏卡死。
         let onMain = Thread.isMainThread
         let blendFrac = onMain ? 1.0 : CamReplacePolicy.streamBlendFraction()
         var realSnapshot: CVPixelBuffer?
@@ -396,6 +398,25 @@ enum CamBufferPainter {
             NSLog("BXFloatCam paint dstFormat=%u %dx%d (memcpy-only)", fmt, dw, dh)
         }
 
+        // 主线程：预算更紧；绝不走 ring / clone；超时透传保触摸
+        if onMain {
+            if let prepared = CamFrameBlitter.shared.copyPrepared(
+                width: dw, height: dh, format: fmt
+            ), (CACurrentMediaTime() - t0) < budgetSec * 0.5,
+               copyPixels(from: prepared, to: dst)
+            {
+                rememberGood(prepared, width: dw, height: dh, format: fmt)
+                return true
+            }
+            if (CACurrentMediaTime() - t0) < budgetSec,
+               let good = copyLastGood(width: dw, height: dh, format: fmt),
+               copyPixels(from: good, to: dst)
+            {
+                return true
+            }
+            return true
+        }
+
         // 1) 后台预渲染帧（最快、不碰 ring；copyPrepared 内短锁）
         if let prepared = CamFrameBlitter.shared.copyPrepared(
             width: dw, height: dh, format: fmt
@@ -405,8 +426,8 @@ enum CamBufferPainter {
             return true
         }
 
-        // 2) 预算紧张或主线程：仅 hold「本源 epoch」帧；无新素材则透传真机（禁止粘旧源）
-        let tight = Thread.isMainThread || (CACurrentMediaTime() - t0) > budgetSec * 0.4
+        // 2) 预算紧张：仅 hold「本源 epoch」帧；无新素材则透传真机（禁止粘旧源）
+        let tight = (CACurrentMediaTime() - t0) > budgetSec * 0.4
         if tight {
             if let good = copyLastGood(width: dw, height: dh, format: fmt),
                copyPixels(from: good, to: dst)
