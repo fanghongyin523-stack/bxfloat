@@ -91,13 +91,10 @@ public static class BxUsbDirectRelay {
     }
 
     static void EnsurePhone() {
+        // Same connect path as PushToPhone — must honor --loopback-phone,
+        // otherwise KeepAlive usbmux failures DropPhone and kill live loopback/USB sockets.
         lock (phoneGate) {
-            if (phone != null && phone.Connected) return;
-            int? id = Usbmux.ListDeviceId();
-            if (id == null) throw new Exception("no iPhone on usbmux");
-            phone = Usbmux.ConnectDevicePort(id.Value, devicePort);
-            phoneStream = phone.GetStream();
-            Console.WriteLine("[usb] connected DeviceID=" + id.Value + " port=" + devicePort);
+            EnsurePhoneUnlocked();
         }
     }
 
