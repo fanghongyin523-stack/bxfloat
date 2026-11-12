@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 
 /// 视频 ring：按 AVSyncClock.mediaTime 取帧；空窗 hold 最后一帧（对标 VCam hold-last）。
+/// 历史尺寸 110 / 3.2s：勿再按「2 秒目标」加大。稀疏流上屏走 copyLatest，不靠加深 ring。
 final class CamFrameStore {
     static let shared = CamFrameStore()
 
@@ -12,7 +13,7 @@ final class CamFrameStore {
 
     private let lock = NSLock()
     private var frames: [TimedFrame] = []
-    /// ~3.5s @30fps，覆盖 1.5～2s 目标 + 抖动
+    /// 历史抖动缓冲；targetDelay 已是 ~250ms，不要再加大本 ring
     private let maxFrames = 110
     private var lastHeld: CVPixelBuffer?
 
@@ -25,6 +26,8 @@ final class CamFrameStore {
     private init() {}
 
     func publish(_ buffer: CVPixelBuffer, pts: Double = -1) {
+        // 解码出口统一打 BT.709 附件，避免 Blitter 用无标记 DeviceRGB 解错 420v/420f
+        Self.ensureBT709Attachments(buffer)
         let mapped = pts >= 0 ? AVSyncClock.shared.mapPTS(pts) : -1
         var pruned = 0
         lock.lock()
@@ -124,5 +127,34 @@ final class CamFrameStore {
         frameCount = 0
         lock.unlock()
         AVSyncClock.shared.reset()
+    }
+
+    /// 与发送端建议 VUI 对齐：bt709 + tv（limited / 420v）。附件供 CI 正确 YCbCr→RGB。
+    static func ensureBT709Attachments(_ buffer: CVPixelBuffer) {
+        let fmt = CVPixelBufferGetPixelFormatType(buffer)
+        let is420 =
+            fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            || fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            || fmt == kCVPixelFormatType_420YpCbCr8Planar
+            || fmt == kCVPixelFormatType_420YpCbCr8PlanarFullRange
+        guard is420 else { return }
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            .shouldPropagate
+        )
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferColorPrimaries_ITU_R_709_2,
+            .shouldPropagate
+        )
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferTransferFunction_ITU_R_709_2,
+            .shouldPropagate
+        )
     }
 }

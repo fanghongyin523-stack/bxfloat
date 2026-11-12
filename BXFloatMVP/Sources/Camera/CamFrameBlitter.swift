@@ -20,8 +20,6 @@ final class CamFrameBlitter {
     private var prepH = 0
     private var prepFmt: OSType = 0
     private var lastSyncKey: Int64 = -1
-    /// 每写入一帧 prepared 递增；主线程用单槽最新帧，中间帧自然丢弃
-    private var preparedGeneration: UInt64 = 0
     private var targetW = 0
     private var targetH = 0
     private var targetFmt: OSType = 0
@@ -57,7 +55,6 @@ final class CamFrameBlitter {
     private func clearPreparedLocked() {
         prepared = nil
         lastSyncKey = -1
-        preparedGeneration &+= 1
         prepW = 0
         prepH = 0
         prepFmt = 0
@@ -78,10 +75,8 @@ final class CamFrameBlitter {
     }
 
     /// 匹配则返回预渲染帧；尺寸突变前仍返回旧帧，杜绝闪真机。
-    /// 主线程调用务必短超时：锁被 blit 占用时宁可 miss，也不堵 UI。
     func copyPrepared(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
-        let wait = Thread.isMainThread ? 0.0005 : 0.001
-        guard lock.lock(before: Date().addingTimeInterval(wait)) else { return nil }
+        guard lock.lock(before: Date().addingTimeInterval(0.001)) else { return nil }
         defer { lock.unlock() }
         guard let prepared else { return nil }
         if prepW == width, prepH == height, prepFmt == format {
@@ -185,12 +180,23 @@ final class CamFrameBlitter {
     private func prepareIfNeeded(width: Int, height: Int, format: OSType) {
         let store = CamFrameStore.shared
         guard store.hasFreshFrame else { return }
-        let mediaT = AVSyncClock.shared.mediaTime()
-        guard let src = store.copyForMediaTimeIfLock(mediaT) ?? store.copyForMediaTime(mediaT) else {
-            return
-        }
 
-        let syncKey = Int64((mediaT * 30.0).rounded())
+        // 缺帧/时钟冻结：上屏用最新已解码帧，禁止钉在冻结 mediaTime 上两秒才换一张
+        let stalled = AVSyncClock.shared.isVideoPresentationStalled()
+        let mediaT = AVSyncClock.shared.mediaTime()
+        let src: CVPixelBuffer?
+        let syncKey: Int64
+        if stalled {
+            src = store.copyLatest()
+            // 每来一帧必刷新 prepared（勿用冻结 mediaT 桶）
+            syncKey = store.frameCount
+        } else {
+            src = store.copyForMediaTimeIfLock(mediaT) ?? store.copyForMediaTime(mediaT)
+            // mediaT 桶 ⊕ frameCount：同桶内新解码帧也会刷新
+            syncKey = (Int64((mediaT * 30.0).rounded()) & 0x3FFF_FFFF) ^ (store.frameCount << 20)
+        }
+        guard let src else { return }
+
         lock.lock()
         let unchanged = prepared != nil && prepW == width && prepH == height &&
             prepFmt == format && lastSyncKey == syncKey
@@ -213,7 +219,10 @@ final class CamFrameBlitter {
         ) else { return }
 
         // 对标 VCamTang paint：rotation + mirrored 后 cover 到宿主尺寸
+        // 色彩：BT.709（与解码附件 / 发送端建议 VUI 对齐），禁止无标记 DeviceRGB 解错 limited/full
         let cfg = MediaConfigStore.shared.config
+        // CIImage 读 CV 附件（BT.709）；render 目标用 itur_709，禁止 DeviceRGB 解错 limited/full
+        let bt709 = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
         var ciSrc = CIImage(cvPixelBuffer: src)
         let rot = ((cfg.rotationDegrees % 360) + 360) % 360
         if rot == 90 {
@@ -245,8 +254,7 @@ final class CamFrameBlitter {
             by: CGAffineTransform(translationX: -cropped.extent.origin.x, y: -cropped.extent.origin.y)
         )
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        ci.render(placed, to: bgra, bounds: bounds, colorSpace: colorSpace)
+        ci.render(placed, to: bgra, bounds: bounds, colorSpace: bt709)
 
         let final: CVPixelBuffer
         if format == kCVPixelFormatType_32BGRA {
@@ -255,7 +263,8 @@ final class CamFrameBlitter {
             guard let dst = makeBuffer(pool: dstP, width: width, height: height, format: format) else {
                 return
             }
-            ci.render(CIImage(cvPixelBuffer: bgra), to: dst, bounds: bounds, colorSpace: colorSpace)
+            CamFrameStore.ensureBT709Attachments(dst)
+            ci.render(CIImage(cvPixelBuffer: bgra), to: dst, bounds: bounds, colorSpace: bt709)
             final = dst
         }
 
@@ -264,7 +273,6 @@ final class CamFrameBlitter {
         prepW = width
         prepH = height
         prepFmt = format
-        preparedGeneration &+= 1
         lock.unlock()
     }
 }

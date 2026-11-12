@@ -29,6 +29,8 @@ final class RTSPVTPuller {
     private var ptsTicks: Int64 = 0
     private var decodeOK: Int64 = 0
     private var decodeFail: Int64 = 0
+    /// 解码失败后等 IDR；LAN 连续流仍保留 _1xRealTimePlayback（与 USB 稀疏路径不同）
+    private var needIDRAfterFail = false
 
     private init() {}
 
@@ -68,6 +70,7 @@ final class RTSPVTPuller {
         ptsTicks = 0
         decodeOK = 0
         decodeFail = 0
+        needIDRAfterFail = false
         fuBuffer.removeAll(keepingCapacity: false)
     }
 
@@ -272,20 +275,25 @@ final class RTSPVTPuller {
                 let puller = Unmanaged<RTSPVTPuller>.fromOpaque(refcon).takeUnretainedValue()
                 if status == noErr, let imageBuffer {
                     puller.decodeOK += 1
+                    puller.needIDRAfterFail = false
+                    // BT.709 附件在 CamFrameStore.publish；像素格式 420v（tv/limited）
                     CamFrameStore.shared.publish(imageBuffer)
                 } else {
                     puller.decodeFail += 1
+                    puller.needIDRAfterFail = true
+                    AVSyncClock.shared.beginVideoRecoveryFreeze(reason: "rtsp-vt-fail")
                     if puller.decodeFail <= 5 || puller.decodeFail % 60 == 0 {
-                        NSLog("BXFloatCam VT decode status=%d fail=%lld ok=%lld", status, puller.decodeFail, puller.decodeOK)
+                        NSLog("BXFloatCam VT decode status=%d fail=%lld ok=%lld → wait IDR", status, puller.decodeFail, puller.decodeOK)
                     }
                 }
             },
             decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
+        // 与 USB / 发送端建议 VUI 对齐：bt709 + tv → 420v（勿 420f+无标记 DeviceRGB）
         let attrs: [CFString: Any] = [
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ]
         let err = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -476,7 +484,14 @@ final class RTSPVTPuller {
         } else if nalType == 8 {
             pps = nal
             rebuildFormat()
-        } else if nalType == 5 || nalType == 1 || (nalType > 0 && nalType < 24) {
+        } else if nalType == 5 {
+            if formatDesc == nil || decompressionSession == nil {
+                rebuildFormat()
+            }
+            needIDRAfterFail = false
+            decodeNAL(nal)
+        } else if nalType == 1 || (nalType > 0 && nalType < 24) {
+            if needIDRAfterFail { return }
             decodeNAL(nal)
         }
     }
@@ -534,7 +549,7 @@ final class RTSPVTPuller {
             guard status == noErr, let sample else { return status }
 
             var flagsOut: VTDecodeInfoFlags = []
-            // 异步解码 + 实时丢帧：避免队列堆积后变成幻灯片
+            // LAN 连续码流：保留 _1xRealTimePlayback 防堆积；USB 稀疏路径已单独去掉
             return VTDecompressionSessionDecodeFrame(
                 session,
                 sampleBuffer: sample,
@@ -543,8 +558,11 @@ final class RTSPVTPuller {
                 infoFlagsOut: &flagsOut
             )
         }
-        if blockStatus != noErr, decodeFail < 8 {
-            NSLog("BXFloatCam decodeNAL prep/decode err %d", blockStatus)
+        if blockStatus != noErr {
+            needIDRAfterFail = true
+            if decodeFail < 8 {
+                NSLog("BXFloatCam decodeNAL prep/decode err %d → wait IDR", blockStatus)
+            }
         }
     }
 }

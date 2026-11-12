@@ -39,6 +39,8 @@ final class Vcu1UsbPuller {
     private var decompressionSession: VTDecompressionSession?
     /// Last submitted pts (seconds); VT callback may publish with this (imitate FFRTSP pts feed).
     private var pendingPublishPts: Double = -1
+    /// 解码失败 / 不完整 GOP 后：丢掉后续 P，等下一个带参的 IDR 再出帧（勿 hold 花屏帧）。
+    private var needIDRAfterFail = false
 
     private init() {}
 
@@ -417,7 +419,16 @@ final class Vcu1UsbPuller {
         } else if nalType == 8 {
             pps = nal
             rebuildFormat()
-        } else if nalType == 5 || nalType == 1 || (nalType > 0 && nalType < 24) {
+        } else if nalType == 5 {
+            // IDR：恢复点；缺 SPS/PPS 时先 rebuild，仍缺则等下一包参数集
+            if formatDesc == nil || decompressionSession == nil {
+                rebuildFormat()
+            }
+            needIDRAfterFail = false
+            decodeNAL(nal, ptsSec: ptsSec)
+        } else if nalType == 1 || (nalType > 0 && nalType < 24) {
+            // 残缺 GOP 后的 P/非关键帧：跳过，等 IDR（不要拼不完整帧）
+            if needIDRAfterFail { return }
             decodeNAL(nal, ptsSec: ptsSec)
         }
     }
@@ -470,12 +481,16 @@ final class Vcu1UsbPuller {
                 let puller = Unmanaged<Vcu1UsbPuller>.fromOpaque(refcon).takeUnretainedValue()
                 if status == noErr, let imageBuffer {
                     puller.diagDecodeOK += 1
+                    puller.needIDRAfterFail = false
+                    // 附件在 CamFrameStore.publish 统一打 BT.709；像素格式为 420v（tv/limited）
                     BXFloatPublishVideoFrame(imageBuffer, puller.pendingPublishPts)
                 } else {
                     puller.diagDecodeFail += 1
+                    puller.needIDRAfterFail = true
+                    AVSyncClock.shared.beginVideoRecoveryFreeze(reason: "vcu1-vt-fail")
                     if puller.diagDecodeFail <= 5 || puller.diagDecodeFail % 60 == 0 {
                         NSLog(
-                            "BXFloatCam VCU1 VT decode status=%d fail=%lld ok=%lld",
+                            "BXFloatCam VCU1 VT decode status=%d fail=%lld ok=%lld → wait IDR",
                             status, puller.diagDecodeFail, puller.diagDecodeOK
                         )
                     }
@@ -483,10 +498,11 @@ final class Vcu1UsbPuller {
             },
             decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
+        // 与发送端建议 VUI 对齐：bt709 + tv（limited）→ 420v，勿再用无标记 420f+DeviceRGB
         let attrs: [CFString: Any] = [
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ]
         let err = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -567,16 +583,20 @@ final class Vcu1UsbPuller {
             guard status == noErr, let sample else { return status }
 
             var flagsOut: VTDecodeInfoFlags = []
+            // USB 码流常稀疏：禁止 ._1xRealTimePlayback，避免把仅有的 IDR/稀帧再丢掉
             return VTDecompressionSessionDecodeFrame(
                 session,
                 sampleBuffer: sample,
-                flags: [._EnableAsynchronousDecompression, ._1xRealTimePlayback],
+                flags: [._EnableAsynchronousDecompression],
                 frameRefcon: nil,
                 infoFlagsOut: &flagsOut
             )
         }
-        if blockStatus != noErr, diagDecodeFail < 8 {
-            NSLog("BXFloatCam VCU1 decodeNAL prep/decode err %d", blockStatus)
+        if blockStatus != noErr {
+            needIDRAfterFail = true
+            if diagDecodeFail < 8 {
+                NSLog("BXFloatCam VCU1 decodeNAL prep/decode err %d → wait IDR", blockStatus)
+            }
         }
     }
 
@@ -590,6 +610,7 @@ final class Vcu1UsbPuller {
         pps = nil
         lastSPS = nil
         lastPPS = nil
+        needIDRAfterFail = false
     }
 }
 

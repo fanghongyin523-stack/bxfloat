@@ -79,11 +79,32 @@ final class AVSyncClock {
     func noteVideoPTS(_ pts: Double) {
         guard pts.isFinite, pts >= 0 else { return }
         lock.lock()
+        let now = CACurrentMediaTime()
+        let wasFrozen = frozenForVideo
+        let stalledGap = lastVideoWall > 0 && (now - lastVideoWall) > videoStallSec
         lastVideoPTS = pts
-        lastVideoWall = CACurrentMediaTime()
+        lastVideoWall = now
         // 新视频沿到达：解除恢复期冻音频
         if frozenForVideo { frozenForVideo = false }
+        // 稀疏来帧 / 刚解冻：把播头贴到近直播沿，禁止爬 2 秒才切到新画面
+        // （不加深 targetDelay；音频仍由 shouldFreezeAudio 门控）
+        if warmedUp, hasAnchor, (wasFrozen || stalledGap) {
+            mediaAnchor = max(0, pts - targetDelay)
+            wallAnchor = now
+            lastAction = .play
+        }
         lock.unlock()
+    }
+
+    /// 上屏用：视频停更/恢复期 → Blitter 应取「最新已解码帧」，勿钉在冻结 mediaTime。
+    func isVideoPresentationStalled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if frozenForVideo { return true }
+        if lastVideoPTS >= 0, (CACurrentMediaTime() - lastVideoWall) > videoStallSec {
+            return true
+        }
+        return false
     }
 
     /// 对标 VCamTang RECOVERY「audio frozen」：解码重建 / 大间隔显式进入恢复期。
@@ -185,8 +206,8 @@ final class AVSyncClock {
             wallAnchor = now
         }
 
-        // 视频真停 / 已处恢复期：冻时钟 + 冻音频。参照 action 主表是 play/drop-old/wait-video，
-        // 冻音频另打 `[AVSYNC] audio frozen for video recovery`，不把 freeze-audio 当主 action。
+        // 视频真停 / 已处恢复期：冻音频（shouldFreezeAudio）；播头贴 live，避免上屏钉旧帧两秒才切。
+        // 参照 action 主表是 play/drop-old/wait-video；冻音频另打日志，不把 freeze-audio 当主 action。
         if frozenForVideo || (lastVideoPTS >= 0 && (now - lastVideoWall) > videoStallSec) {
             if !frozenForVideo {
                 frozenForVideo = true
@@ -196,6 +217,8 @@ final class AVSyncClock {
                 }
             }
             lastAction = .waitVideo
+            // 贴直播沿（最新视频 PTS），禁止 return 旧 mediaAnchor 造成「两秒切一帧」放大
+            mediaAnchor = max(0, live - criticalLow)
             wallAnchor = now
             refreshMetricsLocked(present: mediaAnchor, live: live)
             return mediaAnchor
