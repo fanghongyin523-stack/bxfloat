@@ -31,7 +31,8 @@ func BXFloatRestoreSampleBufferDelegate(
 /// 真替换（对齐 VCam 稳态挂钩）：
 /// - 只在宿主 setSampleBufferDelegate 时包一层 proxy；采集跑起来后绝不重绑
 /// - 保留宿主原回调队列（禁止改挂 paintQueue 再回灌 main → 二次拍摄卡死）
-/// - 回调里只做限时像素拷贝；超时 hold 上一帧
+/// - 安静窗只盖切会话短窗：期内只转发，不 paint / 不 hold（防定格与假死）
+/// - 主线程只合入 blitter 已准备好的最新帧；副线程才 ring/hold 兜底
 /// - stop/start 只改武装标志，不 unwrap、不 apply 重绑
 enum CameraReplaceHooks {
     private static var installed = false
@@ -71,7 +72,7 @@ enum CameraReplaceHooks {
         return replaceActive
     }
 
-    /// 切模式 / beginConfiguration 安静窗：只转发，不 paint / 不 hold
+    /// 切模式 / beginConfiguration 安静窗：只转发，不 paint
     static func isSessionQuiet() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -80,23 +81,15 @@ enum CameraReplaceHooks {
 
     /// 安静结束后短暂关融合，降低点直播首秒主线程叠画压力（稳定后自动恢复）
     private static var blendMuteUntil: CFAbsoluteTime = 0
-    /// 同一波配置（嵌套 begin/commit）共用锚点，禁止安静窗被反复叠加成数秒定格
-    private static var quietAnchor: CFAbsoluteTime = 0
-    /// 单波安静硬顶：只盖住切 session / 进页配置，过后必须恢复最新帧替换
-    private static let quietMaxSpan: CFAbsoluteTime = 1.20
 
     static func markSessionQuiet(seconds: CFAbsoluteTime) {
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        if now >= quietUntil {
-            quietAnchor = now
-        }
-        let requested = now + max(0.05, seconds)
-        let hardCap = quietAnchor + quietMaxSpan
-        let until = min(requested, hardCap)
+        // 只盖住切会话那一小段；禁止再拉到 1～2s+（会定格拍摄页 / 低帧）
+        let until = now + max(0.05, min(seconds, 0.55))
         if until > quietUntil { quietUntil = until }
-        // 安静后再禁融合一小段（副线程路径）；主线程本就不走融合
-        let mute = quietUntil + 0.40
+        // 安静后再禁融合一小段即可，勿长时间挡住画面
+        let mute = until + 0.28
         if mute > blendMuteUntil { blendMuteUntil = mute }
         lock.unlock()
     }
@@ -278,8 +271,8 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
-            // 切 session / 进拍摄页：短安静窗，只盖配置；硬顶见 quietMaxSpan，禁止叠成数秒定格
-            markSessionQuiet(seconds: 0.85)
+            // 切分段拍会进这里：短安静窗内禁止 paint，让宿主改 session 不被 memcpy 拖死
+            markSessionQuiet(seconds: 0.40)
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
         }
@@ -294,8 +287,8 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            // commit 后再盖极短一段，等首批回调过完即恢复最新帧
-            markSessionQuiet(seconds: 0.55)
+            // commit 后再安静一小段，等首批回调过完（勿拉长定格）
+            markSessionQuiet(seconds: 0.28)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -311,7 +304,7 @@ enum CameraReplaceHooks {
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
             // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
-            markSessionQuiet(seconds: 1.00)
+            markSessionQuiet(seconds: 0.45)
             let cfgArmed = MediaConfigStore.shared.config
             if cfgArmed.replaceCameraEnabled {
                 lock.lock()
@@ -336,7 +329,7 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
-            markSessionQuiet(seconds: 0.75)
+            markSessionQuiet(seconds: 0.32)
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
@@ -387,16 +380,11 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
-        // 对齐 VCam：保留宿主原回调队列同步处理（禁止改挂 paintQueue）。
-        // 安静期：只转发，禁止 hold/paint/memcpy（录视频主线程 hold 旧帧 = 整机卡死）。
-        // 安静结束后：主线程只合入后台已准备好的最新一帧（丢掉中间帧），禁止融合/ring。
-        if CameraReplaceHooks.isReplaceActive() {
-            if CameraReplaceHooks.isSessionQuiet() {
-                // 配置窗：不改 buffer
-            } else {
-                let ok = CamBufferPainter.paintInPlace(sampleBuffer)
-                if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
-            }
+        // 对齐 VCam：宿主原回调队列同步处理（禁止改挂 paintQueue 再回灌 main）。
+        // 安静窗：只转发、不 paint、不 hold（与 Mic 同口径；长 hold 会定格/假死）。
+        if CameraReplaceHooks.isReplaceActive(), !CameraReplaceHooks.isSessionQuiet() {
+            let ok = CamBufferPainter.paintInPlace(sampleBuffer)
+            if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
         }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
         CamPipelineDiag.shared.notePaintCost(ms: ms, onMain: onMain)
@@ -415,7 +403,7 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
 }
 
 /// 采集回调专用：只拷贝像素，禁止 CI。
-/// 失败时用上一成功帧或涂黑，绝不把真机画面交给下游。
+/// 主线程：只合入 prepared；失败/无帧则透传（保触摸）。副线程才可 hold 上一帧。
 enum CamBufferPainter {
     private static var loggedFormat = false
     private static let lock = NSLock()
@@ -440,11 +428,11 @@ enum CamBufferPainter {
         NSLog("BXFloatCam sourceEpoch bump clearHold")
     }
 
-    /// 单帧软预算：超时 hold 上一完整帧（主线程更紧），避免二次拍摄卡触摸。
+    /// 单帧软预算：超时则透传/副线程才 hold，避免主线程拖死触摸。
     private static let budgetSec: CFTimeInterval = 0.004
     private static var loggedBlend = false
 
-    /// 安静窗 / 欠帧：只 hold 上一成功帧（对齐参照 hold_last），有则覆盖 dst。
+    /// 副线程欠帧兜底：hold 上一成功帧；主线程禁止走这条（会定格/假死）。
     @discardableResult
     static func holdLastInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
@@ -475,23 +463,6 @@ enum CamBufferPainter {
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
         let onMain = Thread.isMainThread
-        // 主线程回调（录视频/拍摄页常见）：禁止融合/ring/加锁重活；
-        // 只把后台已准备好的「最新一帧」轻量整帧拷入（中间帧由 prepared 单槽自然丢掉）。
-        if onMain {
-            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
-               copyPixels(from: prepared, to: dst)
-            {
-                // 不在主线程 rememberGood/retainCopy：避免二次大拷与锁；下次继续取最新 prepared
-                return true
-            }
-            if let good = copyLastGood(width: dw, height: dh, format: fmt),
-               copyPixels(from: good, to: dst)
-            {
-                return true
-            }
-            // 无素材：透传，绝不在主线程再走融合/ring
-            return true
-        }
         // 真融合：dst 当前就是真机画面；推流帧叠上去 dst = stream*frac + real*(1-frac)
         // 禁止先 clone 再画（主线程会卡死）。未开融合则 frac=1 等价整帧替换。
         let blendFrac = CameraReplaceHooks.shouldMuteBlend() ? 1.0 : CamReplacePolicy.streamBlendFraction()
@@ -502,10 +473,15 @@ enum CamBufferPainter {
             NSLog("BXFloatCam paint dstFormat=%u %dx%d blend=%d frac=%.2f", fmt, dw, dh, wantBlend ? 1 : 0, Double(blendFrac))
         }
 
-        // 取推流帧：prepared → ring → lastGood
+        // 取推流帧：
+        // - 主线程：只合入已准备好的最新帧；没有则透传（禁止 ring / 长期 hold 旧帧）
+        // - 副线程：prepared → ring → lastGood
         let stream: CVPixelBuffer? = {
             if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt) {
                 return prepared
+            }
+            if onMain {
+                return nil
             }
             if (CACurrentMediaTime() - t0) < budgetSec {
                 let t = AVSyncClock.shared.mediaTime()
@@ -521,19 +497,25 @@ enum CamBufferPainter {
         }()
 
         guard let stream else {
-            return true // 无素材：透传真机
+            return true // 无就绪素材：透传真机（主线程尤其如此）
+        }
+
+        // 取帧后已超软预算：主线程透传；副线程才 hold
+        if (CACurrentMediaTime() - t0) >= budgetSec {
+            if onMain { return true }
+            return holdLastInPlace(sampleBuffer)
         }
 
         if wantBlend {
-            // 真融合：在真机 dst 上按占比叠推流（副线程路径；主线程已在上面早退）
-            let step = 1
+            // 真融合：在真机 dst 上按占比叠推流（主/副线程同一路径，无 clone）
+            let step = onMain ? 2 : 1 // 主线程隔行加速，观感仍是融合
             if blendStreamOntoReal(stream: stream, realDst: dst, streamFrac: blendFrac, rowStep: step) {
                 if !loggedBlend {
                     loggedBlend = true
-                    NSLog("BXFloatCam true-blend on fmt=%u frac=%.2f main=0 step=%d", fmt, Double(blendFrac), step)
+                    NSLog("BXFloatCam true-blend on fmt=%u frac=%.2f main=%d step=%d", fmt, Double(blendFrac), onMain ? 1 : 0, step)
                 }
-                // dst 是宿主采集缓冲，不能直接强引用；拷一份供 hold_last
-                if let kept = retainCopy(dst) {
+                // 主线程禁止 retainCopy（额外分配+整帧拷易卡触摸）；副线程才留 hold 底
+                if !onMain, let kept = retainCopy(dst) {
                     rememberGood(kept, width: dw, height: dh, format: fmt)
                 }
                 return true
@@ -542,9 +524,13 @@ enum CamBufferPainter {
         }
 
         if copyPixels(from: stream, to: dst) {
-            rememberGood(stream, width: dw, height: dh, format: fmt)
+            if !onMain {
+                rememberGood(stream, width: dw, height: dh, format: fmt)
+            }
             return true
         }
+        // 主线程拷失败也透传；副线程才 hold
+        if onMain { return true }
         return holdLastInPlace(sampleBuffer)
     }
 
