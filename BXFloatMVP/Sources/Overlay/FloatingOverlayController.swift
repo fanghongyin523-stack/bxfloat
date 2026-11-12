@@ -127,8 +127,11 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private func reattachIfNeeded(reason: String) {
         guard MediaConfigStore.shared.config.overlayEnabled else { return }
         if pickerChromeHidden { return }
-        // 点直播 / 切模式安静期：连 windowLevel 都不要碰
-        if CameraReplaceHooks.isSessionQuiet() { return }
+        // 点拍摄 / 录视频 / 直播：安静期或替换开着时，连 windowLevel / scene 切换都不要碰。
+        // 抖音进拍摄会狂闪 UIWindow；再动悬浮窗 = 整屏假死，甚至要强制大退。
+        if CameraReplaceHooks.isSessionQuiet() || CameraReplaceHooks.isReplaceActive() {
+            return
+        }
 
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }

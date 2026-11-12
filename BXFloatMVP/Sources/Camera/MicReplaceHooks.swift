@@ -248,8 +248,12 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         MicReplaceHooks.noteCallback()
-        // 与视频同一安静窗：切分段拍配置期内不改音频 buffer，只转发
-        if MicReplaceHooks.isInjectActive(), !CameraReplaceHooks.isSessionQuiet() {
+        // 与视频同一安静窗：切分段拍配置期内不改音频 buffer，只转发。
+        // 主线程回调（录视频常见）：只转发，禁止 memcpy 音频，避免整机卡死。
+        if MicReplaceHooks.isInjectActive(),
+           !CameraReplaceHooks.isSessionQuiet(),
+           !Thread.isMainThread
+        {
             let mode = MicReplaceHooks.activeMode()
             if MicBufferPainter.paintInPlace(sampleBuffer, mode: mode) {
                 MicReplaceHooks.notePaintOK()
