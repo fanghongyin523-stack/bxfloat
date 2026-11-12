@@ -71,7 +71,7 @@ enum CameraReplaceHooks {
         return replaceActive
     }
 
-    /// 切模式 / beginConfiguration 安静窗：只转发，不 paint
+    /// 切模式 / beginConfiguration 安静窗：只转发，不 paint / 不 hold
     static func isSessionQuiet() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -80,14 +80,23 @@ enum CameraReplaceHooks {
 
     /// 安静结束后短暂关融合，降低点直播首秒主线程叠画压力（稳定后自动恢复）
     private static var blendMuteUntil: CFAbsoluteTime = 0
+    /// 同一波配置（嵌套 begin/commit）共用锚点，禁止安静窗被反复叠加成数秒定格
+    private static var quietAnchor: CFAbsoluteTime = 0
+    /// 单波安静硬顶：只盖住切 session / 进页配置，过后必须恢复最新帧替换
+    private static let quietMaxSpan: CFAbsoluteTime = 1.20
 
     static func markSessionQuiet(seconds: CFAbsoluteTime) {
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        let until = now + max(0.05, seconds)
+        if now >= quietUntil {
+            quietAnchor = now
+        }
+        let requested = now + max(0.05, seconds)
+        let hardCap = quietAnchor + quietMaxSpan
+        let until = min(requested, hardCap)
         if until > quietUntil { quietUntil = until }
-        // 安静后再禁融合 ~1.5s：点录视频进房首秒主线程叠画最容易整机卡死
-        let mute = until + 1.50
+        // 安静后再禁融合一小段（副线程路径）；主线程本就不走融合
+        let mute = quietUntil + 0.40
         if mute > blendMuteUntil { blendMuteUntil = mute }
         lock.unlock()
     }
@@ -269,8 +278,8 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
-            // 切分段拍 / 进拍摄页会进这里：安静窗内禁止 paint，让宿主改 session 不被 memcpy 拖死
-            markSessionQuiet(seconds: 3.50)
+            // 切 session / 进拍摄页：短安静窗，只盖配置；硬顶见 quietMaxSpan，禁止叠成数秒定格
+            markSessionQuiet(seconds: 0.85)
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
         }
@@ -285,8 +294,8 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
-            // commit 后再安静一段，等首批回调过完（录视频配置窗更长）
-            markSessionQuiet(seconds: 2.00)
+            // commit 后再盖极短一段，等首批回调过完即恢复最新帧
+            markSessionQuiet(seconds: 0.55)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -302,7 +311,7 @@ enum CameraReplaceHooks {
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
             // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
-            markSessionQuiet(seconds: 3.50)
+            markSessionQuiet(seconds: 1.00)
             let cfgArmed = MediaConfigStore.shared.config
             if cfgArmed.replaceCameraEnabled {
                 lock.lock()
@@ -327,7 +336,7 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
-            markSessionQuiet(seconds: 2.50)
+            markSessionQuiet(seconds: 0.75)
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
@@ -378,15 +387,16 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
-        // 对齐 VCam：宿主回调队列同步处理。安静窗 hold 上一帧（非透传真机）。
+        // 对齐 VCam：保留宿主原回调队列同步处理（禁止改挂 paintQueue）。
+        // 安静期：只转发，禁止 hold/paint/memcpy（录视频主线程 hold 旧帧 = 整机卡死）。
+        // 安静结束后：主线程只合入后台已准备好的最新一帧（丢掉中间帧），禁止融合/ring。
         if CameraReplaceHooks.isReplaceActive() {
-            let ok: Bool
             if CameraReplaceHooks.isSessionQuiet() {
-                ok = CamBufferPainter.holdLastInPlace(sampleBuffer)
+                // 配置窗：不改 buffer
             } else {
-                ok = CamBufferPainter.paintInPlace(sampleBuffer)
+                let ok = CamBufferPainter.paintInPlace(sampleBuffer)
+                if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
             }
-            if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
         }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
         CamPipelineDiag.shared.notePaintCost(ms: ms, onMain: onMain)
@@ -465,12 +475,13 @@ enum CamBufferPainter {
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
         let onMain = Thread.isMainThread
-        // 主线程回调（录视频/拍摄页常见）：禁止融合叠画与 ring 取帧，只 hold/整帧替换，避免整机卡死。
+        // 主线程回调（录视频/拍摄页常见）：禁止融合/ring/加锁重活；
+        // 只把后台已准备好的「最新一帧」轻量整帧拷入（中间帧由 prepared 单槽自然丢掉）。
         if onMain {
             if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
                copyPixels(from: prepared, to: dst)
             {
-                rememberGood(prepared, width: dw, height: dh, format: fmt)
+                // 不在主线程 rememberGood/retainCopy：避免二次大拷与锁；下次继续取最新 prepared
                 return true
             }
             if let good = copyLastGood(width: dw, height: dh, format: fmt),
@@ -478,7 +489,8 @@ enum CamBufferPainter {
             {
                 return true
             }
-            return holdLastInPlace(sampleBuffer)
+            // 无素材：透传，绝不在主线程再走融合/ring
+            return true
         }
         // 真融合：dst 当前就是真机画面；推流帧叠上去 dst = stream*frac + real*(1-frac)
         // 禁止先 clone 再画（主线程会卡死）。未开融合则 frac=1 等价整帧替换。

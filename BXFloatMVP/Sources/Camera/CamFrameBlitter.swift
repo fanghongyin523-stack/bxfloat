@@ -20,6 +20,8 @@ final class CamFrameBlitter {
     private var prepH = 0
     private var prepFmt: OSType = 0
     private var lastSyncKey: Int64 = -1
+    /// 每写入一帧 prepared 递增；主线程用单槽最新帧，中间帧自然丢弃
+    private var preparedGeneration: UInt64 = 0
     private var targetW = 0
     private var targetH = 0
     private var targetFmt: OSType = 0
@@ -55,6 +57,7 @@ final class CamFrameBlitter {
     private func clearPreparedLocked() {
         prepared = nil
         lastSyncKey = -1
+        preparedGeneration &+= 1
         prepW = 0
         prepH = 0
         prepFmt = 0
@@ -75,8 +78,10 @@ final class CamFrameBlitter {
     }
 
     /// 匹配则返回预渲染帧；尺寸突变前仍返回旧帧，杜绝闪真机。
+    /// 主线程调用务必短超时：锁被 blit 占用时宁可 miss，也不堵 UI。
     func copyPrepared(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
-        guard lock.lock(before: Date().addingTimeInterval(0.001)) else { return nil }
+        let wait = Thread.isMainThread ? 0.0005 : 0.001
+        guard lock.lock(before: Date().addingTimeInterval(wait)) else { return nil }
         defer { lock.unlock() }
         guard let prepared else { return nil }
         if prepW == width, prepH == height, prepFmt == format {
@@ -259,6 +264,7 @@ final class CamFrameBlitter {
         prepW = width
         prepH = height
         prepFmt = format
+        preparedGeneration &+= 1
         lock.unlock()
     }
 }
