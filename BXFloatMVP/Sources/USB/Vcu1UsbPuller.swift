@@ -41,6 +41,9 @@ final class Vcu1UsbPuller {
     private var pendingPublishPts: Double = -1
     /// 解码失败 / 不完整 GOP 后：丢掉后续 P，等下一个带参的 IDR 再出帧（勿 hold 花屏帧）。
     private var needIDRAfterFail = false
+    /// 上一帧视频 PTS（秒）；PTS 跳变说明发送端中途丢了参考帧，再解 P 会花屏。
+    private var lastVideoPtsSec: Double = -1
+    private let ptsGapWaitIDRSec: Double = 0.10
 
     private init() {}
 
@@ -426,10 +429,18 @@ final class Vcu1UsbPuller {
             }
             needIDRAfterFail = false
             decodeNAL(nal, ptsSec: ptsSec)
+            if ptsSec >= 0 { lastVideoPtsSec = ptsSec }
         } else if nalType == 1 || (nalType > 0 && nalType < 24) {
             // 残缺 GOP 后的 P/非关键帧：跳过，等 IDR（不要拼不完整帧）
             if needIDRAfterFail { return }
+            // 发送端挖空 GOP 后仍发 P：PTS 会跳；VT 往往“成功”但画面已花，必须等 IDR
+            if ptsSec >= 0, lastVideoPtsSec >= 0, (ptsSec - lastVideoPtsSec) > ptsGapWaitIDRSec {
+                needIDRAfterFail = true
+                NSLog("BXFloatCam VCU1 PTS gap %.0fms → wait IDR", (ptsSec - lastVideoPtsSec) * 1000)
+                return
+            }
             decodeNAL(nal, ptsSec: ptsSec)
+            if ptsSec >= 0 { lastVideoPtsSec = ptsSec }
         }
     }
 
@@ -611,6 +622,7 @@ final class Vcu1UsbPuller {
         lastSPS = nil
         lastPPS = nil
         needIDRAfterFail = false
+        lastVideoPtsSec = -1
     }
 }
 

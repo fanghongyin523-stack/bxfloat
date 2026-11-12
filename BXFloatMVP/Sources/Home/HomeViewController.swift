@@ -159,7 +159,7 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
         switch idx {
         case 0:
             hintLabel.text = "同一 Wi‑Fi，只填电脑 IP。本 App 自动播 RTSP（低延迟）。注入到抖音等仍走 HLS。"
-            field.placeholder = "例如 192.168.3.60"
+            field.placeholder = "例如 192.168.3.41"
             field.keyboardType = .decimalPad
         case 1:
             hintLabel.text = "手动完整地址：http / https / rtsp / m3u8。"
@@ -231,7 +231,7 @@ final class ConnectionViewController: UIViewController, UITextFieldDelegate {
     @objc private func fillLANIP() {
         modeControl.selectedSegmentIndex = 0
         applyModeUI(animated: false)
-        field.text = "192.168.3.60"
+        field.text = "192.168.3.41"
         persist()
         statusLabel.text = "已填局域网 IP"
     }

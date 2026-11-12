@@ -166,18 +166,18 @@ static int BXFloatFFInterrupt(void *opaque) {
     // 秒连：再压探测；抗抖仍靠 ring，不用 nobuffer
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-    // USB(127.0.0.1) 经 usbmux：4s 失败就重连；局域网 1.5s 快失败
+    // USB 与局域网统一 4s 超时、0.35s 探测，避免局域网 1.5s 过短导致完全拉不起来
     BOOL isLoopback = [urlString containsString:@"127.0.0.1"] || [urlString containsString:@"localhost"];
-    const char *timeoutUs = isLoopback ? "4000000" : "1500000";
+    const char *timeoutUs = "4000000";
     av_dict_set(&opts, "stimeout", timeoutUs, 0);
     av_dict_set(&opts, "rw_timeout", timeoutUs, 0);
     av_dict_set(&opts, "max_delay", "250000", 0);
     // 抗抖仍靠 ring；low_delay 压首帧，不用 nobuffer（易抖）
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
     av_dict_set(&opts, "flags", "low_delay", 0);
-    // USB 0.35s / LAN 0.2s 探测：点替换后尽快出首帧
+    // 0.35s 探测：点替换后尽快出首帧，同时给局域网足够时间拿到 SPS
     av_dict_set(&opts, "probesize", "196608", 0);
-    av_dict_set(&opts, "analyzeduration", isLoopback ? "350000" : "200000", 0);
+    av_dict_set(&opts, "analyzeduration", "350000", 0);
 
     AVFormatContext *fmtOpen = avformat_alloc_context();
     if (!fmtOpen) {
