@@ -11,7 +11,7 @@ protocol CamSettingsPanelDelegate: AnyObject {
 /// 设置面板：功能结构对齐目标照片；视觉深灰中间档通透。
 /// - 卡片外穿透；可拖动；默认偏上，少挡抖音底栏/选片
 /// - 定时露真支持手填秒数；选视频前整窗隐藏
-final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate {
     weak var delegate: CamSettingsPanelDelegate?
 
     private let card = UIView()
@@ -49,6 +49,11 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     private let showSecField = UITextField()
     private let timedPreset = UISegmentedControl(items: ["30分", "1小时", "2小时"])
     private let timedHint = UILabel()
+    private let saveTimedButton = UIButton(type: .system)
+    private let ipPadHost = UIView()
+    private let timedPadHost = UIView()
+    private let inlinePad = InlineDigitPadView()
+    private weak var inlineTarget: UITextField?
 
     private let statusLabel = UILabel()
     private let logButton = UIButton(type: .system)
@@ -202,13 +207,15 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         modeHint.textColor = textSecondary
         modeHint.numberOfLines = 0
 
-        // 悬浮窗禁止成为 keyWindow → 本框只展示；改 IP 用抖音窗弹框，避免主页暂停
-        styleField(ipField, placeholder: "电脑 IP（点填写/粘贴）")
-        ipField.isEnabled = false
+        // 悬浮窗禁止成为 keyWindow，不能弹系统键盘/alert。输入框在本卡片内直接改，用板内数字键，点「保存地址」写入。
+        styleField(ipField, placeholder: "电脑 IP，例如 192.168.3.41")
+        ipField.keyboardType = .decimalPad
+        ipField.delegate = self
+        ipField.isEnabled = true
         styleFilledButton(pasteButton, title: "粘贴")
         pasteButton.addTarget(self, action: #selector(pasteTapped), for: .touchUpInside)
-        styleFilledButton(editIPButton, title: "填写")
-        editIPButton.addTarget(self, action: #selector(editIPTapped), for: .touchUpInside)
+        styleFilledButton(editIPButton, title: "保存地址")
+        editIPButton.addTarget(self, action: #selector(saveIPTapped), for: .touchUpInside)
         styleFilledButton(pickLocalButton, title: "选视频（相册/文件）")
         pickLocalButton.addTarget(self, action: #selector(pickLocalTapped), for: .touchUpInside)
 
@@ -282,16 +289,16 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         )
         styleField(intervalField, placeholder: "间隔秒，如 1800")
         intervalField.keyboardType = .numberPad
+        intervalField.delegate = self
+        intervalField.isEnabled = true
         intervalField.addTarget(self, action: #selector(timedParamsChanged), for: .editingDidEnd)
         styleField(showSecField, placeholder: "露真秒，如 2")
         showSecField.keyboardType = .numberPad
+        showSecField.delegate = self
+        showSecField.isEnabled = true
         showSecField.addTarget(self, action: #selector(timedParamsChanged), for: .editingDidEnd)
-        // 定时字段在抖音窗填写更稳：点框弹 alert
-        intervalField.isEnabled = false
-        showSecField.isEnabled = false
-        let editTimed = UIButton(type: .system)
-        styleFilledButton(editTimed, title: "填写间隔/露真秒")
-        editTimed.addTarget(self, action: #selector(editTimedTapped), for: .touchUpInside)
+        styleFilledButton(saveTimedButton, title: "保存定时")
+        saveTimedButton.addTarget(self, action: #selector(saveTimedTapped), for: .touchUpInside)
         styleSegment(timedPreset)
         timedPreset.addTarget(self, action: #selector(timedPresetChanged), for: .valueChanged)
         timedHint.font = .systemFont(ofSize: 11)
@@ -306,8 +313,10 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         intervalField.heightAnchor.constraint(equalToConstant: 40).isActive = true
         showSecField.heightAnchor.constraint(equalToConstant: 40).isActive = true
 
+        timedPadHost.isHidden = true
+        timedPadHost.translatesAutoresizingMaskIntoConstraints = false
         [orient, blendRow, makeCaption("推流画面占比"), blendSlider, blendHint,
-         timedRow, makeCaption("快捷间隔"), timedPreset, timedRowFields, editTimed, timedHint]
+         timedRow, makeCaption("快捷间隔"), timedPreset, timedRowFields, saveTimedButton, timedPadHost, timedHint]
             .forEach { advancedBox.addArrangedSubview($0) }
 
         statusLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
@@ -327,9 +336,13 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         styleOutlineButton(monitorButton, title: "听:关")
         monitorButton.addTarget(self, action: #selector(monitorTapped), for: .touchUpInside)
 
+        ipPadHost.isHidden = true
+        ipPadHost.translatesAutoresizingMaskIntoConstraints = false
+        ipPadHost.heightAnchor.constraint(equalToConstant: 176).isActive = true
+        timedPadHost.heightAnchor.constraint(equalToConstant: 176).isActive = true
         let stack = UIStackView(arrangedSubviews: [
             titleLabel, modeControl, modeHint,
-            makeIPRow(), pickLocalButton,
+            makeIPRow(), ipPadHost, pickLocalButton,
             replaceRow, streamAudioRow, muteRow,
             advancedToggle, advancedBox,
             statusLabel, logButton,
@@ -374,7 +387,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         row.axis = .horizontal
         row.spacing = 8
         pasteButton.widthAnchor.constraint(equalToConstant: 56).isActive = true
-        editIPButton.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        editIPButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
         pasteButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
         editIPButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
         ipField.heightAnchor.constraint(equalToConstant: 40).isActive = true
@@ -474,7 +487,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         case 2:
             modeHint.text = "本地视频：先选文件。开「替换摄像头」才播放；「推流声音」只控制用推流声还是原麦。"
         default:
-            modeHint.text = "局域网：填电脑 IP。开「替换摄像头」才拉流；「推流声音」只出声、不触发拉流。"
+            modeHint.text = "局域网：在输入框直接填电脑 IP（例如 192.168.3.41，不要写 rtsp://），再点「保存地址」。开「替换摄像头」才拉流；「推流声音」只出声、不触发拉流。"
         }
     }
 
@@ -557,6 +570,7 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
     }
 
     @objc private func modeChanged() {
+        hideInlinePad()
         updateModeHint()
         // 三模式互斥：一切换就提交，FloatingOverlay 会停掉另外两路并清残帧
         stopPullHintAndCommit()
@@ -601,52 +615,93 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         if !clip.isEmpty {
             ipField.text = clip
             commit()
+            hideInlinePad()
+            let ip = MediaConfigStore.shared.config.computerIP
+            modeHint.text = "已保存电脑 IP：\(ip)。开「替换摄像头」后按 rtsp://\(ip):18554/stream 拉流。"
         }
     }
 
-    @objc private func editIPTapped() {
-        guard let host = presentationHost() else { return }
-        let alert = UIAlertController(title: "电脑 IP", message: "在抖音窗口填写，避免悬浮窗抢焦点", preferredStyle: .alert)
-        alert.addTextField { [weak self] tf in
-            tf.keyboardType = .decimalPad
-            tf.text = self?.ipField.text
-            tf.placeholder = "192.168.x.x"
+    @objc private func saveIPTapped() {
+        ipField.text = (ipField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        commit()
+        hideInlinePad()
+        let ip = MediaConfigStore.shared.config.computerIP
+        if ip.isEmpty {
+            modeHint.text = "还没填电脑 IP。在输入框直接填写（例如 192.168.3.41），再点「保存地址」。"
+        } else {
+            modeHint.text = "已保存电脑 IP：\(ip)。开「替换摄像头」后按 rtsp://\(ip):18554/stream 拉流。"
         }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self] _ in
-            guard let self else { return }
-            self.ipField.text = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.commit()
-        })
-        host.present(alert, animated: true)
     }
 
-    @objc private func editTimedTapped() {
-        guard let host = presentationHost() else { return }
-        let alert = UIAlertController(
-            title: "定时露真",
-            message: "间隔秒数 / 每次露真秒数（可自定义）",
-            preferredStyle: .alert
-        )
-        alert.addTextField { [weak self] tf in
-            tf.keyboardType = .numberPad
-            tf.text = self?.intervalField.text
-            tf.placeholder = "间隔秒 如 1800"
+    @objc private func saveTimedTapped() {
+        timedParamsChanged()
+        hideInlinePad()
+        timedHint.text = "已保存：每隔 \(parsedIntervalSec()) 秒露出真镜头 \(parsedShowSec()) 秒。露真时全屏真镜头，内录音频同步切现场。"
+    }
+
+    func textFieldShouldBeginEditing(_ textField: UITextField) -> Bool {
+        showInlinePad(for: textField)
+        return false
+    }
+
+    private func showInlinePad(for field: UITextField) {
+        inlineTarget = field
+        inlinePad.showsDot = (field === ipField)
+        let host = (field === ipField) ? ipPadHost : timedPadHost
+        ipPadHost.isHidden = host !== ipPadHost
+        timedPadHost.isHidden = host !== timedPadHost
+        if inlinePad.superview !== host {
+            inlinePad.removeFromSuperview()
+            host.addSubview(inlinePad)
+            inlinePad.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                inlinePad.topAnchor.constraint(equalTo: host.topAnchor),
+                inlinePad.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+                inlinePad.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                inlinePad.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            ])
         }
-        alert.addTextField { [weak self] tf in
-            tf.keyboardType = .numberPad
-            tf.text = self?.showSecField.text
-            tf.placeholder = "露真秒 如 2"
+        [ipField, intervalField, showSecField].forEach { $0.layer.borderWidth = 0 }
+        field.layer.borderWidth = 1
+        field.layer.borderColor = accent.cgColor
+        inlinePad.onGlyph = { [weak self] g in self?.appendInlineGlyph(g) }
+        inlinePad.onBackspace = { [weak self] in self?.deleteInlineGlyph() }
+    }
+
+    private func hideInlinePad() {
+        inlineTarget = nil
+        ipPadHost.isHidden = true
+        timedPadHost.isHidden = true
+        [ipField, intervalField, showSecField].forEach { $0.layer.borderWidth = 0 }
+    }
+
+    private func appendInlineGlyph(_ glyph: String) {
+        guard let field = inlineTarget else { return }
+        let cur = field.text ?? ""
+        if field === ipField {
+            if glyph == "." {
+                if cur.isEmpty || cur.last == "." { return }
+                if cur.filter({ $0 == "." }).count >= 3 { return }
+            } else if cur.replacingOccurrences(of: ".", with: "").count >= 12 {
+                return
+            }
+        } else if glyph == "." {
+            return
+        } else if cur.count >= 6 {
+            return
         }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self] _ in
-            guard let self else { return }
-            self.intervalField.text = alert.textFields?[0].text
-            self.showSecField.text = alert.textFields?[1].text
-            self.timedPreset.selectedSegmentIndex = UISegmentedControl.noSegment
-            self.timedParamsChanged()
-        })
-        host.present(alert, animated: true)
+        field.text = cur + glyph
+        if field !== ipField {
+            timedPreset.selectedSegmentIndex = UISegmentedControl.noSegment
+        }
+    }
+
+    private func deleteInlineGlyph() {
+        guard let field = inlineTarget, let t = field.text, !t.isEmpty else { return }
+        field.text = String(t.dropLast())
+        if field !== ipField {
+            timedPreset.selectedSegmentIndex = UISegmentedControl.noSegment
+        }
     }
 
     @objc private func rotateTapped() {
@@ -809,5 +864,69 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
             return topMost(selected)
         }
         return root
+    }
+}
+
+/// 设置卡片内的数字键：悬浮窗不做 keyWindow，不能弹系统键盘。
+private final class InlineDigitPadView: UIView {
+    var showsDot: Bool = true {
+        didSet { dotButton.isEnabled = showsDot; dotButton.alpha = showsDot ? 1 : 0.35 }
+    }
+    var onGlyph: ((String) -> Void)?
+    var onBackspace: (() -> Void)?
+
+    private let dotButton = UIButton(type: .system)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        let glyphs = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "删除"]
+        let grid = UIStackView()
+        grid.axis = .vertical
+        grid.spacing = 6
+        grid.distribution = .fillEqually
+        var row: UIStackView?
+        for (i, title) in glyphs.enumerated() {
+            if i % 3 == 0 {
+                row = UIStackView()
+                row!.axis = .horizontal
+                row!.spacing = 6
+                row!.distribution = .fillEqually
+                grid.addArrangedSubview(row!)
+            }
+            let b: UIButton
+            if title == "." {
+                b = dotButton
+                b.setTitle(".", for: .normal)
+            } else {
+                b = UIButton(type: .system)
+                b.setTitle(title, for: .normal)
+            }
+            b.setTitleColor(.white, for: .normal)
+            b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+            b.backgroundColor = UIColor(white: 1.0, alpha: 0.12)
+            b.layer.cornerRadius = 8
+            b.addTarget(self, action: #selector(tap(_:)), for: .touchUpInside)
+            row!.addArrangedSubview(b)
+        }
+        addSubview(grid)
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            grid.leadingAnchor.constraint(equalTo: leadingAnchor),
+            grid.trailingAnchor.constraint(equalTo: trailingAnchor),
+            grid.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            heightAnchor.constraint(equalToConstant: 176),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:)") }
+
+    @objc private func tap(_ sender: UIButton) {
+        let t = sender.title(for: .normal) ?? ""
+        if t == "删除" {
+            onBackspace?()
+        } else {
+            onGlyph?(t)
+        }
     }
 }
