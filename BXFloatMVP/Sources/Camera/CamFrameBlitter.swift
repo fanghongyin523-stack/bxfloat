@@ -108,7 +108,8 @@ final class CamFrameBlitter {
             prepareIfNeeded(width: tw, height: th, format: tf)
         }
 
-        queue.asyncAfter(deadline: .now() + 0.033) { [weak self] in
+        // ~50Hz 预渲染：比 30Hz 更跟得上解码出帧，利于流畅（仍在 blit 队列，不占主线程）
+        queue.asyncAfter(deadline: .now() + 0.020) { [weak self] in
             self?.tick()
         }
     }
@@ -161,10 +162,21 @@ final class CamFrameBlitter {
     }
 
     private func makeBuffer(pool: CVPixelBufferPool?, width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
+        let tag: (CVPixelBuffer) -> CVPixelBuffer = { buf in
+            // 420 目标缓冲也打 BT.709，避免二次 render 时无附件偏色
+            if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                || format == kCVPixelFormatType_420YpCbCr8Planar
+                || format == kCVPixelFormatType_420YpCbCr8PlanarFullRange
+            {
+                CamFrameStore.ensureBT709Attachments(buf)
+            }
+            return buf
+        }
         if let pool {
             var buf: CVPixelBuffer?
             let err = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buf)
-            if err == kCVReturnSuccess, let buf { return buf }
+            if err == kCVReturnSuccess, let buf { return tag(buf) }
         }
         var buf: CVPixelBuffer?
         let attrs: [CFString: Any] = [
@@ -173,8 +185,8 @@ final class CamFrameBlitter {
         ]
         guard CVPixelBufferCreate(
             kCFAllocatorDefault, width, height, format, attrs as CFDictionary, &buf
-        ) == kCVReturnSuccess else { return nil }
-        return buf
+        ) == kCVReturnSuccess, let buf else { return nil }
+        return tag(buf)
     }
 
     private func prepareIfNeeded(width: Int, height: Int, format: OSType) {

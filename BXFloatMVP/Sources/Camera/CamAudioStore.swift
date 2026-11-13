@@ -17,16 +17,16 @@ final class CamAudioStore {
     private let lock = NSLock()
     private var chunks: [Chunk] = []
     private var pending: [Chunk] = []
-    /// 环硬上限（秒）；超过再 prune
-    private let maxSeconds: Double = 2.50
+    /// 环硬上限（秒）；超过再 prune（收端不堆 2s+）
+    private let maxSeconds: Double = 1.20
     /// pending 秒数上限：超则丢弃（对标 VCamTang backlog capped dropped）
-    private let maxPendingSeconds: Double = 1.00
+    private let maxPendingSeconds: Double = 0.60
     /// pending 条数上限（对标 VCam pending 计数裁剪）
     private let maxPendingChunks: Int = 24
-    /// 入环活延迟上限：对标 VCamTang capLiveLatency
-    private let capLiveLatencySec: Double = 2.00
-    /// 拉环侧最少保留：与 target_ms≈1000 同簇，禁止自创加深
-    private let minLiveLatencySec: Double = 1.00
+    /// 入环活延迟上限：与视频 targetDelay~200ms / maxDelay~480ms 同簇，利于音画同步
+    private let capLiveLatencySec: Double = 0.80
+    /// 拉环侧最少保留：对齐 AVSync ~200ms，禁止再按 1s 垫高延迟
+    private let minLiveLatencySec: Double = 0.20
     private let defaultRate = 48_000
     /// 解码入环采样率（对标 VCamTang：环内保持素材钟，播出再 SRC）
     private var decodeRate: Int = 0
@@ -39,9 +39,8 @@ final class CamAudioStore {
     private(set) var storeChannels = 1
 
     private var playhead: Double = -1
-    /// 固定目标延迟：对标 VCamTang target_ms≈1000
-    /// 与 AVSyncClock.targetDelay 对齐：直连约 250ms，禁止再按 1s 环尾读
-    private let fixedLatencySec: Double = 0.25
+    /// 固定目标延迟：与 AVSyncClock.targetDelay ~200ms 对齐，禁止再按 1s 环尾读
+    private let fixedLatencySec: Double = 0.20
     /// 入环 PTS 与环尾偏差 ≤ 此值则粘到连续样本钟（对标 alignLiveRing 连续样本钟）
     private let stitchPtsSec: Double = 0.080
     /// peek 微缝：跳粘不插静音
