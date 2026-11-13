@@ -301,6 +301,9 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             if let s = session as? AVCaptureSession {
                 ShootSurfaceDetector.trackSession(s)
+                // 类名没命中时，视频会话一开就保持闩锁，停表，直到采集真正结束。
+                // 这里不 setDelegate。
+                ShootSurfaceDetector.noteHardwareCaptureBegan(session: s)
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
             // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
@@ -330,6 +333,7 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
             markSessionQuiet(seconds: 0.32)
+            ShootSurfaceDetector.noteHardwareCaptureEnded()
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
