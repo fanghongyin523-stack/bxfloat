@@ -108,8 +108,10 @@ final class CamFrameBlitter {
             prepareIfNeeded(width: tw, height: th, format: tf)
         }
 
-        // ~50Hz 预渲染：比 30Hz 更跟得上解码出帧，利于流畅（仍在 blit 队列，不占主线程）
-        queue.asyncAfter(deadline: .now() + 0.020) { [weak self] in
+        // 推流替换 / 开直播保持 ~50Hz。拍摄、分段拍、分屏拍回到 ~30Hz，
+        // 避免预渲染和抖音自己的相机/GPU 抢时间。仍在 blit 队列，不占主线程。
+        let interval = ShootSurfaceDetector.isNativeShootCapture() ? 0.033 : 0.020
+        queue.asyncAfter(deadline: .now() + interval) { [weak self] in
             self?.tick()
         }
     }

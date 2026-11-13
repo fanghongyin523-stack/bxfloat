@@ -162,6 +162,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         // 类名能判定就在重挂之前打标。开直播和拍摄都走这里。
         if ShootSurfaceDetector.windowLooksLikeCapture(w) {
             ShootSurfaceDetector.markShootPageEntered(reason: "window:\(NSStringFromClass(type(of: w)))")
+            if let root = w.rootViewController {
+                ShootSurfaceDetector.noteBlitSurface(root)
+            }
             suppressReattachForShoot()
             return
         }
