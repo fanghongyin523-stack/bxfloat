@@ -31,6 +31,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private var panelVisible = false
     private var pickerChromeHidden = false
     private var reattachTimer: Timer?
+    /// 避免 isShootSession 扫层级时同步重入，把定时器启动嵌套起来。
+    private var startingReattachTimer = false
     private var pullKey: String?
     /// 换源代次：作废 USB 延迟回调，防止旧模式串到新模式
     private var sourceGeneration: UInt64 = 0
@@ -60,15 +62,32 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             name: UIWindow.didBecomeVisibleNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowHidden),
+            name: UIWindow.didBecomeHiddenNotification,
+            object: nil
+        )
+        ShootSurfaceDetector.installEntryHookIfNeeded()
     }
 
-    private func isShootOrQuiet() -> Bool {
-        CameraReplaceHooks.isSessionQuiet()
-            || CameraReplaceHooks.isReplaceActive()
+    /// 拍摄页闩锁 / 会话安静窗 / 预览层。替换开关单独不算，离开拍摄后还要恢复 3s 保活。
+    private func isShootSession() -> Bool {
+        ShootSurfaceDetector.isShootPageLatched()
+            || CameraReplaceHooks.isSessionQuiet()
             || ShootSurfaceDetector.isCameraSurfaceVisible()
     }
 
+    private func isShootOrQuiet() -> Bool {
+        isShootSession() || CameraReplaceHooks.isReplaceActive()
+    }
+
     func attach(to window: UIWindow) {
+        // 拍摄/分段拍摄：停掉 3s 重挂，不要迁 windowScene、不要 makeKey、不要 syncReplace。
+        if isShootSession() {
+            suppressReattachForShoot()
+            return
+        }
         // 拍摄/录视频中再 attach 会改 windowScene 或 makeKey：预览层仍流畅，界面整页假死。
         if isShootOrQuiet(), floatWindow != nil {
             return
@@ -76,7 +95,13 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         ensureFloatWindow(preferring: window.windowScene)
         CameraReplaceHooks.installIfNeeded()
         MicReplaceHooks.installIfNeeded()
+        ShootSurfaceDetector.installEntryHookIfNeeded()
+        if isShootSession() {
+            suppressReattachForShoot()
+            return
+        }
         if isShootOrQuiet() {
+            // 只是替换开着、人不在拍摄页：仍然要有保活定时器。拍摄/安静时 start 会直接拒绝。
             startReattachTimer()
             return
         }
@@ -104,21 +129,45 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
     @objc private func configChanged() { apply(MediaConfigStore.shared.config) }
     @objc private func appActive() {
+        if isShootSession() {
+            suppressReattachForShoot()
+            return
+        }
+        resumeReattachAfterShoot()
         if isShootOrQuiet() { return }
         reattachIfNeeded(reason: "active")
         // 点直播/替换开着时禁止 makeKey：抢抖音直播窗焦点 → 整页假死，退出重进才好
         restoreHostKeyWindow()
     }
     @objc private func sceneActive() {
+        if isShootSession() {
+            suppressReattachForShoot()
+            return
+        }
+        resumeReattachAfterShoot()
         if isShootOrQuiet() { return }
         reattachIfNeeded(reason: "scene")
     }
     @objc private func windowVisible(_ note: Notification) {
-        guard let w = note.object as? UIWindow, w !== floatWindow else { return }
+        guard let w = note.object as? UIWindow,
+              w !== floatWindow,
+              !(w is BXFloatPassthroughWindow) else { return }
+        // 拍摄页窗口出现时，类名已经能判定，不必等预览层。先打标再决定要不要重挂。
+        if !ShootSurfaceDetector.isShootPageLatched(),
+           let root = w.rootViewController,
+           ShootSurfaceDetector.entryLooksLikeShoot(root)
+        {
+            ShootSurfaceDetector.markShootPageEntered(reason: "window")
+        }
         if ShootSurfaceDetector.isCameraSurfaceVisible() {
             CameraReplaceHooks.markSessionQuiet(seconds: 1.20)
         }
-        // 窗口闪现很频繁：只保活悬浮窗，禁止每次 makeKey（按住快门会卡）
+        // 窗口闪现很频繁：拍摄全程停掉 3s 定时器，禁止迁窗 / makeKey。
+        if isShootSession() {
+            suppressReattachForShoot()
+            return
+        }
+        resumeReattachAfterShoot()
         if isShootOrQuiet() { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.isShootOrQuiet() else { return }
@@ -126,11 +175,57 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         }
     }
 
-    private func startReattachTimer() {
+    @objc private func windowHidden(_ note: Notification) {
+        guard let w = note.object as? UIWindow,
+              w !== floatWindow,
+              !(w is BXFloatPassthroughWindow) else { return }
+        if isShootSession() { return }
+        resumeReattachAfterShoot()
+    }
+
+    /// 拍摄/安静期间：作废并且不要再排 3s 重挂。离开拍摄后才恢复。
+    func suppressReattachForShoot() {
+        let had = reattachTimer != nil
+        stopReattachTimer()
+        if had {
+            NSLog("BXFloatCam reattach timer cancelled (shoot)")
+        }
+    }
+
+    func resumeReattachAfterShoot() {
+        if isShootSession() { return }
+        guard MediaConfigStore.shared.config.overlayEnabled else { return }
+        guard reattachTimer == nil else { return }
+        NSLog("BXFloatCam reattach timer resumed")
+        startReattachTimer()
+    }
+
+    private func stopReattachTimer() {
         reattachTimer?.invalidate()
-        // 3s 足够保活悬浮球；别用 1s 高频扫（主线程压力）
+        reattachTimer = nil
+    }
+
+    private func startReattachTimer() {
+        if startingReattachTimer { return }
+        startingReattachTimer = true
+        defer { startingReattachTimer = false }
+        if isShootSession() {
+            let had = reattachTimer != nil
+            stopReattachTimer()
+            if had {
+                NSLog("BXFloatCam reattach timer cancelled (shoot)")
+            }
+            return
+        }
+        reattachTimer?.invalidate()
+        // 3s 足够保活悬浮球；别用 1s 高频扫（主线程压力）。拍摄全程不排这个定时器。
         reattachTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.reattachIfNeeded(reason: "timer")
+            guard let self else { return }
+            if self.isShootSession() {
+                self.suppressReattachForShoot()
+                return
+            }
+            self.reattachIfNeeded(reason: "timer")
         }
         if let t = reattachTimer {
             RunLoop.main.add(t, forMode: .common)
@@ -206,6 +301,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     private func ensureFloatWindow(preferring scene: UIWindowScene?) {
+        // 拍摄全程不要新建悬浮窗，也不要把已有窗迁到别的 scene。
+        if isShootSession() { return }
         let activeScene = scene
             ?? UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }

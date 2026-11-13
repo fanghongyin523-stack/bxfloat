@@ -33,6 +33,8 @@ final class BXInjectBootstrap: NSObject {
         DispatchQueue.main.async {
             CameraReplaceHooks.installIfNeeded()
             MicReplaceHooks.installIfNeeded()
+            // 拍摄页类名钩子要在第一次 present/push 之前装上，不能等预览层。
+            ShootSurfaceDetector.installEntryHookIfNeeded()
             activate(reason: "ctor")
             installLifecycleObserversIfNeeded()
         }
@@ -83,12 +85,18 @@ final class BXInjectBootstrap: NSObject {
             MediaConfigStore.shared.save(cfg, postNotification: false)
         }
 
-        // 拍摄/录视频期间禁止再次 attach：会改 windowScene / makeKey，预览还在跑但界面假死。
-        if FloatingOverlayController.overlayWindow != nil,
-           (CameraReplaceHooks.isSessionQuiet()
-            || CameraReplaceHooks.isReplaceActive()
-            || ShootSurfaceDetector.isCameraSurfaceVisible())
-        {
+        // 拍摄/分段拍摄入口已经打标（或会话安静 / 预览层在）：不要 attach。
+        // attach 会改 windowScene / makeKey，预览还在跑但界面假死。首点时预览层可能还没有。
+        let onShoot = ShootSurfaceDetector.isShootPageLatched()
+            || CameraReplaceHooks.isSessionQuiet()
+            || ShootSurfaceDetector.isCameraSurfaceVisible()
+        if onShoot {
+            FloatingOverlayController.shared.suppressReattachForShoot()
+            NSLog("BXFloatInject skip reattach reason=%@ (shoot/quiet)", reason)
+            return
+        }
+        // 替换开着且悬浮窗已在：保持原来的跳过，避免再次 makeKey。
+        if FloatingOverlayController.overlayWindow != nil, CameraReplaceHooks.isReplaceActive() {
             NSLog("BXFloatInject skip reattach reason=%@ (quiet/replace/shoot)", reason)
             return
         }
