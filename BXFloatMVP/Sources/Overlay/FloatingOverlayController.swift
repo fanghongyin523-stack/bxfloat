@@ -71,11 +71,12 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         ShootSurfaceDetector.installEntryHookIfNeeded()
     }
 
-    /// 拍摄页闩锁 / 会话安静窗 / 预览层。替换开关单独不算，离开拍摄后还要恢复 3s 保活。
+    /// 拍摄/开直播闩锁、采集会话、或切会话安静窗。替换开关单独不算，离开采集页后还要恢复 3s 保活。
+    /// 不在这里扫预览层：窗口风暴里扫整棵树会把主线程拖死，而预览层往往还没挂上。
     private func isShootSession() -> Bool {
         ShootSurfaceDetector.isShootPageLatched()
             || CameraReplaceHooks.isSessionQuiet()
-            || ShootSurfaceDetector.isCameraSurfaceVisible()
+            || ShootSurfaceDetector.isCaptureSessionRunning()
     }
 
     private func isShootOrQuiet() -> Bool {
@@ -83,7 +84,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     func attach(to window: UIWindow) {
-        // 拍摄/分段拍摄：停掉 3s 重挂，不要迁 windowScene、不要 makeKey、不要 syncReplace。
+        // 拍摄/分段拍摄/开直播：停掉 3s 重挂，不要迁 windowScene、不要 makeKey、不要 syncReplace。
         if isShootSession() {
             suppressReattachForShoot()
             return
@@ -112,6 +113,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     func refreshSceneIfNeeded(_ scene: UIWindowScene?) {
+        if isShootSession() { return }
         ensureFloatWindow(preferring: scene)
     }
 
@@ -152,25 +154,21 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         guard let w = note.object as? UIWindow,
               w !== floatWindow,
               !(w is BXFloatPassthroughWindow) else { return }
-        // 拍摄页窗口出现时，类名已经能判定，不必等预览层。先打标再决定要不要重挂。
-        if !ShootSurfaceDetector.isShootPageLatched(),
-           let root = w.rootViewController,
-           ShootSurfaceDetector.entryLooksLikeShoot(root)
-        {
-            ShootSurfaceDetector.markShootPageEntered(reason: "window")
-        }
-        if ShootSurfaceDetector.isCameraSurfaceVisible() {
-            CameraReplaceHooks.markSessionQuiet(seconds: 1.20)
-        }
-        // 窗口闪现很频繁：拍摄全程停掉 3s 定时器，禁止迁窗 / makeKey。
+        // 已经在拍摄/开直播：立刻停表返回。不要先扫预览层，也不要 markSessionQuiet 把安静窗往后推。
         if isShootSession() {
+            suppressReattachForShoot()
+            return
+        }
+        // 类名能判定就在重挂之前打标。开直播和拍摄都走这里。
+        if ShootSurfaceDetector.windowLooksLikeCapture(w) {
+            ShootSurfaceDetector.markShootPageEntered(reason: "window:\(NSStringFromClass(type(of: w)))")
             suppressReattachForShoot()
             return
         }
         resumeReattachAfterShoot()
         if isShootOrQuiet() { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, !self.isShootOrQuiet() else { return }
+            guard let self, !self.isShootSession(), !self.isShootOrQuiet() else { return }
             self.reattachIfNeeded(reason: "win")
         }
     }
@@ -233,6 +231,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     private func syncReplaceForCurrentSurface() {
+        // 切会话窗内禁止重挂钩 / setDelegate。拍摄或开直播的 start/begin 都会把安静窗拉起来。
+        if CameraReplaceHooks.isSessionQuiet() { return }
         let cfg = MediaConfigStore.shared.config
         PreviewCover.stop()
         CameraReplaceHooks.applyReplaceMode(cfg.replaceCameraEnabled)
@@ -242,8 +242,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     private func reattachIfNeeded(reason: String) {
         guard MediaConfigStore.shared.config.overlayEnabled else { return }
         if pickerChromeHidden { return }
-        // 点拍摄 / 录视频 / 直播：安静期或替换开着时，连 windowLevel / scene 切换都不要碰。
-        // 抖音进拍摄会狂闪 UIWindow；再动悬浮窗 = 整屏假死，甚至要强制大退。
+        // 点拍摄 / 录视频 / 开直播：安静期或替换开着时，连 windowLevel / scene 切换都不要碰。
+        // 抖音进拍摄或开播会狂闪 UIWindow；再动悬浮窗 = 整屏假死，甚至要强制大退。
         if isShootOrQuiet() {
             return
         }
@@ -301,7 +301,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     private func ensureFloatWindow(preferring scene: UIWindowScene?) {
-        // 拍摄全程不要新建悬浮窗，也不要把已有窗迁到别的 scene。
+        // 拍摄/开直播全程不要新建悬浮窗，也不要把已有窗迁到别的 scene。
         if isShootSession() { return }
         let activeScene = scene
             ?? UIApplication.shared.connectedScenes
@@ -336,11 +336,23 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         if !config.overlayEnabled {
             stopPuller()
             PreviewCover.stop()
-            CameraReplaceHooks.applyReplaceMode(false)
+            if !CameraReplaceHooks.isSessionQuiet() {
+                CameraReplaceHooks.applyReplaceMode(false)
+            }
             bubbleView?.removeFromSuperview()
             bubbleView = nil
             hidePanel()
             floatWindow?.isHidden = true
+            return
+        }
+
+        // 拍摄/开直播：允许面板改挂钩（安静窗之外），但不新建、不迁 scene、不改层级、不 makeKey。
+        if isShootSession() {
+            isolateTransport(for: config.connectionMode)
+            if let bubble = bubbleView {
+                bubble.setReplaceActive(config.replaceCameraEnabled)
+            }
+            syncPuller(config)
             return
         }
 
@@ -510,7 +522,9 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             restoreHostKeyWindow()
         } else {
             fw.isHidden = false
-            fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
+            if !isShootSession() {
+                fw.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 200)
+            }
             if panelVisible {
                 settingsPanel?.isHidden = false
                 bubbleView?.isHidden = true
