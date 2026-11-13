@@ -62,10 +62,24 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         )
     }
 
+    private func isShootOrQuiet() -> Bool {
+        CameraReplaceHooks.isSessionQuiet()
+            || CameraReplaceHooks.isReplaceActive()
+            || ShootSurfaceDetector.isCameraSurfaceVisible()
+    }
+
     func attach(to window: UIWindow) {
+        // 拍摄/录视频中再 attach 会改 windowScene 或 makeKey：预览层仍流畅，界面整页假死。
+        if isShootOrQuiet(), floatWindow != nil {
+            return
+        }
         ensureFloatWindow(preferring: window.windowScene)
         CameraReplaceHooks.installIfNeeded()
         MicReplaceHooks.installIfNeeded()
+        if isShootOrQuiet() {
+            startReattachTimer()
+            return
+        }
         syncReplaceForCurrentSurface()
         apply(MediaConfigStore.shared.config)
         startReattachTimer()
@@ -90,19 +104,25 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
     @objc private func configChanged() { apply(MediaConfigStore.shared.config) }
     @objc private func appActive() {
+        if isShootOrQuiet() { return }
         reattachIfNeeded(reason: "active")
         // 点直播/替换开着时禁止 makeKey：抢抖音直播窗焦点 → 整页假死，退出重进才好
-        if CameraReplaceHooks.isSessionQuiet() || CameraReplaceHooks.isReplaceActive() {
-            return
-        }
         restoreHostKeyWindow()
     }
-    @objc private func sceneActive() { reattachIfNeeded(reason: "scene") }
+    @objc private func sceneActive() {
+        if isShootOrQuiet() { return }
+        reattachIfNeeded(reason: "scene")
+    }
     @objc private func windowVisible(_ note: Notification) {
         guard let w = note.object as? UIWindow, w !== floatWindow else { return }
+        if ShootSurfaceDetector.isCameraSurfaceVisible() {
+            CameraReplaceHooks.markSessionQuiet(seconds: 1.20)
+        }
         // 窗口闪现很频繁：只保活悬浮窗，禁止每次 makeKey（按住快门会卡）
+        if isShootOrQuiet() { return }
         DispatchQueue.main.async { [weak self] in
-            self?.reattachIfNeeded(reason: "win")
+            guard let self, !self.isShootOrQuiet() else { return }
+            self.reattachIfNeeded(reason: "win")
         }
     }
 
@@ -129,7 +149,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         if pickerChromeHidden { return }
         // 点拍摄 / 录视频 / 直播：安静期或替换开着时，连 windowLevel / scene 切换都不要碰。
         // 抖音进拍摄会狂闪 UIWindow；再动悬浮窗 = 整屏假死，甚至要强制大退。
-        if CameraReplaceHooks.isSessionQuiet() || CameraReplaceHooks.isReplaceActive() {
+        if isShootOrQuiet() {
             return
         }
 
@@ -193,6 +213,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
             ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
 
         if let fw = floatWindow {
+            // 拍摄中把悬浮窗迁到新 scene = 预览还在、界面假死。
+            if isShootOrQuiet() { return }
             if let activeScene, fw.windowScene !== activeScene {
                 fw.windowScene = activeScene
                 fw.frame = activeScene.coordinateSpace.bounds
@@ -403,7 +425,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     private func restoreHostKeyWindow() {
-        if CameraReplaceHooks.isSessionQuiet() || CameraReplaceHooks.isReplaceActive() {
+        if isShootOrQuiet() {
             return
         }
         let float = floatWindow

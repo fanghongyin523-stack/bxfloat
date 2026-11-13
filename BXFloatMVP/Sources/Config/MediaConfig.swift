@@ -167,14 +167,63 @@ final class MediaConfigStore {
 
     private let defaultsKey = "baixiang.conf.mvp.v4"
     private(set) var config: MediaConfig = .default
+    /// 本进程是否已 load 过。activate 会多次调用，禁止每次先 load 失败再把默认值写回磁盘。
+    private(set) var didLoad = false
+    /// 这次 load 是否从磁盘/UserDefaults 读到了已保存配置（含迁移）。
+    private(set) var loadedFromDisk = false
 
     private init() {}
+
+    private var sidecarURL: URL {
+        let fm = FileManager.default
+        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fm.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? fm.temporaryDirectory
+        let folder = dir.appendingPathComponent("baixiang-bxfloat", isDirectory: true)
+        if !fm.fileExists(atPath: folder.path) {
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        return folder.appendingPathComponent("media-config-v4.json")
+    }
+
+    private func writeSidecar(_ data: Data) {
+        try? data.write(to: sidecarURL, options: .atomic)
+    }
+
+    private func readSidecar() -> Data? {
+        try? Data(contentsOf: sidecarURL)
+    }
+
+    private func persistData(_ data: Data) {
+        UserDefaults.standard.set(data, forKey: defaultsKey)
+        UserDefaults.standard.synchronize()
+        writeSidecar(data)
+    }
+
+    func loadIfNeeded() {
+        guard !didLoad else { return }
+        load()
+    }
 
     func load() {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
         {
             config = decoded
+            didLoad = true
+            loadedFromDisk = true
+            writeSidecar(data)
+            return
+        }
+        // UserDefaults 在注入很早时可能还没就绪：先读旁路文件，避免 activate 把默认值覆盖掉上次的开关。
+        if let data = readSidecar(),
+           let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
+        {
+            config = decoded
+            didLoad = true
+            loadedFromDisk = true
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+            UserDefaults.standard.synchronize()
             return
         }
         // v3 → v4：强制默认关替换 + 原麦（禁止旧配置「开关看着关实际还在拉」）
@@ -216,12 +265,16 @@ final class MediaConfigStore {
             return
         }
         config = .default
+        didLoad = true
+        loadedFromDisk = false
     }
 
     func save(_ config: MediaConfig, postNotification: Bool = true) {
         self.config = config
+        didLoad = true
+        loadedFromDisk = true
         if let data = try? JSONEncoder().encode(config) {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
+            persistData(data)
         }
         if postNotification {
             NotificationCenter.default.post(name: .bxMediaConfigDidChange, object: nil)

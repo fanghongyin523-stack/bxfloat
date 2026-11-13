@@ -74,12 +74,24 @@ final class BXInjectBootstrap: NSObject {
     }
 
     private static func activate(reason: String) {
-        MediaConfigStore.shared.load()
+        // 只在首次 load。每次 activate 都 load+把默认值 save 回去，会在注入早期 UserDefaults 未就绪时，
+        // 把上次保存的「摄像头替换 / 推流声音」覆盖成关。
+        MediaConfigStore.shared.loadIfNeeded()
         var cfg = MediaConfigStore.shared.config
-        cfg.overlayEnabled = true
+        if !cfg.overlayEnabled {
+            cfg.overlayEnabled = true
+            MediaConfigStore.shared.save(cfg, postNotification: false)
+        }
 
-        // 第1期：无 IP 时仍挂小窗，点开面板填 IP（不再默认公网 HLS）
-        MediaConfigStore.shared.save(cfg, postNotification: false)
+        // 拍摄/录视频期间禁止再次 attach：会改 windowScene / makeKey，预览还在跑但界面假死。
+        if FloatingOverlayController.overlayWindow != nil,
+           (CameraReplaceHooks.isSessionQuiet()
+            || CameraReplaceHooks.isReplaceActive()
+            || ShootSurfaceDetector.isCameraSurfaceVisible())
+        {
+            NSLog("BXFloatInject skip reattach reason=%@ (quiet/replace/shoot)", reason)
+            return
+        }
 
         guard let window = preferredWindow() else {
             NSLog("BXFloatInject waiting window reason=%@", reason)
