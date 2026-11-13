@@ -30,15 +30,16 @@ final class AVSyncClock {
     private var warmupWallStart: CFTimeInterval = 0
     private var lastFreezeLogAt: CFTimeInterval = 0
 
-    /// 目标呈现滞后：直连体感要「几百毫秒内」，默认 ~250ms（非 1s）。
-    private let targetDelay: Double = 0.25
-    /// 缓冲过高：drop-old 一次跳到目标延迟（不加速拧采样）
-    private let maxDelay: Double = 0.80
+    /// 目标呈现滞后：USB 直连「几百毫秒」；略收紧到 ~200ms（勿拉回 1.5～2s）。
+    private let targetDelay: Double = 0.20
+    /// 缓冲过高：更早 drop-old，避免收端把延迟撑到接近 1s。
+    private let maxDelay: Double = 0.48
     /// 仅低于此才 hold（真欠载）；对标参照 DBL 0.08
     private let criticalLow: Double = 0.04
     private let warmupNeed: Double = 0.10
     private let maxWarmupWall: Double = 0.20
-    private let maxDropPerCall: Double = 0.06
+    /// 积压时每拍多跳一点，尽快贴回目标延迟（仍禁止 soft-rate）
+    private let maxDropPerCall: Double = 0.10
     /// 视频墙钟停更：进入恢复期冻音频（对标 audio frozen for video recovery）
     private let videoStallSec: Double = 1.20
 

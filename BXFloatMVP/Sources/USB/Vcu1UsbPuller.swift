@@ -509,11 +509,14 @@ final class Vcu1UsbPuller {
             },
             decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
-        // 与发送端建议 VUI 对齐：bt709 + tv（limited）→ 420v，勿再用无标记 420f+DeviceRGB
+        // 与发送端建议 VUI 对齐：bt709 + tv（limited）→ 420v；附件再在 publish 加固
         let attrs: [CFString: Any] = [
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVImageBufferYCbCrMatrixKey: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            kCVImageBufferColorPrimariesKey: kCVImageBufferColorPrimaries_ITU_R_709_2,
+            kCVImageBufferTransferFunctionKey: kCVImageBufferTransferFunction_ITU_R_709_2,
         ]
         let err = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -525,6 +528,10 @@ final class Vcu1UsbPuller {
         )
         if err == noErr {
             decompressionSession = session
+            // 低延迟优先：USB 直连要「几百毫秒」，勿按离线片源节奏囤帧
+            if let session {
+                VTSessionSetProperty(session, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            }
         } else {
             NSLog("BXFloatCam VCU1 VT create err %d", err)
         }
