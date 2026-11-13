@@ -85,11 +85,12 @@ final class BXInjectBootstrap: NSObject {
             MediaConfigStore.shared.save(cfg, postNotification: false)
         }
 
-        // 拍摄/分段拍摄入口已经打标（或会话安静 / 预览层在）：不要 attach。
+        // 拍摄/开直播入口已经打标（或会话安静 / 视频采集在跑）：不要 attach。
         // attach 会改 windowScene / makeKey，预览还在跑但界面假死。首点时预览层可能还没有。
+        // 不扫预览层：延迟 activate 打在窗口风暴上会把主线程拖死。
         let onShoot = ShootSurfaceDetector.isShootPageLatched()
             || CameraReplaceHooks.isSessionQuiet()
-            || ShootSurfaceDetector.isCameraSurfaceVisible()
+            || ShootSurfaceDetector.isCaptureSessionRunning()
         if onShoot {
             FloatingOverlayController.shared.suppressReattachForShoot()
             NSLog("BXFloatInject skip reattach reason=%@ (shoot/quiet)", reason)

@@ -289,11 +289,14 @@ final class RTSPVTPuller {
             },
             decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
-        // 与 USB / 发送端建议 VUI 对齐：bt709 + tv → 420v（勿 420f+无标记 DeviceRGB）
+        // 与 USB / 发送端建议 VUI 对齐：bt709 + tv → 420v；publish 再打附件
         let attrs: [CFString: Any] = [
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVImageBufferYCbCrMatrixKey: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            kCVImageBufferColorPrimariesKey: kCVImageBufferColorPrimaries_ITU_R_709_2,
+            kCVImageBufferTransferFunctionKey: kCVImageBufferTransferFunction_ITU_R_709_2,
         ]
         let err = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -305,6 +308,9 @@ final class RTSPVTPuller {
         )
         if err == noErr {
             decompressionSession = session
+            if let session {
+                VTSessionSetProperty(session, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            }
         } else {
             NSLog("BXFloatCam VT create err %d", err)
         }

@@ -2,7 +2,7 @@ import CoreVideo
 import Foundation
 
 /// 视频 ring：按 AVSyncClock.mediaTime 取帧；空窗 hold 最后一帧（对标 VCam hold-last）。
-/// 历史尺寸 110 / 3.2s：勿再按「2 秒目标」加大。稀疏流上屏走 copyLatest，不靠加深 ring。
+/// 收端不堆 2s 缓冲：约 ~1.2s / 45 帧封顶；稀疏流上屏仍走 copyLatest。
 final class CamFrameStore {
     static let shared = CamFrameStore()
 
@@ -13,8 +13,8 @@ final class CamFrameStore {
 
     private let lock = NSLock()
     private var frames: [TimedFrame] = []
-    /// 历史抖动缓冲；targetDelay 已是 ~250ms，不要再加大本 ring
-    private let maxFrames = 110
+    /// 抖动缓冲封顶（勿再加大）；配合 targetDelay~200ms
+    private let maxFrames = 45
     private var lastHeld: CVPixelBuffer?
 
     private(set) var width: Int = 0
@@ -43,9 +43,9 @@ final class CamFrameStore {
         frameCount += 1
         lastUpdate = Date()
         lastPTS = mapped
-        // 丢掉过旧（相对最新超过 3.2s）
+        // 丢掉过旧（相对最新超过 ~1.2s），避免收端把端到端延迟撑大
         if mapped >= 0 {
-            let floorPTS = mapped - 3.2
+            let floorPTS = mapped - 1.20
             while let first = frames.first, first.pts >= 0, first.pts < floorPTS {
                 frames.removeFirst()
                 pruned += 1
