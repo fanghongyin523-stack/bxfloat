@@ -7,8 +7,9 @@ import UIKit
 /// 预渲染另计：拍摄/分屏拍 30Hz，开直播和推流替换保持 50Hz。这条不影响安静窗和重挂。
 enum ShootSurfaceDetector {
     private static var trackedSessions = NSHashTable<AVCaptureSession>.weakObjects()
-    /// startRunning 过的会话。主线程只读 isRunning，不碰 inputs。
-    private static var cameraSessions = NSHashTable<AVCaptureSession>.weakObjects()
+    /// 不用 isRunning。start/stop 占着会话锁时，主线程再读 isRunning 会和「等主队列」的停开对死。
+    private static var runLatch = CaptureRunLatch()
+    private static let runLock = NSLock()
     private static var cachedVisible: Bool?
     private static var cachedAt: CFAbsoluteTime = 0
     private static let cacheTTL: CFAbsoluteTime = 1.0
@@ -108,16 +109,21 @@ enum ShootSurfaceDetector {
         return nativeShootLatched
     }
 
-    /// 有采集会话已经 startRunning。不扫视图树，也不在主线程读 inputs。
+    /// 有采集会话已经 start，或有一次 start 还没返回。不读 isRunning，也不扫视图树。
     static func isCaptureSessionRunning() -> Bool {
-        cameraSessions.allObjects.contains { $0.isRunning }
+        runLock.lock()
+        defer { runLock.unlock() }
+        return runLatch.captureAppearsRunning
     }
 
-    /// startRunning 打标。不读 inputs/outputs：那会跟会话队列抢锁。
-    /// 调用线程可能不是主线程。音频会话也会短暂闩上，stop 后复查放开。
+    /// startRunning 打标。不读 inputs/outputs，也不读 isRunning：那会跟会话锁对死。
+    /// 调用线程可能不是主线程。计数在调用线程立刻加上，UI 抑制仍回主线程。
     static func noteHardwareCaptureBegan(session: AVCaptureSession) {
+        _ = session
+        runLock.lock()
+        runLatch.beginStart()
+        runLock.unlock()
         let apply = {
-            cameraSessions.add(session)
             hardwareLeaveGeneration &+= 1
             let first = !hardwareLatched
             hardwareLatched = true
@@ -133,9 +139,19 @@ enum ShootSurfaceDetector {
         }
     }
 
-    /// stopRunning 后不立刻放开：分段拍会马上再 start。连续几次仍没有视频会话才放下。
-    /// 必须等本次 stopRunning 返回后再看 isRunning，否则会看见「还在跑」然后永远不复查。
+    /// 原始 startRunning 已返回。把「正在启动」收成「已在跑」。
+    static func noteHardwareCaptureDidStart() {
+        runLock.lock()
+        runLatch.endStart()
+        runLock.unlock()
+    }
+
+    /// 必须在原始 stopRunning 返回之后调用。计数这时才减，再回主线程复查。
+    /// 复查只看计数，不读 isRunning：stop 若在等主队列，主线程碰会话就是整页卡死。
     static func noteHardwareCaptureEnded() {
+        runLock.lock()
+        runLatch.endStop()
+        runLock.unlock()
         DispatchQueue.main.async {
             guard hardwareLatched else { return }
             hardwareLeaveGeneration &+= 1
@@ -145,6 +161,7 @@ enum ShootSurfaceDetector {
 
     private static func pollHardwareLeave(gen: UInt64, tries: Int) {
         guard gen == hardwareLeaveGeneration, hardwareLatched else { return }
+        // 分段拍会马上再 start。计数仍非 0 就保持闩锁，不要拆。
         if isCaptureSessionRunning() { return }
         if tries < 4 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) {

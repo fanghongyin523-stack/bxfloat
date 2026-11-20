@@ -50,6 +50,8 @@
 		B10000000000000000000016 /* PreviewCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* PreviewCover.swift */; };
 		B10000000000000000000017 /* CameraProxyForward.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000023 /* CameraProxyForward.m */; };
 		B10000000000000000000018 /* ShootSurfaceDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* ShootSurfaceDetector.swift */; };
+		A10000000000000000000042 /* CaptureRunLatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000042 /* CaptureRunLatch.swift */; };
+		B10000000000000000000042 /* CaptureRunLatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000042 /* CaptureRunLatch.swift */; };
 		B10000000000000000000019 /* CamPreviewPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* CamPreviewPresenter.swift */; };
 		B1000000000000000000001E /* CamFrameBlitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000035 /* CamFrameBlitter.swift */; };
 		A1000000000000000000001B /* CamFrameBlitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000035 /* CamFrameBlitter.swift */; };
@@ -126,6 +128,7 @@
 		A20000000000000000000023 /* CameraProxyForward.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CameraProxyForward.m; sourceTree = "<group>"; };
 		A20000000000000000000024 /* CameraProxyForward.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CameraProxyForward.h; sourceTree = "<group>"; };
 		A20000000000000000000025 /* ShootSurfaceDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShootSurfaceDetector.swift; sourceTree = "<group>"; };
+		A20000000000000000000042 /* CaptureRunLatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRunLatch.swift; sourceTree = "<group>"; };
 		A20000000000000000000026 /* CamPreviewPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamPreviewPresenter.swift; sourceTree = "<group>"; };
 		A20000000000000000000035 /* CamFrameBlitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamFrameBlitter.swift; sourceTree = "<group>"; };
 		A20000000000000000000036 /* CamAudioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CamAudioStore.swift; sourceTree = "<group>"; };
@@ -222,6 +225,7 @@
 				A20000000000000000000024 /* CameraProxyForward.h */,
 				A20000000000000000000023 /* CameraProxyForward.m */,
 				A20000000000000000000025 /* ShootSurfaceDetector.swift */,
+				A20000000000000000000042 /* CaptureRunLatch.swift */,
 				A20000000000000000000026 /* CamPreviewPresenter.swift */,
 				A20000000000000000000035 /* CamFrameBlitter.swift */,
 				A20000000000000000000036 /* CamAudioStore.swift */,
@@ -485,6 +489,7 @@
 				A10000000000000000000013 /* PreviewCover.swift in Sources */,
 				A10000000000000000000014 /* CameraProxyForward.m in Sources */,
 				A10000000000000000000015 /* ShootSurfaceDetector.swift in Sources */,
+				A10000000000000000000042 /* CaptureRunLatch.swift in Sources */,
 				A10000000000000000000016 /* CamPreviewPresenter.swift in Sources */,
 				A1000000000000000000001B /* CamFrameBlitter.swift in Sources */,
 				A1000000000000000000001C /* CamAudioStore.swift in Sources */,
@@ -525,6 +530,7 @@
 				B10000000000000000000016 /* PreviewCover.swift in Sources */,
 				B10000000000000000000017 /* CameraProxyForward.m in Sources */,
 				B10000000000000000000018 /* ShootSurfaceDetector.swift in Sources */,
+				B10000000000000000000042 /* CaptureRunLatch.swift in Sources */,
 				B10000000000000000000019 /* CamPreviewPresenter.swift in Sources */,
 				B1000000000000000000001E /* CamFrameBlitter.swift in Sources */,
 				B1000000000000000000001F /* CamAudioStore.swift in Sources */,

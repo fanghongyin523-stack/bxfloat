@@ -302,7 +302,7 @@ enum CameraReplaceHooks {
             if let s = session as? AVCaptureSession {
                 ShootSurfaceDetector.trackSession(s)
                 // 类名没命中时，视频会话一开就保持闩锁，停表，直到采集真正结束。
-                // 这里不 setDelegate。
+                // 这里不 setDelegate，也不读 isRunning。
                 ShootSurfaceDetector.noteHardwareCaptureBegan(session: s)
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
@@ -321,6 +321,8 @@ enum CameraReplaceHooks {
             MicReplaceHooks.armBeforeStartRunningIfNeeded()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
+            // 原始 start 返回之后才把「正在启动」收成「已在跑」。
+            ShootSurfaceDetector.noteHardwareCaptureDidStart()
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -332,12 +334,14 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
+            // 复查必须放在原始 stop 返回之后。停的过程中主线程若读 isRunning，
+            // 会和「stop 等主队列」对死（分段拍摄点下去、黄麦标出现后整页卡住）。
             markSessionQuiet(seconds: 0.32)
-            ShootSurfaceDetector.noteHardwareCaptureEnded()
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
             typealias Fn = @convention(c) (AnyObject, Selector) -> Void
             unsafeBitCast(original, to: Fn.self)(session, sel)
+            ShootSurfaceDetector.noteHardwareCaptureEnded()
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
