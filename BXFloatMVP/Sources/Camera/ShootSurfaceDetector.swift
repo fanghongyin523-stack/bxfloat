@@ -117,12 +117,10 @@ enum ShootSurfaceDetector {
     }
 
     /// startRunning 打标。不读 inputs/outputs，也不读 isRunning：那会跟会话锁对死。
-    /// 调用线程可能不是主线程。计数在调用线程立刻加上，UI 抑制仍回主线程。
+    /// 计数不在这里加。主线程会把原始 start 丢到后台，计数要和那次调用绑在一起。
+    /// 调用线程可能不是主线程。UI 抑制仍回主线程。
     static func noteHardwareCaptureBegan(session: AVCaptureSession) {
         _ = session
-        runLock.lock()
-        runLatch.beginStart()
-        runLock.unlock()
         let apply = {
             hardwareLeaveGeneration &+= 1
             let first = !hardwareLatched
@@ -137,6 +135,34 @@ enum ShootSurfaceDetector {
         } else {
             DispatchQueue.main.async(execute: apply)
         }
+    }
+
+    /// 进入原始 startRunning 之前。只加计数，不碰会话。
+    static func beginHardwareStartCount() {
+        runLock.lock()
+        runLatch.beginStart()
+        runLock.unlock()
+    }
+
+    /// 主线程把 start/stop 交给后台队列之前。空档里也不许拆闩锁、不许读 isRunning。
+    static func beginControlHop() {
+        runLock.lock()
+        runLatch.beginControlHop()
+        runLock.unlock()
+    }
+
+    /// 后台那次 start/stop 已返回。
+    static func endControlHop() {
+        runLock.lock()
+        runLatch.endControlHop()
+        runLock.unlock()
+    }
+
+    /// 进入原始 stopRunning 之前。
+    static func noteHardwareCaptureWillStop() {
+        runLock.lock()
+        runLatch.beginStop()
+        runLock.unlock()
     }
 
     /// 原始 startRunning 已返回。把「正在启动」收成「已在跑」。
@@ -157,6 +183,20 @@ enum ShootSurfaceDetector {
             hardwareLeaveGeneration &+= 1
             pollHardwareLeave(gen: hardwareLeaveGeneration, tries: 0)
         }
+    }
+
+    /// 非空：现在不能调用真正的 `isRunning`（会话锁还在 start/stop 手里）。
+    static func overriddenIsRunning() -> Bool? {
+        runLock.lock()
+        defer { runLock.unlock() }
+        return runLatch.overriddenIsRunning()
+    }
+
+    /// start/stop 还没从后台回来，或正占着会话锁。这窗口里的配置调用要排到同一条队列后面。
+    static func isSessionControlBusy() -> Bool {
+        runLock.lock()
+        defer { runLock.unlock() }
+        return runLatch.overriddenIsRunning() != nil
     }
 
     private static func pollHardwareLeave(gen: UInt64, tries: Int) {

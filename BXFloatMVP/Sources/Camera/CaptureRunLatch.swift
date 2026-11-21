@@ -9,8 +9,24 @@ import Foundation
 struct CaptureRunLatch {
     private(set) var runningSessions = 0
     private(set) var startInFlight = 0
+    /// 原始 stopRunning 还没返回。这窗口里会话锁还在，主线程不能再读 isRunning。
+    private(set) var stopInFlight = 0
+    /// 主线程把 start/stop 丢到后台之后、原始调用还没结束。用来盖住「还没跑到 beginStart」的空档。
+    private(set) var controlHops = 0
     /// start 还没返回时，另一条线已经 stop 完。等这次 start 返回后抵消，避免计数变负或卡住。
     private var pendingStops = 0
+
+    /// 主线程离开 start/stop 之前。原始调用还在后台时，整页不能再碰会话锁。
+    mutating func beginControlHop() {
+        controlHops += 1
+    }
+
+    /// 后台那次 start/stop 已经返回。
+    mutating func endControlHop() {
+        if controlHops > 0 {
+            controlHops -= 1
+        }
+    }
 
     /// 进入原始 startRunning 之前。
     mutating func beginStart() {
@@ -29,8 +45,16 @@ struct CaptureRunLatch {
         }
     }
 
-    /// 原始 stopRunning 已返回。停的过程中不减，调用方不要在 stop 返回前查这个值来拆闩锁。
+    /// 进入原始 stopRunning 之前。
+    mutating func beginStop() {
+        stopInFlight += 1
+    }
+
+    /// 原始 stopRunning 已返回。停的过程中不减 running，调用方不要在 stop 返回前用这个值拆闩锁。
     mutating func endStop() {
+        if stopInFlight > 0 {
+            stopInFlight -= 1
+        }
         if runningSessions > 0 {
             runningSessions -= 1
         } else if startInFlight > 0 {
@@ -38,9 +62,19 @@ struct CaptureRunLatch {
         }
     }
 
-    /// 还有会话在跑，或有一次 start 还没返回。两种都不许再去摸 AVCaptureSession。
+    /// 还有会话在跑，有一次 start/stop 还没返回，或主线程刚把启停丢到后台。
+    /// 这几种都不许再去摸 AVCaptureSession，也不许拆拍摄闩锁。
     var captureAppearsRunning: Bool {
-        runningSessions > 0 || startInFlight > pendingStops
+        runningSessions > 0 || startInFlight > pendingStops || stopInFlight > 0 || controlHops > 0
+    }
+
+    /// 会话锁正被 start/stop 占着。非空表示不许调用真正的 isRunning。
+    /// 返回 true：调用方当成还在采集，避免主线程空转或再去抢锁。
+    func overriddenIsRunning() -> Bool? {
+        if startInFlight > 0 || stopInFlight > 0 || pendingStops > 0 || controlHops > 0 {
+            return true
+        }
+        return nil
     }
 
     /// 重复启停的纯逻辑检查。失败原因非空即回归。
@@ -100,7 +134,50 @@ struct CaptureRunLatch {
         // 多余的 stop 不能把计数打成负数。
         latch.endStop()
         latch.endStop()
-        check("extra-stop", latch.runningSessions == 0 && latch.captureAppearsRunning == false)
+        check("extra-stop", latch.runningSessions == 0 && latch.captureAppearsRunning == false && latch.stopInFlight == 0)
+
+        // 主线程把启停丢到后台之后、beginStart 还没跑到：仍然算在采集，并且不能读真正的 isRunning。
+        latch.beginControlHop()
+        check(
+            "hop-before-start",
+            latch.captureAppearsRunning && latch.runningSessions == 0 && latch.overriddenIsRunning() == true
+        )
+        latch.beginStart()
+        latch.endStart()
+        latch.endControlHop()
+        check(
+            "hop-then-running",
+            latch.captureAppearsRunning && latch.runningSessions == 1 && latch.overriddenIsRunning() == nil
+        )
+
+        // stop 进行中：计数先不要拆，isRunning 也不许落到真属性上。
+        latch.beginStop()
+        check("stop-in-flight", latch.stopInFlight == 1 && latch.captureAppearsRunning && latch.overriddenIsRunning() == true)
+        latch.endStop()
+        check(
+            "stop-finished",
+            latch.stopInFlight == 0 && latch.runningSessions == 0 && latch.captureAppearsRunning == false
+                && latch.overriddenIsRunning() == nil
+        )
+
+        // 分段：后台 stop 还没减计数时，主线程已经又发起了一次 hop。中间不能拆闩锁。
+        latch.beginStart()
+        latch.endStart()
+        latch.beginControlHop()
+        latch.beginStop()
+        latch.endStop()
+        check(
+            "segment-gap-held-by-hop",
+            latch.runningSessions == 0 && latch.controlHops == 1 && latch.captureAppearsRunning
+                && latch.overriddenIsRunning() == true
+        )
+        latch.beginStart()
+        latch.endStart()
+        latch.endControlHop()
+        check(
+            "segment-gap-closed",
+            latch.runningSessions == 1 && latch.controlHops == 0 && latch.overriddenIsRunning() == nil
+        )
 
         return failures
     }
