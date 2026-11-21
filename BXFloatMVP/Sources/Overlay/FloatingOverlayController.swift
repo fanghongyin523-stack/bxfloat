@@ -351,7 +351,7 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
 
         // 拍摄/开直播：允许面板改挂钩（安静窗之外），但不新建、不迁 scene、不改层级、不 makeKey。
         if isShootSession() {
-            isolateTransport(for: config.connectionMode)
+            isolateTransport(for: config.connectionMode, replaceEnabled: config.replaceCameraEnabled)
             if let bubble = bubbleView {
                 bubble.setReplaceActive(config.replaceCameraEnabled)
             }
@@ -366,8 +366,8 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         }
 
         // 三模式互斥：只用当前模式的基础设施。
-        // USB 仅在数据线模式起隧道监听（≠拉流）；局域网/本地必须停掉 USB，禁止串线。
-        isolateTransport(for: config.connectionMode)
+        // 替换关着时连 USB 隧道也不听，避免助手一直往手机灌数据。
+        isolateTransport(for: config.connectionMode, replaceEnabled: config.replaceCameraEnabled)
 
         ensureBubble(on: host)
         bubbleView?.setReplaceActive(config.replaceCameraEnabled)
@@ -380,12 +380,12 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
     }
 
     /// 传输层互斥：局域网 / 数据线 / 本地 同时只活一路。
-    /// USB：保留 RTSP 隧道基础设施作回退；VCU1 收端由 syncPuller 在替换开时启停。
-    private func isolateTransport(for mode: ConnectionMode) {
+    /// 替换关着时不听 USB 隧道、不留 VCU1。开着才在数据线模式起隧道；VCU1 仍由 syncPuller 拉。
+    private func isolateTransport(for mode: ConnectionMode, replaceEnabled: Bool) {
         switch mode {
-        case .usb:
+        case .usb where replaceEnabled:
             USBStreamBridge.shared.start()
-        case .lan, .manual, .localVideo:
+        case .usb, .lan, .manual, .localVideo:
             USBStreamBridge.shared.stop()
             Vcu1UsbPuller.shared.stop()
         }

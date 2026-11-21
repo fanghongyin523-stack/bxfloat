@@ -171,6 +171,8 @@ final class MediaConfigStore {
     private(set) var didLoad = false
     /// 这次 load 是否从磁盘/UserDefaults 读到了已保存配置（含迁移）。
     private(set) var loadedFromDisk = false
+    /// 本进程只在第一次读配置时把两个开关打成关。之后的 activate / 回前台不得再打。
+    private var didApplyLaunchDefaults = false
 
     private init() {}
 
@@ -206,6 +208,7 @@ final class MediaConfigStore {
     }
 
     func load() {
+        defer { applyLaunchDefaultsIfNeeded() }
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            let decoded = try? JSONDecoder().decode(MediaConfig.self, from: data)
         {
@@ -267,6 +270,30 @@ final class MediaConfigStore {
         config = .default
         didLoad = true
         loadedFromDisk = false
+    }
+
+    /// 冷启动：替换摄像头、推流声音都从关开始，即使用户上次开着。
+    /// 只跑一次。延迟 activate 和 didBecomeActive 会再进 loadIfNeeded，那时这里已经跑过，不能把本局打开的开关打回去。
+    /// 早期 load 没读到磁盘时不 save，避免用默认值盖掉还没就绪的上次配置。
+    private func applyLaunchDefaultsIfNeeded() {
+        guard !didApplyLaunchDefaults else { return }
+        didApplyLaunchDefaults = true
+        var next = config
+        var changed = false
+        if next.replaceCameraEnabled {
+            next.replaceCameraEnabled = false
+            changed = true
+        }
+        if next.audioCaptureMode == .stream {
+            next.audioCaptureMode = .microphone
+            next.muted = false
+            changed = true
+        }
+        guard changed else { return }
+        config = next
+        guard loadedFromDisk else { return }
+        save(next, postNotification: false)
+        NSLog("BXFloatInject launch defaults: replace off, stream-audio off")
     }
 
     func save(_ config: MediaConfig, postNotification: Bool = true) {

@@ -153,6 +153,8 @@ final class CamAudioStore {
 
     func publish(samples: UnsafePointer<Int16>, frames: Int, channels: Int, sampleRate: Int, pts: Double) {
         guard frames > 0, channels > 0 else { return }
+        // 推流声音关着（原麦或静音）不入环，避免没开开关也在后台堆 PCM。
+        guard MediaConfigStore.shared.config.audioCaptureMode == .stream else { return }
         // 最多保 2ch；>2 时折成立体声（L=ch0, R=ch1），禁止全声道平均压 mono
         let srcCh = min(2, max(1, channels))
         var interleaved = [Int16](repeating: 0, count: frames * srcCh)

@@ -26,6 +26,8 @@ final class CamFrameStore {
     private init() {}
 
     func publish(_ buffer: CVPixelBuffer, pts: Double = -1) {
+        // 替换关着时不入环。停拉之后迟到的一帧也不能把缓冲再堆起来。
+        guard MediaConfigStore.shared.config.replaceCameraEnabled else { return }
         // 解码出口统一打 BT.709 附件，避免 Blitter 用无标记 DeviceRGB 解错 420v/420f
         Self.ensureBT709Attachments(buffer)
         let mapped = pts >= 0 ? AVSyncClock.shared.mapPTS(pts) : -1
