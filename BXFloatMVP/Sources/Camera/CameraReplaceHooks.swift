@@ -21,31 +21,34 @@ func BXFloatForwardDidDrop(
     _ connection: AVCaptureConnection
 )
 
-/// 把 `startRunning` / `stopRunning` 从主线程拿开。
-///
-/// 拍摄页的样本回调经常就在主队列。原始 start/stop 会占着会话锁，并一直等到这条队列空出来。
-/// 调用栈还在主线程上时，队列永远空不了，拍照/拍视频按一下整页卡住。
-/// 主线程把原始 start/stop 丢到串行队列，自己只转 RunLoop 等到它结束。回调仍留在宿主原来的队列上，不改挂 paintQueue。
-/// 非主线程仍在调用线程里同步跑，避免和回调队列叠成 sync。
-/// 启停还没结束时，紧跟着的 begin/commit/add 若发生在主线程，排到同一条队列后面，避免抢会话锁。
-private final class SessionGateDone: @unchecked Sendable {
-    private let lock = NSLock()
-    private var done = false
+/// 样本回调深度。只在 `didOutput` / `didDrop` 里加减，线程局部。
+/// 拍摄页回调经常在主队列。从那条栈里同步 start/stop 会等自己排空，整页卡住。
+/// 打开相机页的 startRunning 不在回调栈上，必须同步跑完，预览才能接到已经在跑的会话。
+enum CaptureCallbackScope {
+    private static let key = "bxfloat.captureCallbackDepth"
 
-    func mark() {
-        lock.lock()
-        done = true
-        lock.unlock()
-        CFRunLoopWakeUp(CFRunLoopGetMain())
+    static func enter() {
+        let n = (Thread.current.threadDictionary[key] as? Int) ?? 0
+        Thread.current.threadDictionary[key] = n + 1
     }
 
-    func isDone() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return done
+    static func leave() {
+        let n = (Thread.current.threadDictionary[key] as? Int) ?? 0
+        if n <= 1 {
+            Thread.current.threadDictionary.removeObject(forKey: key)
+        } else {
+            Thread.current.threadDictionary[key] = n - 1
+        }
+    }
+
+    static var isInside: Bool {
+        ((Thread.current.threadDictionary[key] as? Int) ?? 0) > 0
     }
 }
 
+/// 普通调用（含主线程打开相机页）同步执行原始 start/stop。
+/// 只有当前线程正处在样本回调里才丢到后台：那是拍摄卡死的对死路径。
+/// 同步路径不打 controlHop，也不把 isRunning 提前说成 true。
 enum SessionControlGate {
     private static let queue: DispatchQueue = {
         let q = DispatchQueue(label: "com.baixiang.cam.session-control", qos: .userInitiated)
@@ -54,44 +57,20 @@ enum SessionControlGate {
     }()
     private static let specificKey = DispatchSpecificKey<UInt8>()
 
-    private static var mainPumpDepth = 0
-
     static func callOriginal(label: String, _ body: @escaping () -> Void) {
         if DispatchQueue.getSpecific(key: specificKey) != nil {
             body()
             return
         }
-        if Thread.isMainThread {
-            // 已经在替上一次启停转 RunLoop：再等会和当前这次对死。排队即可。
-            if mainPumpDepth > 0 {
-                queue.async(execute: body)
-                return
-            }
-            mainPumpDepth += 1
-            defer { mainPumpDepth -= 1 }
+        if CaptureCallbackScope.isInside {
             ShootSurfaceDetector.beginControlHop()
-            NSLog("BXFloatCam %@ leave main", label)
-            let flag = SessionGateDone()
+            NSLog("BXFloatCam %@ hop off callback", label)
             queue.async {
                 body()
                 ShootSurfaceDetector.endControlHop()
-                flag.mark()
-            }
-            // 原始 start/stop 会 dispatch_sync 回主队列。这里转 RunLoop 让它跑完再回到抖音，
-            // 预览层才接得上正在跑的会话。直接 return 时抖音会以为会话已开，画面停在黑屏。
-            // 上限避免「等主队列完全空闲」把整页钉死。
-            let start = CFAbsoluteTimeGetCurrent()
-            while !flag.isDone() {
-                if CFAbsoluteTimeGetCurrent() - start > 2.0 {
-                    NSLog("BXFloatCam %@ main pump cap", label)
-                    return
-                }
-                RunLoop.current.run(mode: .common, before: Date(timeIntervalSinceNow: 0.01))
             }
             return
         }
-        // 已经不在主线程：就地跑。再 sync 到别的队列会和「回调队列就是这条线」对死。
-        // 计数在 body 里、原始调用之前加上，主线程这时读 isRunning 会走闩锁。
         body()
     }
 
@@ -127,7 +106,7 @@ func BXFloatRestoreSampleBufferDelegate(
 /// - 安静窗只盖切会话短窗：期内只转发，不 paint / 不 hold（防定格与假死）
 /// - 主线程只合入 blitter 已准备好的最新帧；副线程才 ring/hold 兜底
 /// - stop/start 只改武装标志，不 unwrap、不 apply 重绑
-/// - 主线程上的 start/stop 不在调用栈里同步跑：回调队列也是主队列时，同步启停会等主队列排空，整页卡住
+/// - 只有样本回调栈里的 start/stop 才离开当前线程。打开相机页的 start 同步跑完再返回
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
@@ -448,7 +427,7 @@ enum CameraReplaceHooks {
                 CamFrameBlitter.shared.setEnabled(true)
             }
             MicReplaceHooks.armBeforeStartRunningIfNeeded()
-            // 主线程不能同步等原始 start。回调队列是主队列时，start 会一直等到主队列空出来。
+            // 不在样本回调里就同步跑完。提前返回会让抖音把预览接到还没 start 的会话上，画面全黑。
             SessionControlGate.callOriginal(label: "startRunning") {
                 ShootSurfaceDetector.beginHardwareStartCount()
                 typealias Fn = @convention(c) (AnyObject, Selector) -> Void
@@ -569,6 +548,8 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
@@ -594,6 +575,8 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didDrop sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         BXFloatForwardDidDrop(originalTarget, output, sampleBuffer, connection)
     }
 }

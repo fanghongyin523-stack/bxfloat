@@ -144,7 +144,7 @@ enum ShootSurfaceDetector {
         runLock.unlock()
     }
 
-    /// 主线程把 start/stop 交给后台队列之前。空档里也不许拆闩锁、不许读 isRunning。
+    /// 仅样本回调栈里的 start/stop 才走这里。同步打开相机页不要打这个标。
     static func beginControlHop() {
         runLock.lock()
         runLatch.beginControlHop()

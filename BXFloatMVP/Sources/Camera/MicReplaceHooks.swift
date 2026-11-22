@@ -251,6 +251,8 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         MicReplaceHooks.noteCallback()
         // 安静窗 / 主线程：只转发。录视频音频回调常在 main，禁止 memcpy 堵 UI。
         // 配置结束后副线程恢复 paint；不改挂回调队列。
@@ -274,6 +276,8 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         didDrop sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         BXFloatForwardDidDrop(originalTarget, output, sampleBuffer, connection)
     }
 }

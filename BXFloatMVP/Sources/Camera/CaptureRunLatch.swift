@@ -68,10 +68,10 @@ struct CaptureRunLatch {
         runningSessions > 0 || startInFlight > pendingStops || stopInFlight > 0 || controlHops > 0
     }
 
-    /// 会话锁正被 start/stop 占着。非空表示不许调用真正的 isRunning。
-    /// 返回 true：调用方当成还在采集，避免主线程空转或再去抢锁。
+    /// 只有「从样本回调里把启停丢到后台」才谎报 isRunning。
+    /// 同步 start 还在飞时必须走真属性，否则抖音会把预览接到还没跑起来的会话上。
     func overriddenIsRunning() -> Bool? {
-        if startInFlight > 0 || stopInFlight > 0 || pendingStops > 0 || controlHops > 0 {
+        if controlHops > 0 {
             return true
         }
         return nil
@@ -89,6 +89,7 @@ struct CaptureRunLatch {
 
         latch.beginStart()
         check("start-in-flight-visible", latch.captureAppearsRunning)
+        check("start-in-flight-no-early-isRunning", latch.overriddenIsRunning() == nil)
         latch.endStart()
         check("one-running", latch.captureAppearsRunning && latch.runningSessions == 1 && latch.startInFlight == 0)
 
@@ -150,9 +151,13 @@ struct CaptureRunLatch {
             latch.captureAppearsRunning && latch.runningSessions == 1 && latch.overriddenIsRunning() == nil
         )
 
-        // stop 进行中：计数先不要拆，isRunning 也不许落到真属性上。
+        // stop 进行中：计数先不要拆。同步 stop 不谎报 isRunning；只有回调栈里的 hop 才谎报。
         latch.beginStop()
-        check("stop-in-flight", latch.stopInFlight == 1 && latch.captureAppearsRunning && latch.overriddenIsRunning() == true)
+        check("stop-in-flight", latch.stopInFlight == 1 && latch.captureAppearsRunning && latch.overriddenIsRunning() == nil)
+        latch.beginControlHop()
+        check("stop-hop-lies", latch.overriddenIsRunning() == true)
+        latch.endControlHop()
+        check("stop-hop-cleared", latch.overriddenIsRunning() == nil)
         latch.endStop()
         check(
             "stop-finished",
