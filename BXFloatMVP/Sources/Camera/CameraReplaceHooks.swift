@@ -25,9 +25,27 @@ func BXFloatForwardDidDrop(
 ///
 /// 拍摄页的样本回调经常就在主队列。原始 start/stop 会占着会话锁，并一直等到这条队列空出来。
 /// 调用栈还在主线程上时，队列永远空不了，拍照/拍视频按一下整页卡住。
-/// 主线程只负责把调用丢到串行队列后马上返回；回调仍留在宿主原来的队列上，不改挂 paintQueue。
+/// 主线程把原始 start/stop 丢到串行队列，自己只转 RunLoop 等到它结束。回调仍留在宿主原来的队列上，不改挂 paintQueue。
 /// 非主线程仍在调用线程里同步跑，避免和回调队列叠成 sync。
 /// 启停还没结束时，紧跟着的 begin/commit/add 若发生在主线程，排到同一条队列后面，避免抢会话锁。
+private final class SessionGateDone: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    func mark() {
+        lock.lock()
+        done = true
+        lock.unlock()
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    func isDone() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return done
+    }
+}
+
 enum SessionControlGate {
     private static let queue: DispatchQueue = {
         let q = DispatchQueue(label: "com.baixiang.cam.session-control", qos: .userInitiated)
@@ -36,17 +54,39 @@ enum SessionControlGate {
     }()
     private static let specificKey = DispatchSpecificKey<UInt8>()
 
+    private static var mainPumpDepth = 0
+
     static func callOriginal(label: String, _ body: @escaping () -> Void) {
         if DispatchQueue.getSpecific(key: specificKey) != nil {
             body()
             return
         }
         if Thread.isMainThread {
+            // 已经在替上一次启停转 RunLoop：再等会和当前这次对死。排队即可。
+            if mainPumpDepth > 0 {
+                queue.async(execute: body)
+                return
+            }
+            mainPumpDepth += 1
+            defer { mainPumpDepth -= 1 }
             ShootSurfaceDetector.beginControlHop()
             NSLog("BXFloatCam %@ leave main", label)
+            let flag = SessionGateDone()
             queue.async {
                 body()
                 ShootSurfaceDetector.endControlHop()
+                flag.mark()
+            }
+            // 原始 start/stop 会 dispatch_sync 回主队列。这里转 RunLoop 让它跑完再回到抖音，
+            // 预览层才接得上正在跑的会话。直接 return 时抖音会以为会话已开，画面停在黑屏。
+            // 上限避免「等主队列完全空闲」把整页钉死。
+            let start = CFAbsoluteTimeGetCurrent()
+            while !flag.isDone() {
+                if CFAbsoluteTimeGetCurrent() - start > 2.0 {
+                    NSLog("BXFloatCam %@ main pump cap", label)
+                    return
+                }
+                RunLoop.current.run(mode: .common, before: Date(timeIntervalSinceNow: 0.01))
             }
             return
         }
@@ -534,7 +574,11 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         let onMain = Thread.isMainThread
         // 对齐 VCam：宿主原回调队列同步处理（禁止改挂 paintQueue 再回灌 main）。
         // 安静窗：只转发、不 paint、不 hold（与 Mic 同口径；长 hold 会定格/假死）。
-        if CameraReplaceHooks.isReplaceActive(), !CameraReplaceHooks.isSessionQuiet() {
+        // 替换关着：原样把真摄像头交回去，禁止用空缓冲盖成黑屏。
+        if CameraReplaceHooks.isReplaceActive(),
+           MediaConfigStore.shared.config.replaceCameraEnabled,
+           !CameraReplaceHooks.isSessionQuiet()
+        {
             let ok = CamBufferPainter.paintInPlace(sampleBuffer)
             if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
         }
