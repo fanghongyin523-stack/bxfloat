@@ -54,6 +54,8 @@ enum CameraReplaceHooks {
     private(set) static var callbackCount: Int64 = 0
     private(set) static var paintCount: Int64 = 0
     private(set) static var paintFailCount: Int64 = 0
+    private(set) static var paintCopyCount: Int64 = 0
+    private(set) static var paintPassthroughCount: Int64 = 0
     private(set) static var retainedProxyCount: Int = 0
 
     static func noteCallback() { callbackCount += 1 }
@@ -65,6 +67,8 @@ enum CameraReplaceHooks {
         paintFailCount += 1
         CamPipelineDiag.shared.noteVideoReplaceFail()
     }
+    static func notePaintCopy() { paintCopyCount += 1 }
+    static func notePaintPassthrough() { paintPassthroughCount += 1 }
 
     static func isReplaceActive() -> Bool {
         lock.lock()
@@ -117,10 +121,10 @@ enum CameraReplaceHooks {
 
     static func applyReplaceMode(_ enabled: Bool) {
         installIfNeeded()
-        // 对齐参考：
-        // - 用户「开替换」边沿：包一次已有输出（否则只涨收帧不换画）
-        // - 点「开始录制」走 startRunning：只武装，绝不 setDelegate（否则整屏卡死）
-        // - 已武装稳态：什么都不动
+        // 对齐参考（VCam / 仓内 34069f8 口径）：
+        // - 开替换边沿：尚未包才包一次；已包只武装，绝不重绑 setDelegate
+        // - 关替换：只卸武装（不 paint），禁止 unwrap —— 拍摄中拆代理 → 预览一直黑，删插件才好
+        // - startRunning：只武装，绝不 setDelegate
         let want = enabled
         lock.lock()
         let wasActive = replaceActive
@@ -147,14 +151,11 @@ enum CameraReplaceHooks {
 
         if want {
             wrapMissingOutputsOnce()
-        } else {
-            for output in trackedOutputs.allObjects {
-                unwrap(output)
-            }
         }
+        // else: 保持 proxy，回调里因 replaceActive=false 只转发真机 buffer
         retainedProxyCount = retainedProxies.count
         CamPipelineDiag.shared.noteSessionEvent(
-            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0) retain=\(retainedProxyCount)"
+            "applyReplace edge cfg=\(enabled ? 1 : 0) was=\(wasActive ? 1 : 0) active=\(want ? 1 : 0) retain=\(retainedProxyCount) keepProxy=1"
         )
     }
 
@@ -406,8 +407,8 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
 }
 
-/// 采集回调专用：只拷贝像素，禁止 CI。
-/// 主线程：只合入 prepared；失败/无帧则透传（保触摸）。副线程才可 hold 上一帧。
+/// 采集回调专用：只拷贝像素；催帧走 blitter 队列，禁止回调里重 CI。
+/// 开替换且 ring 有帧：必须 copy 上流；禁止对宿主空/黑 buffer 透传（有数没画）。
 enum CamBufferPainter {
     private static var loggedFormat = false
     private static let lock = NSLock()
@@ -432,20 +433,16 @@ enum CamBufferPainter {
         NSLog("BXFloatCam sourceEpoch bump clearHold")
     }
 
-    /// 单帧软预算：超时则透传/副线程才 hold，避免主线程拖死触摸。
-    private static let budgetSec: CFTimeInterval = 0.004
-    private static var loggedBlend = false
+    private static let budgetSec: CFTimeInterval = 0.006
     private static var lastMainPaintLogAt: CFAbsoluteTime = 0
 
-    /// 主线程走 copy/透传时限频打点，便于 CamPipelineDiag 确认 true-blend onMain 不再出现。
     private static func logMainPaintPath(_ kind: String) {
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastMainPaintLogAt < 2 { return }
         lastMainPaintLogAt = now
-        NSLog("BXFloatCam paintInPlace main-thread %@ (no blend/ring/hold)", kind as NSString)
+        NSLog("BXFloatCam paintInPlace %@ copy=%lld pass=%lld", kind as NSString, CameraReplaceHooks.paintCopyCount, CameraReplaceHooks.paintPassthroughCount)
     }
 
-    /// 副线程欠帧兜底：hold 上一成功帧；主线程禁止走这条（会定格/假死）。
     @discardableResult
     static func holdLastInPlace(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let dst = CMSampleBufferGetImageBuffer(sampleBuffer) else { return false }
@@ -455,9 +452,10 @@ enum CamBufferPainter {
         if let good = copyLastGood(width: dw, height: dh, format: fmt),
            copyPixels(from: good, to: dst)
         {
+            CameraReplaceHooks.notePaintCopy()
             return true
         }
-        return true // 无 hold 则透传，避免黑屏
+        return false
     }
 
     @discardableResult
@@ -468,94 +466,73 @@ enum CamBufferPainter {
         let dh = CVPixelBufferGetHeight(dst)
         guard dw > 0, dh > 0 else { return false }
 
-        // 定时露真 / 未开替换：透传真摄像头
+        // 定时露真：透传真摄像头
         if CamReplacePolicy.shouldPassThroughRealCamera() {
+            CameraReplaceHooks.notePaintPassthrough()
             return true
         }
 
         let fmt = CVPixelBufferGetPixelFormatType(dst)
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
         let onMain = Thread.isMainThread
-        // 主线程回调（录视频/拍摄页常见）：只拷已准备帧或透传，禁止融合/ring/hold，避免整机卡死。
-        if onMain {
-            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
-               copyPixels(from: prepared, to: dst)
-            {
-                logMainPaintPath("copy-prepared")
-                return true
-            }
-            logMainPaintPath("passthrough")
-            return true
-        }
-        // 真融合：dst 当前就是真机画面；推流帧叠上去 dst = stream*frac + real*(1-frac)
-        // 禁止先 clone 再画（主线程会卡死）。未开融合则 frac=1 等价整帧替换。
-        let blendFrac = CameraReplaceHooks.shouldMuteBlend() ? 1.0 : CamReplacePolicy.streamBlendFraction()
-        let wantBlend = blendFrac < 0.999
+        let hasRing = CamFrameStore.shared.hasFreshFrame
 
         if !loggedFormat {
             loggedFormat = true
-            NSLog("BXFloatCam paint dstFormat=%u %dx%d blend=%d frac=%.2f", fmt, dw, dh, wantBlend ? 1 : 0, Double(blendFrac))
+            NSLog("BXFloatCam paint dstFormat=%u %dx%d main=%d hasRing=%d", fmt, dw, dh, onMain ? 1 : 0, hasRing ? 1 : 0)
         }
 
-        // 取推流帧：
-        // - 主线程：只合入已准备好的最新帧；没有则透传（禁止 ring / 长期 hold 旧帧）
-        // - 副线程：prepared → ring → lastGood
-        let stream: CVPixelBuffer? = {
-            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt) {
-                return prepared
-            }
-            if onMain {
-                return nil
+        // 1) 同格式 prepared → 整帧替换（预览先保证有画；融合暂不在此路径叠黑底）
+        if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
+           copyPixels(from: prepared, to: dst)
+        {
+            if !onMain { rememberGood(prepared, width: dw, height: dh, format: fmt) }
+            CameraReplaceHooks.notePaintCopy()
+            logMainPaintPath("copy-prepared")
+            return true
+        }
+
+        // 2) ring 有帧但 prepared 未命中：同步催同格式（有数没画修复点）
+        if hasRing {
+            _ = CamFrameBlitter.shared.prepareBlocking(
+                width: dw, height: dh, format: fmt,
+                budgetSec: onMain ? 0.008 : 0.012
+            )
+            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
+               copyPixels(from: prepared, to: dst)
+            {
+                if !onMain { rememberGood(prepared, width: dw, height: dh, format: fmt) }
+                CameraReplaceHooks.notePaintCopy()
+                logMainPaintPath("copy-blocking")
+                return true
             }
             if (CACurrentMediaTime() - t0) < budgetSec {
                 let t = AVSyncClock.shared.mediaTime()
-                if let src = CamFrameStore.shared.copyForMediaTimeIfLock(t),
+                if let src = CamFrameStore.shared.copyForMediaTimeIfLock(t) ?? CamFrameStore.shared.copyLatest(),
                    CVPixelBufferGetWidth(src) == dw,
                    CVPixelBufferGetHeight(src) == dh,
-                   CVPixelBufferGetPixelFormatType(src) == fmt
+                   CVPixelBufferGetPixelFormatType(src) == fmt,
+                   copyPixels(from: src, to: dst)
                 {
-                    return src
+                    if !onMain { rememberGood(src, width: dw, height: dh, format: fmt) }
+                    CameraReplaceHooks.notePaintCopy()
+                    logMainPaintPath("copy-ring")
+                    return true
                 }
             }
-            return copyLastGood(width: dw, height: dh, format: fmt)
-        }()
-
-        guard let stream else {
-            return true // 无就绪素材：透传真机（主线程尤其如此）
-        }
-
-        // 取帧后已超软预算：主线程透传；副线程才 hold
-        if (CACurrentMediaTime() - t0) >= budgetSec {
-            if onMain { return true }
-            return holdLastInPlace(sampleBuffer)
-        }
-
-        if wantBlend {
-            // 真融合：在真机 dst 上按占比叠推流（主/副线程同一路径，无 clone）
-            let step = onMain ? 2 : 1 // 主线程隔行加速，观感仍是融合
-            if blendStreamOntoReal(stream: stream, realDst: dst, streamFrac: blendFrac, rowStep: step) {
-                if !loggedBlend {
-                    loggedBlend = true
-                    NSLog("BXFloatCam true-blend on fmt=%u frac=%.2f main=%d step=%d", fmt, Double(blendFrac), onMain ? 1 : 0, step)
-                }
-                // 主线程禁止 retainCopy（额外分配+整帧拷易卡触摸）；副线程才留 hold 底
-                if !onMain, let kept = retainCopy(dst) {
-                    rememberGood(kept, width: dw, height: dh, format: fmt)
-                }
+            // 有素材却拷不上：hold 上一成功帧，禁止透传黑底
+            if holdLastInPlace(sampleBuffer) {
+                logMainPaintPath("hold-last")
                 return true
             }
-            // 融合失败（格式不支持）退回整帧替换
+            logMainPaintPath("fail-has-ring")
+            return false
         }
 
-        if copyPixels(from: stream, to: dst) {
-            if !onMain {
-                rememberGood(stream, width: dw, height: dh, format: fmt)
-            }
-            return true
-        }
-        // 主线程拷失败也透传；副线程才 hold
-        if onMain { return true }
-        return holdLastInPlace(sampleBuffer)
+        // 3) 尚无推流素材：透传真机（开替换后首帧前空窗）
+        CameraReplaceHooks.notePaintPassthrough()
+        logMainPaintPath("passthrough-no-ring")
+        return true
     }
 
     /// 真融合：realDst 当前为真机；写入 stream*frac + real*(1-frac)。支持 BGRA / 420YpCbCr。

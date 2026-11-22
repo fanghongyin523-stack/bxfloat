@@ -138,14 +138,12 @@ enum MicReplaceHooks {
             // 开推流声/静音边沿：装 AU + 只包一次
             BXFloatMicAUInstall()
             wrapMissingOutputsOnce()
-        } else if wasActive {
-            for output in trackedOutputs.allObjects {
-                unwrap(output)
-            }
         }
+        // 关推流声：只卸武装（auMode=0 + injectActive=false），禁止 unwrap
+        // 与视频同口径——拍摄中拆代理易把宿主采集管线弄僵
         retainedProxyCount = retainedProxies.count
         NSLog(
-            "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d retain=%d",
+            "BXFloatMic apply edge mode=%@ was=%d active=%d auMode=%d retain=%d keepProxy=1",
             effective.rawValue,
             wasActive ? 1 : 0,
             want ? 1 : 0,
@@ -248,12 +246,8 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         from connection: AVCaptureConnection
     ) {
         MicReplaceHooks.noteCallback()
-        // 安静窗 / 主线程：只转发。录视频音频回调常在 main，禁止 memcpy 堵 UI。
-        // 配置结束后副线程恢复 paint；不改挂回调队列。
-        if MicReplaceHooks.isInjectActive(),
-           !CameraReplaceHooks.isSessionQuiet(),
-           !Thread.isMainThread
-        {
+        // 与视频同一安静窗：切分段拍配置期内不改音频 buffer，只转发
+        if MicReplaceHooks.isInjectActive(), !CameraReplaceHooks.isSessionQuiet() {
             let mode = MicReplaceHooks.activeMode()
             if MicBufferPainter.paintInPlace(sampleBuffer, mode: mode) {
                 MicReplaceHooks.notePaintOK()

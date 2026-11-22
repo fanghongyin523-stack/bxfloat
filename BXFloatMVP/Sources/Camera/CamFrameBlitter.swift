@@ -31,7 +31,9 @@ final class CamFrameBlitter {
     private var poolH = 0
     private var poolDstFmt: OSType = 0
 
-    private init() {}
+    private init() {
+        queue.setSpecific(key: Self.queueKey, value: 1)
+    }
 
     func setEnabled(_ on: Bool) {
         lock.lock()
@@ -84,6 +86,31 @@ final class CamFrameBlitter {
         }
         return nil
     }
+
+    /// 采集回调里 prepared 未命中、但 ring 已有帧时：同步催一帧同格式，避免透传宿主空/黑 buffer。
+    /// 禁止在 blit 队列上重入；超时则返回（调用方再决定）。
+    @discardableResult
+    func prepareBlocking(width: Int, height: Int, format: OSType, budgetSec: CFTimeInterval = 0.008) -> Bool {
+        guard width > 0, height > 0, format != 0 else { return false }
+        noteTarget(width: width, height: height, format: format)
+        if copyPrepared(width: width, height: height, format: format) != nil { return true }
+        // 已在 blit 队列：直接做，避免 sync 死锁
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            prepareIfNeeded(width: width, height: height, format: format)
+            return copyPrepared(width: width, height: height, format: format) != nil
+        }
+        var ok = false
+        let sem = DispatchSemaphore(value: 0)
+        queue.async {
+            self.prepareIfNeeded(width: width, height: height, format: format)
+            ok = self.copyPrepared(width: width, height: height, format: format) != nil
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + budgetSec)
+        return ok
+    }
+
+    private static let queueKey = DispatchSpecificKey<UInt8>()
 
     var hasPrepared: Bool {
         lock.lock()

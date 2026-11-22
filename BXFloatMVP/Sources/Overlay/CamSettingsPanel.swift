@@ -514,9 +514,10 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         let clock = AVSyncClock.shared
         _ = clock.mediaTime()
         var lines = [
-            "收帧 \(store.frameCount) · 音频包 \(CamAudioStore.shared.packetCount) · AU \(BXFloatMicAUPaintCount())",
+            "进环 \(store.frameCount) · 上屏copy \(CameraReplaceHooks.paintCopyCount) · 透传 \(CameraReplaceHooks.paintPassthroughCount)",
+            "音频包 \(CamAudioStore.shared.packetCount) · AU \(BXFloatMicAUPaintCount())",
             "画面：\(cfg.replaceCameraEnabled ? "开" : "关") · \(clock.avsyncPanelLine())",
-            cfg.replaceCameraEnabled ? "运行中 · \(clock.actionPanelLabel())" : "替换未开（须手动打开才注入）",
+            cfg.replaceCameraEnabled ? "运行中 · \(clock.actionPanelLabel())" : "替换关·代理保留（应见真摄像头）",
         ]
         if cfg.connectionMode == .usb {
             lines.append(Vcu1UsbPuller.shared.statusLine())

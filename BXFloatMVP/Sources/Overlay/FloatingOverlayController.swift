@@ -411,19 +411,24 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
         if pullKey == key {
             return
         }
-        // 换源：先整路停掉另外两路 + 清残帧，再只起当前模式
+
+        // 关替换：只停灌环，不动采集代理（代理由 applyReplaceMode 保持）
+        if !needPull {
+            stopAllMediaSources(reason: "replace-off:\(key)")
+            pullKey = key
+            return
+        }
+
+        // 开替换 / 换源：清残帧后只起当前模式（软启：不再为关替换拆代理）
         stopAllMediaSources(reason: "switch:\(key)")
         pullKey = key
         let gen = sourceGeneration
-        guard needPull else { return }
 
         switch config.connectionMode {
         case .localVideo:
-            // 只跑本地播放器；FF/USB 已在 stopAll 停掉
             LocalVideoPlayer.shared.start(urlString: url)
             NSLog("BXFloatCam source=localVideo gen=%llu", gen)
         case .usb:
-            // VCU1 直连主线：listen 好即可等 PC Connect；不强制再拉 18554 RTSP（避免两套抢流）
             LocalVideoPlayer.shared.stop()
             FFRTSPController.stop()
             Vcu1UsbPuller.shared.start(port: config.vcu1Port)
@@ -432,7 +437,6 @@ final class FloatingOverlayController: CamSettingsPanelDelegate, FloatingBubbleV
                 gen, config.vcu1Port, Vcu1UsbPuller.shared.statusLine()
             )
         case .lan, .manual:
-            // 只跑局域网/手动 URL；本地与 USB 隧道已隔离
             LocalVideoPlayer.shared.stop()
             if url.hasPrefix("rtsp://") || url.lowercased().hasPrefix("http") {
                 FFRTSPController.start(urlString: url)
