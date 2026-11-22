@@ -21,6 +21,78 @@ func BXFloatForwardDidDrop(
     _ connection: AVCaptureConnection
 )
 
+/// 样本回调深度。只在 `didOutput` / `didDrop` 里加减，线程局部。
+/// 拍摄页回调经常在主队列。从那条栈里同步 start/stop 会等自己排空，整页卡住。
+/// 打开相机页的 startRunning 不在回调栈上，必须同步跑完，预览才能接到已经在跑的会话。
+enum CaptureCallbackScope {
+    private static let key = "bxfloat.captureCallbackDepth"
+
+    static func enter() {
+        let n = (Thread.current.threadDictionary[key] as? Int) ?? 0
+        Thread.current.threadDictionary[key] = n + 1
+    }
+
+    static func leave() {
+        let n = (Thread.current.threadDictionary[key] as? Int) ?? 0
+        if n <= 1 {
+            Thread.current.threadDictionary.removeObject(forKey: key)
+        } else {
+            Thread.current.threadDictionary[key] = n - 1
+        }
+    }
+
+    static var isInside: Bool {
+        ((Thread.current.threadDictionary[key] as? Int) ?? 0) > 0
+    }
+}
+
+/// 普通调用（含主线程打开相机页）同步执行原始 start/stop。
+/// 只有当前线程正处在样本回调里才丢到后台：那是拍摄卡死的对死路径。
+/// 同步路径不打 controlHop，也不把 isRunning 提前说成 true。
+enum SessionControlGate {
+    private static let queue: DispatchQueue = {
+        let q = DispatchQueue(label: "com.baixiang.cam.session-control", qos: .userInitiated)
+        q.setSpecific(key: specificKey, value: 1)
+        return q
+    }()
+    private static let specificKey = DispatchSpecificKey<UInt8>()
+
+    static func callOriginal(label: String, _ body: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: specificKey) != nil {
+            body()
+            return
+        }
+        if CaptureCallbackScope.isInside {
+            ShootSurfaceDetector.beginControlHop()
+            NSLog("BXFloatCam %@ hop off callback", label)
+            queue.async {
+                body()
+                ShootSurfaceDetector.endControlHop()
+            }
+            return
+        }
+        body()
+    }
+
+    /// 空闲时留在调用线程，配置括号的时序不变。
+    /// 只有启停还占着锁时才改道，保证排在那次 start/stop 后面。
+    static func runMutationIfBusy(_ body: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: specificKey) != nil {
+            body()
+            return
+        }
+        if !ShootSurfaceDetector.isSessionControlBusy() {
+            body()
+            return
+        }
+        if Thread.isMainThread {
+            queue.async(execute: body)
+            return
+        }
+        queue.sync(execute: body)
+    }
+}
+
 @_silgen_name("BXFloatRestoreSampleBufferDelegate")
 func BXFloatRestoreSampleBufferDelegate(
     _ output: AVCaptureVideoDataOutput,
@@ -34,6 +106,7 @@ func BXFloatRestoreSampleBufferDelegate(
 /// - 安静窗只盖切会话短窗：期内只转发，不 paint / 不 hold（防定格与假死）
 /// - 主线程只合入 blitter 已准备好的最新帧；副线程才 ring/hold 兜底
 /// - stop/start 只改武装标志，不 unwrap、不 apply 重绑
+/// - 只有样本回调栈里的 start/stop 才离开当前线程。打开相机页的 start 同步跑完再返回
 enum CameraReplaceHooks {
     private static var installed = false
     private static let lock = NSLock()
@@ -111,6 +184,14 @@ enum CameraReplaceHooks {
         swizzleSessionCommitConfiguration()
         swizzleSessionStartRunning()
         swizzleSessionStopRunning()
+        swizzleIsRunning()
+        swizzleIsInterrupted()
+        swizzleCanAddInput()
+        swizzleCanAddOutput()
+        swizzleQueuedMutation("addInput:")
+        swizzleQueuedMutation("removeInput:")
+        swizzleQueuedMutation("removeOutput:")
+        swizzleQueuedMutation("setSessionPreset:")
         _ = CamPipelineDiag.shared // 启动主线程卡顿看门狗 + 自动落盘
         NSLog("BXFloatCam hooks installed (true-replace memcpy-only + quiet-window)")
     }
@@ -252,15 +333,36 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject, AnyObject) -> Void = { session, output in
-            if let s = session as? AVCaptureSession {
-                ShootSurfaceDetector.trackSession(s)
+            let invoke = {
+                if let s = session as? AVCaptureSession {
+                    ShootSurfaceDetector.trackSession(s)
+                }
+                typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+                unsafeBitCast(original, to: Fn.self)(session, sel, output)
+                // 只 track。包代理交给后续 setSampleBufferDelegate swizzle（禁止在 addOutput 里 setDelegate）
+                if let vout = output as? AVCaptureVideoDataOutput {
+                    track(vout)
+                }
             }
-            typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
-            unsafeBitCast(original, to: Fn.self)(session, sel, output)
-            // 只 track。包代理交给后续 setSampleBufferDelegate swizzle（禁止在 addOutput 里 setDelegate）
-            if let vout = output as? AVCaptureVideoDataOutput {
-                track(vout)
+            // 启停还在后台时，add 必须排到那次调用后面，不能在主线程上跟会话锁对撞。
+            SessionControlGate.runMutationIfBusy(invoke)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    /// add/remove/setPreset。空闲时仍在调用线程同步执行，配置括号不变。
+    /// 只有 start/stop 还占着会话锁时才改排到同一条后台队列。
+    private static func swizzleQueuedMutation(_ selectorName: String) {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString(selectorName)
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, AnyObject) -> Void = { obj, arg in
+            let invoke = {
+                typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+                unsafeBitCast(original, to: Fn.self)(obj, sel, arg)
             }
+            SessionControlGate.runMutationIfBusy(invoke)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -273,8 +375,11 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 切分段拍会进这里：短安静窗内禁止 paint，让宿主改 session 不被 memcpy 拖死
             markSessionQuiet(seconds: 1.20)
-            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            unsafeBitCast(original, to: Fn.self)(session, sel)
+            let invoke = {
+                typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+                unsafeBitCast(original, to: Fn.self)(session, sel)
+            }
+            SessionControlGate.runMutationIfBusy(invoke)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -285,10 +390,13 @@ enum CameraReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
-            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            unsafeBitCast(original, to: Fn.self)(session, sel)
-            // commit 后再安静一小段，等首批回调过完（勿拉长定格）
-            markSessionQuiet(seconds: 0.28)
+            let invoke = {
+                typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+                unsafeBitCast(original, to: Fn.self)(session, sel)
+                // commit 后再安静一小段，等首批回调过完（勿拉长定格）
+                markSessionQuiet(seconds: 0.28)
+            }
+            SessionControlGate.runMutationIfBusy(invoke)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -301,6 +409,9 @@ enum CameraReplaceHooks {
         let block: @convention(block) (AnyObject) -> Void = { session in
             if let s = session as? AVCaptureSession {
                 ShootSurfaceDetector.trackSession(s)
+                // 类名没命中时，视频会话一开就保持闩锁，停表，直到采集真正结束。
+                // 这里不 setDelegate，也不读 isRunning。
+                ShootSurfaceDetector.noteHardwareCaptureBegan(session: s)
             }
             // 点「开始录制」会进这里。对齐 VCam：只武装标志，start 前后都禁止 setDelegate。
             // 上一版在 start 后 wrapMissingOutputsOnce → 整屏卡死。
@@ -316,8 +427,14 @@ enum CameraReplaceHooks {
                 CamFrameBlitter.shared.setEnabled(true)
             }
             MicReplaceHooks.armBeforeStartRunningIfNeeded()
-            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            unsafeBitCast(original, to: Fn.self)(session, sel)
+            // 不在样本回调里就同步跑完。提前返回会让抖音把预览接到还没 start 的会话上，画面全黑。
+            SessionControlGate.callOriginal(label: "startRunning") {
+                ShootSurfaceDetector.beginHardwareStartCount()
+                typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+                unsafeBitCast(original, to: Fn.self)(session, sel)
+                // 原始 start 返回之后才把「正在启动」收成「已在跑」。
+                ShootSurfaceDetector.noteHardwareCaptureDidStart()
+            }
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -329,11 +446,65 @@ enum CameraReplaceHooks {
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject) -> Void = { session in
             // 只标 sticky，绝不 unwrap（VCam：stop 不拆注入）
+            // 复查必须放在原始 stop 返回之后。停的过程中主线程若读 isRunning，
+            // 会和「stop 等主队列」对死（分段拍摄点下去、黄麦标出现后整页卡住）。
             markSessionQuiet(seconds: 0.32)
             markPauseStickyFromStopRunning()
             MicReplaceHooks.markPauseStickyFromStopRunning()
-            typealias Fn = @convention(c) (AnyObject, Selector) -> Void
-            unsafeBitCast(original, to: Fn.self)(session, sel)
+            SessionControlGate.callOriginal(label: "stopRunning") {
+                ShootSurfaceDetector.noteHardwareCaptureWillStop()
+                typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+                unsafeBitCast(original, to: Fn.self)(session, sel)
+                ShootSurfaceDetector.noteHardwareCaptureEnded()
+            }
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    /// 真属性会拿会话锁。start/stop 还没返回时，主线程再读就会和「等主队列」对死。
+    /// 抖音自己的黄麦标 / 前后台通知也会读它，所以不能只改我们自己的调用点。
+    private static func swizzleIsRunning() {
+        swizzleBusyBoolQuery(selectorName: "isRunning", whenBusy: true)
+    }
+
+    private static func swizzleIsInterrupted() {
+        swizzleBusyBoolQuery(selectorName: "isInterrupted", whenBusy: false)
+    }
+
+    private static func swizzleCanAddInput() {
+        swizzleBusyBoolArgQuery(selectorName: "canAddInput:", whenBusy: true)
+    }
+
+    private static func swizzleCanAddOutput() {
+        swizzleBusyBoolArgQuery(selectorName: "canAddOutput:", whenBusy: true)
+    }
+
+    private static func swizzleBusyBoolQuery(selectorName: String, whenBusy: Bool) {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString(selectorName)
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject) -> Bool = { obj in
+            if ShootSurfaceDetector.isSessionControlBusy() {
+                return whenBusy
+            }
+            typealias Fn = @convention(c) (AnyObject, Selector) -> Bool
+            return unsafeBitCast(original, to: Fn.self)(obj, sel)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private static func swizzleBusyBoolArgQuery(selectorName: String, whenBusy: Bool) {
+        let cls: AnyClass = AVCaptureSession.self
+        let sel = NSSelectorFromString(selectorName)
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        let original = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, AnyObject) -> Bool = { obj, arg in
+            if ShootSurfaceDetector.isSessionControlBusy() {
+                return whenBusy
+            }
+            typealias Fn = @convention(c) (AnyObject, Selector, AnyObject) -> Bool
+            return unsafeBitCast(original, to: Fn.self)(obj, sel, arg)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -377,12 +548,18 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         CameraReplaceHooks.noteCallback()
         let t0 = CACurrentMediaTime()
         let onMain = Thread.isMainThread
         // 对齐 VCam：宿主原回调队列同步处理（禁止改挂 paintQueue 再回灌 main）。
         // 安静窗：只转发、不 paint、不 hold（与 Mic 同口径；长 hold 会定格/假死）。
-        if CameraReplaceHooks.isReplaceActive(), !CameraReplaceHooks.isSessionQuiet() {
+        // 替换关着：原样把真摄像头交回去，禁止用空缓冲盖成黑屏。
+        if CameraReplaceHooks.isReplaceActive(),
+           MediaConfigStore.shared.config.replaceCameraEnabled,
+           !CameraReplaceHooks.isSessionQuiet()
+        {
             let ok = CamBufferPainter.paintInPlace(sampleBuffer)
             if ok { CameraReplaceHooks.notePaintOK() } else { CameraReplaceHooks.notePaintFail() }
         }
@@ -398,6 +575,8 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didDrop sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         BXFloatForwardDidDrop(originalTarget, output, sampleBuffer, connection)
     }
 }

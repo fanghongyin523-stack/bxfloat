@@ -198,13 +198,17 @@ enum MicReplaceHooks {
         guard let method = class_getInstanceMethod(cls, sel) else { return }
         let original = method_getImplementation(method)
         let block: @convention(block) (AnyObject, AVCaptureOutput) -> Void = { obj, output in
-            typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput) -> Void
-            let call = unsafeBitCast(original, to: Fn.self)
-            call(obj, sel, output)
-            if let aout = output as? AVCaptureAudioDataOutput {
-                track(aout)
-                // 不在 addOutput 里 setDelegate；等宿主 setSampleBufferDelegate / 开推流声边沿再包
+            let invoke = {
+                typealias Fn = @convention(c) (AnyObject, Selector, AVCaptureOutput) -> Void
+                let call = unsafeBitCast(original, to: Fn.self)
+                call(obj, sel, output)
+                if let aout = output as? AVCaptureAudioDataOutput {
+                    track(aout)
+                    // 不在 addOutput 里 setDelegate；等宿主 setSampleBufferDelegate / 开推流声边沿再包
+                }
             }
+            // 后装的这个实现会盖住视频侧的 addOutput。启停未完成时同样不能在主线程上加输出。
+            SessionControlGate.runMutationIfBusy(invoke)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
@@ -247,6 +251,8 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         MicReplaceHooks.noteCallback()
         // 安静窗 / 主线程：只转发。录视频音频回调常在 main，禁止 memcpy 堵 UI。
         // 配置结束后副线程恢复 paint；不改挂回调队列。
@@ -270,6 +276,8 @@ final class MicSampleBufferProxy: NSObject, AVCaptureAudioDataOutputSampleBuffer
         didDrop sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        CaptureCallbackScope.enter()
+        defer { CaptureCallbackScope.leave() }
         BXFloatForwardDidDrop(originalTarget, output, sampleBuffer, connection)
     }
 }

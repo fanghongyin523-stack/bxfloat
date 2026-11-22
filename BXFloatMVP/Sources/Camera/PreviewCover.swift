@@ -25,6 +25,13 @@ enum PreviewCover {
             stop()
             return
         }
+        // 拍摄/开直播不新建、不迁盖层 windowScene。
+        if ShootSurfaceDetector.isShootPageLatched()
+            || CameraReplaceHooks.isSessionQuiet()
+            || ShootSurfaceDetector.isCaptureSessionRunning()
+        {
+            return
+        }
 
         let scene =
             window?.windowScene
@@ -89,6 +96,12 @@ enum PreviewCover {
     }
 
     private static func ensureWindow(scene: UIWindowScene) {
+        if ShootSurfaceDetector.isShootPageLatched()
+            || CameraReplaceHooks.isSessionQuiet()
+            || ShootSurfaceDetector.isCaptureSessionRunning()
+        {
+            return
+        }
         if let w = coverWindow, w.windowScene === scene {
             w.frame = scene.coordinateSpace.bounds
             layoutContentFrame()

@@ -76,8 +76,9 @@ final class BXInjectBootstrap: NSObject {
     }
 
     private static func activate(reason: String) {
-        // 只在首次 load。每次 activate 都 load+把默认值 save 回去，会在注入早期 UserDefaults 未就绪时，
-        // 把上次保存的「摄像头替换 / 推流声音」覆盖成关。
+        // 只在首次 load。冷启动把「摄像头替换 / 推流声音」打成关也只在那一次里面。
+        // 延迟 activate / didBecomeActive 再进来不得把用户本局打开的开关打回关，
+        // 也不得在 UserDefaults 未就绪时用默认值覆盖磁盘。
         MediaConfigStore.shared.loadIfNeeded()
         var cfg = MediaConfigStore.shared.config
         if !cfg.overlayEnabled {
@@ -85,11 +86,12 @@ final class BXInjectBootstrap: NSObject {
             MediaConfigStore.shared.save(cfg, postNotification: false)
         }
 
-        // 拍摄/分段拍摄入口已经打标（或会话安静 / 预览层在）：不要 attach。
+        // 拍摄/开直播入口已经打标（或会话安静 / 视频采集在跑）：不要 attach。
         // attach 会改 windowScene / makeKey，预览还在跑但界面假死。首点时预览层可能还没有。
+        // 不扫预览层：延迟 activate 打在窗口风暴上会把主线程拖死。
         let onShoot = ShootSurfaceDetector.isShootPageLatched()
             || CameraReplaceHooks.isSessionQuiet()
-            || ShootSurfaceDetector.isCameraSurfaceVisible()
+            || ShootSurfaceDetector.isCaptureSessionRunning()
         if onShoot {
             FloatingOverlayController.shared.suppressReattachForShoot()
             NSLog("BXFloatInject skip reattach reason=%@ (shoot/quiet)", reason)
