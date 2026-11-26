@@ -411,6 +411,7 @@ final class CamSampleBufferProxy: NSObject, AVCaptureVideoDataOutputSampleBuffer
 /// 开替换且 ring 有帧：必须 copy 上流；禁止对宿主空/黑 buffer 透传（有数没画）。
 enum CamBufferPainter {
     private static var loggedFormat = false
+    private static var loggedBlend = false
     private static let lock = NSLock()
     private static var lastGood: CVPixelBuffer?
     private static var lastGoodW = 0
@@ -476,62 +477,95 @@ enum CamBufferPainter {
         CamFrameBlitter.shared.noteTarget(width: dw, height: dh, format: fmt)
         let onMain = Thread.isMainThread
         let hasRing = CamFrameStore.shared.hasFreshFrame
+        // 真融合：dst 仍是真机；叠 stream*frac + real*(1-frac)。安静窗 mute → frac=1 整帧替换。
+        let blendFrac = CameraReplaceHooks.shouldMuteBlend() ? 1.0 : CamReplacePolicy.streamBlendFraction()
+        let wantBlend = blendFrac < 0.999
 
         if !loggedFormat {
             loggedFormat = true
-            NSLog("BXFloatCam paint dstFormat=%u %dx%d main=%d hasRing=%d", fmt, dw, dh, onMain ? 1 : 0, hasRing ? 1 : 0)
-        }
-
-        // 1) 同格式 prepared → 整帧替换（预览先保证有画；融合暂不在此路径叠黑底）
-        if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
-           copyPixels(from: prepared, to: dst)
-        {
-            if !onMain { rememberGood(prepared, width: dw, height: dh, format: fmt) }
-            CameraReplaceHooks.notePaintCopy()
-            logMainPaintPath("copy-prepared")
-            return true
-        }
-
-        // 2) ring 有帧但 prepared 未命中：同步催同格式（有数没画修复点）
-        if hasRing {
-            _ = CamFrameBlitter.shared.prepareBlocking(
-                width: dw, height: dh, format: fmt,
-                budgetSec: onMain ? 0.008 : 0.012
+            NSLog(
+                "BXFloatCam paint dstFormat=%u %dx%d main=%d hasRing=%d blend=%d frac=%.2f",
+                fmt, dw, dh, onMain ? 1 : 0, hasRing ? 1 : 0, wantBlend ? 1 : 0, Double(blendFrac)
             )
-            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt),
-               copyPixels(from: prepared, to: dst)
-            {
-                if !onMain { rememberGood(prepared, width: dw, height: dh, format: fmt) }
-                CameraReplaceHooks.notePaintCopy()
-                logMainPaintPath("copy-blocking")
-                return true
+        }
+
+        // 取推流帧（对齐 58833cb；保留 prepareBlocking 防有数没画）
+        // 开融合时禁止先 copyPixels 盖掉真机，必须先拿到 stream 再 blend。
+        let stream: CVPixelBuffer? = {
+            if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt) {
+                return prepared
+            }
+            if hasRing {
+                _ = CamFrameBlitter.shared.prepareBlocking(
+                    width: dw, height: dh, format: fmt,
+                    budgetSec: onMain ? 0.008 : 0.012
+                )
+                if let prepared = CamFrameBlitter.shared.copyPrepared(width: dw, height: dh, format: fmt) {
+                    return prepared
+                }
             }
             if (CACurrentMediaTime() - t0) < budgetSec {
                 let t = AVSyncClock.shared.mediaTime()
                 if let src = CamFrameStore.shared.copyForMediaTimeIfLock(t) ?? CamFrameStore.shared.copyLatest(),
                    CVPixelBufferGetWidth(src) == dw,
                    CVPixelBufferGetHeight(src) == dh,
-                   CVPixelBufferGetPixelFormatType(src) == fmt,
-                   copyPixels(from: src, to: dst)
+                   CVPixelBufferGetPixelFormatType(src) == fmt
                 {
-                    if !onMain { rememberGood(src, width: dw, height: dh, format: fmt) }
-                    CameraReplaceHooks.notePaintCopy()
-                    logMainPaintPath("copy-ring")
-                    return true
+                    return src
                 }
             }
-            // 有素材却拷不上：hold 上一成功帧，禁止透传黑底
-            if holdLastInPlace(sampleBuffer) {
-                logMainPaintPath("hold-last")
-                return true
+            return copyLastGood(width: dw, height: dh, format: fmt)
+        }()
+
+        guard let stream else {
+            if hasRing {
+                if holdLastInPlace(sampleBuffer) {
+                    logMainPaintPath("hold-last")
+                    return true
+                }
+                logMainPaintPath("fail-has-ring")
+                return false
             }
-            logMainPaintPath("fail-has-ring")
-            return false
+            CameraReplaceHooks.notePaintPassthrough()
+            logMainPaintPath("passthrough-no-ring")
+            return true
         }
 
-        // 3) 尚无推流素材：透传真机（开替换后首帧前空窗）
+        if wantBlend {
+            // 真融合：在真机 dst 上按占比叠推流（主线程隔行；副线程全行）
+            let step = onMain ? 2 : 1
+            if blendStreamOntoReal(stream: stream, realDst: dst, streamFrac: blendFrac, rowStep: step) {
+                if !loggedBlend {
+                    loggedBlend = true
+                    NSLog(
+                        "BXFloatCam true-blend on fmt=%u frac=%.2f main=%d step=%d",
+                        fmt, Double(blendFrac), onMain ? 1 : 0, step
+                    )
+                }
+                CameraReplaceHooks.notePaintCopy()
+                logMainPaintPath("true-blend")
+                // 主线程禁止 retainCopy（易卡触摸）；副线程留 hold 底
+                if !onMain, let kept = retainCopy(dst) {
+                    rememberGood(kept, width: dw, height: dh, format: fmt)
+                }
+                return true
+            }
+            // 融合失败（格式不支持）退回整帧替换
+            logMainPaintPath("blend-fallback-copy")
+        }
+
+        if copyPixels(from: stream, to: dst) {
+            if !onMain { rememberGood(stream, width: dw, height: dh, format: fmt) }
+            CameraReplaceHooks.notePaintCopy()
+            logMainPaintPath(wantBlend ? "copy-after-blend-fail" : "copy-full")
+            return true
+        }
+        if hasRing, holdLastInPlace(sampleBuffer) {
+            logMainPaintPath("hold-last")
+            return true
+        }
         CameraReplaceHooks.notePaintPassthrough()
-        logMainPaintPath("passthrough-no-ring")
+        logMainPaintPath("passthrough-copy-fail")
         return true
     }
 
