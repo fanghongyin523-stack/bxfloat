@@ -29,6 +29,8 @@ final class AVSyncClock {
     private var frozenForVideo = false
     private var warmupWallStart: CFTimeInterval = 0
     private var lastFreezeLogAt: CFTimeInterval = 0
+    private var lastSkewSnapAt: CFTimeInterval = 0
+    private var skewSnapPending = false
 
     /// 目标呈现滞后：USB 直连「几百毫秒」；略收紧到 ~200ms（勿拉回 1.5～2s）。
     private let targetDelay: Double = 0.20
@@ -39,9 +41,13 @@ final class AVSyncClock {
     private let warmupNeed: Double = 0.10
     private let maxWarmupWall: Double = 0.20
     /// 积压时每拍多跳一点，尽快贴回目标延迟（仍禁止 soft-rate）
-    private let maxDropPerCall: Double = 0.10
+    private let maxDropPerCall: Double = 0.16
     /// 视频墙钟停更：进入恢复期冻音频（对标 audio frozen for video recovery）
     private let videoStallSec: Double = 1.20
+    /// 音画媒体轴 |A−V| 超过此值 → 离散 snap（稳态目标 |skew|<300ms）
+    private let skewSnapThreshold: Double = 0.50
+    /// 两次 skew snap 最小间隔（禁止每帧 snap）
+    private let skewSnapCooldown: Double = 0.55
 
     private(set) var driftResyncCount: Int64 = 0
     private(set) var lastAction: Action = .play
@@ -63,9 +69,12 @@ final class AVSyncClock {
         lastAudioWall = 0
         frozenForVideo = false
         warmupWallStart = 0
+        lastSkewSnapAt = 0
+        skewSnapPending = false
         lastAction = .play
         lastSkewMs = 0
         lastBufferedMs = 0
+        driftResyncCount = 0
         lock.unlock()
     }
 
@@ -88,11 +97,14 @@ final class AVSyncClock {
         // 新视频沿到达：解除恢复期冻音频
         if frozenForVideo { frozenForVideo = false }
         // 稀疏来帧 / 刚解冻：把播头贴到近直播沿，禁止爬 2 秒才切到新画面
-        // （不加深 targetDelay；音频仍由 shouldFreezeAudio 门控）
         if warmedUp, hasAnchor, (wasFrozen || stalledGap) {
             mediaAnchor = max(0, pts - targetDelay)
             wallAnchor = now
             lastAction = .play
+            // 解冻后立刻检查音轴是否已狂奔
+            _ = maybeSnapForSkewLocked(now: now, reason: wasFrozen ? "unfreeze" : "stall-gap")
+        } else {
+            _ = maybeSnapForSkewLocked(now: now, reason: "video-pts")
         }
         lock.unlock()
     }
@@ -127,13 +139,26 @@ final class AVSyncClock {
         lock.lock()
         lastAudioEndPTS = pts
         lastAudioWall = CACurrentMediaTime()
+        // 音沿狂奔时不必等下一视频帧才 snap
+        _ = maybeSnapForSkewLocked(now: lastAudioWall, reason: "audio-pts")
         lock.unlock()
     }
 
-    /// 软接纳窗：与 target_ms≈1000 同簇（对标 VCamTang，禁止自创加深）
-    private let audioSoftLead: Double = 1.00
+    /// 若刚发生过 skew 离散对齐，消费一次标志（供声环 flush/裁超前）。
+    func takeSkewSnapFlag() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if skewSnapPending {
+            skewSnapPending = false
+            return true
+        }
+        return false
+    }
+
+    /// 软接纳窗：与 skew snap 阈值同簇，禁止音轴领先视频到数秒
+    private let audioSoftLead: Double = 0.55
     /// 可暂存等待视频追上的最大超前（failclosed/backlog 有界）
-    private let audioHoldLead: Double = 2.00
+    private let audioHoldLead: Double = 1.20
 
     enum AudioAdmit {
         case accept
@@ -158,6 +183,8 @@ final class AVSyncClock {
         if lastVideoPTS < 0.50 { return .accept }
         let lead = endPTS - lastVideoPTS
         if lead <= audioSoftLead { return .accept }
+        // 超前过多：pending 等视频追上（trimPending 有界）；禁止硬拒挖洞
+        _ = audioHoldLead
         return .pending(lead: lead)
     }
 
@@ -207,8 +234,7 @@ final class AVSyncClock {
             wallAnchor = now
         }
 
-        // 视频真停 / 已处恢复期：冻音频（shouldFreezeAudio）；播头贴 live，避免上屏钉旧帧两秒才切。
-        // 参照 action 主表是 play/drop-old/wait-video；冻音频另打日志，不把 freeze-audio 当主 action。
+        // 视频真停 / 已处恢复期：冻音频；播头贴 live，避免上屏钉旧帧。
         if frozenForVideo || (lastVideoPTS >= 0 && (now - lastVideoWall) > videoStallSec) {
             if !frozenForVideo {
                 frozenForVideo = true
@@ -218,10 +244,16 @@ final class AVSyncClock {
                 }
             }
             lastAction = .waitVideo
-            // 贴直播沿（最新视频 PTS），禁止 return 旧 mediaAnchor 造成「两秒切一帧」放大
             mediaAnchor = max(0, live - criticalLow)
             wallAnchor = now
             refreshMetricsLocked(present: mediaAnchor, live: live)
+            return mediaAnchor
+        }
+
+        // 音画媒体轴互偏过大：同一次离散贴回 live−target（禁止 soft-rate）
+        if maybeSnapForSkewLocked(now: now, reason: "media-tick") {
+            let snappedLive = liveEdgeLocked()
+            refreshMetricsLocked(present: mediaAnchor, live: snappedLive >= 0 ? snappedLive : live)
             return mediaAnchor
         }
 
@@ -232,7 +264,6 @@ final class AVSyncClock {
         var action: Action = .play
 
         if buffered < criticalLow {
-            // 真欠载：钉住播头等源（参照无 hold-last 字符串；面板归入 wait-video）
             lastAction = .waitVideo
             wallAnchor = now
             mediaAnchor = min(mediaAnchor, max(0, live - criticalLow))
@@ -323,6 +354,32 @@ final class AVSyncClock {
         lock.lock()
         defer { lock.unlock() }
         return (epoch, lastVideoPTS, lastAudioEndPTS)
+    }
+
+    /// |A−V|≥阈值且冷却期满 → 播头贴 live−target；返回是否 snap。
+    @discardableResult
+    private func maybeSnapForSkewLocked(now: CFTimeInterval, reason: String) -> Bool {
+        guard warmedUp, hasAnchor else { return false }
+        guard lastVideoPTS >= 0, lastAudioEndPTS >= 0 else { return false }
+        let skew = abs(lastAudioEndPTS - lastVideoPTS)
+        guard skew >= skewSnapThreshold else { return false }
+        guard now - lastSkewSnapAt >= skewSnapCooldown else { return false }
+        let live = liveEdgeLocked()
+        guard live >= 0 else { return false }
+        lastSkewSnapAt = now
+        mediaAnchor = max(0, live - targetDelay)
+        wallAnchor = now
+        lastAction = .dropOld
+        driftResyncCount += 1
+        skewSnapPending = true
+        if (now - lastFreezeLogAt) > 0.45 {
+            lastFreezeLogAt = now
+            NSLog(
+                "[BXFloat][AVSYNC] skew-snap reason=%@ skew=%.0fms live=%.3f target=%.0fms",
+                reason, skew * 1000.0, live, targetDelay * 1000.0
+            )
+        }
+        return true
     }
 
     private func refreshSkewLocked() {

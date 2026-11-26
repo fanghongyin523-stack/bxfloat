@@ -513,9 +513,12 @@ final class CamSettingsPanel: UIView, UIDocumentPickerDelegate, UIImagePickerCon
         let cfg = MediaConfigStore.shared.config
         let clock = AVSyncClock.shared
         _ = clock.mediaTime()
+        let au = BXFloatMicAUPaintCount()
+        let aq = BXFloatMicAQPaintCount()
+        let fpsText = store.recentFps > 0.5 ? String(format: "%.0ffps", store.recentFps) : "--fps"
         var lines = [
-            "进环 \(store.frameCount) · 上屏copy \(CameraReplaceHooks.paintCopyCount) · 透传 \(CameraReplaceHooks.paintPassthroughCount)",
-            "音频包 \(CamAudioStore.shared.packetCount) · AU \(BXFloatMicAUPaintCount())",
+            "进环 \(store.frameCount) (\(fpsText)) · drop-old \(clock.driftResyncCount) · 上屏copy \(CameraReplaceHooks.paintCopyCount)",
+            "音频包 \(CamAudioStore.shared.packetCount) · 注出 AU \(au)+AQ \(aq)=\(au &+ aq) · 透传 \(CameraReplaceHooks.paintPassthroughCount)",
             "画面：\(cfg.replaceCameraEnabled ? "开" : "关") · \(clock.avsyncPanelLine())",
             cfg.replaceCameraEnabled ? "运行中 · \(clock.actionPanelLabel())" : "替换关·代理保留（应见真摄像头）",
         ]

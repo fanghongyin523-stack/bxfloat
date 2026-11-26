@@ -473,7 +473,13 @@ final class Vcu1UsbPuller {
                 if status == noErr, let desc {
                     self.formatDesc = desc
                     self.createDecompression(desc)
-                    NSLog("BXFloatCam VCU1 VT session ready sps=%d pps=%d", sps.count, pps.count)
+                    // Config 到达后收敛 missCfg，避免面板长期停在「缺配置」累计值
+                    let wasMiss = self.diagMissingConfig
+                    self.diagMissingConfig = 0
+                    NSLog(
+                        "BXFloatCam VCU1 VT session ready sps=%d pps=%d missCfgReset=%lld→0",
+                        sps.count, pps.count, wasMiss
+                    )
                 } else {
                     NSLog("BXFloatCam VCU1 format desc err %d", status)
                 }

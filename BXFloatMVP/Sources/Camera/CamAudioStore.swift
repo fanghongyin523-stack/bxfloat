@@ -23,8 +23,8 @@ final class CamAudioStore {
     private let maxPendingSeconds: Double = 0.60
     /// pending 条数上限（对标 VCam pending 计数裁剪）
     private let maxPendingChunks: Int = 24
-    /// 入环活延迟上限：与视频 targetDelay~200ms / maxDelay~480ms 同簇，利于音画同步
-    private let capLiveLatencySec: Double = 0.80
+    /// 入环活延迟上限：与视频 maxDelay~480ms / skew-snap~500ms 同簇，禁止 ≥1s 声环
+    private let capLiveLatencySec: Double = 0.55
     /// 拉环侧最少保留：对齐 AVSync ~200ms，禁止再按 1s 垫高延迟
     private let minLiveLatencySec: Double = 0.20
     private let defaultRate = 48_000
@@ -339,6 +339,28 @@ final class CamAudioStore {
         }
     }
 
+    /// 时钟 skew 离散对齐后：冲 pending，并裁掉相对视频过超前的环内音频（与 snap 同拍）。
+    func onPresentationSkewSnap() {
+        flushPendingAgainstVideo()
+        let videoPTS = AVSyncClock.shared.diagSnapshot().lastVideoPTS
+        guard videoPTS >= 0 else { return }
+        lock.lock()
+        let aheadLimit = videoPTS + 0.35
+        let before = chunks.count
+        chunks.removeAll { chunk in
+            let end = chunk.pts + frameDuration(chunk)
+            return end > aheadLimit
+        }
+        if playhead > aheadLimit {
+            playhead = max(0, videoPTS)
+        }
+        let dropped = before - chunks.count
+        lock.unlock()
+        if dropped > 0 {
+            NSLog("[BXFloat][AUDIO] skew-snap trim ahead dropped=%d video=%.3f", dropped, videoPTS)
+        }
+    }
+
     /// 拉交错 s16：固定延迟连续拷贝 ring（禁止软拉伸/每帧 force）。返回峰。
     @discardableResult
     func pullInterleavedS16(
@@ -370,6 +392,10 @@ final class CamAudioStore {
 
         // 锁外读呈现钟，避免 audio.lock → clock.lock 与视频路径死锁
         let present = AVSyncClock.shared.mediaTime()
+        // media-tick 触发的 skew-snap：在拉环前与时钟同拍裁超前
+        if AVSyncClock.shared.takeSkewSnapFlag() {
+            onPresentationSkewSnap()
+        }
 
         var got = 0
         var seamJump = false
@@ -933,6 +959,10 @@ final class CamAudioStore {
         capLiveLatencyLocked(endPTS: endPTS)
         lock.unlock()
         AVSyncClock.shared.noteAudioEndPTS(endPTS)
+        // 音沿触发的 skew-snap：与视频路径同拍裁超前（take 只消费一次）
+        if AVSyncClock.shared.takeSkewSnapFlag() {
+            onPresentationSkewSnap()
+        }
     }
 
     /// 对标 VCamTang `[AUDIO] backlog capped pending=%ld dropped=%lld`

@@ -22,6 +22,10 @@ final class CamFrameStore {
     private(set) var frameCount: Int64 = 0
     private(set) var lastUpdate = Date.distantPast
     private(set) var lastPTS: Double = -1
+    /// 约 1s 窗估算进环 fps（面板用）
+    private(set) var recentFps: Double = 0
+    private var fpsWindowStart = Date()
+    private var fpsWindowCount: Int64 = 0
 
     private init() {}
 
@@ -41,11 +45,18 @@ final class CamFrameStore {
         width = CVPixelBufferGetWidth(buffer)
         height = CVPixelBufferGetHeight(buffer)
         frameCount += 1
+        fpsWindowCount += 1
+        let fpsElapsed = Date().timeIntervalSince(fpsWindowStart)
+        if fpsElapsed >= 1.0 {
+            recentFps = Double(fpsWindowCount) / max(0.001, fpsElapsed)
+            fpsWindowCount = 0
+            fpsWindowStart = Date()
+        }
         lastUpdate = Date()
         lastPTS = mapped
-        // 丢掉过旧（相对最新超过 ~1.2s），避免收端把端到端延迟撑大
+        // 丢掉过旧（相对最新超过 ~1.0s），与浅缓冲同簇
         if mapped >= 0 {
-            let floorPTS = mapped - 1.20
+            let floorPTS = mapped - 1.00
             while let first = frames.first, first.pts >= 0, first.pts < floorPTS {
                 frames.removeFirst()
                 pruned += 1
@@ -56,8 +67,11 @@ final class CamFrameStore {
         CamPipelineDiag.shared.noteVideoCachePrune(pruned)
         if mapped >= 0 {
             AVSyncClock.shared.noteVideoPTS(mapped)
-            // 视频推进后尝试把超前暂存的音频冲入 ring，避免门控硬拒收造成断音
-            CamAudioStore.shared.flushPendingAgainstVideo()
+            if AVSyncClock.shared.takeSkewSnapFlag() {
+                CamAudioStore.shared.onPresentationSkewSnap()
+            } else {
+                CamAudioStore.shared.flushPendingAgainstVideo()
+            }
         }
     }
 
@@ -125,6 +139,9 @@ final class CamFrameStore {
         lastHeld = nil
         lastPTS = -1
         frameCount = 0
+        recentFps = 0
+        fpsWindowCount = 0
+        fpsWindowStart = Date()
         lock.unlock()
         AVSyncClock.shared.reset()
     }
